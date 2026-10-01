@@ -1,0 +1,76 @@
+# Credentials and local configuration (examples are placeholders only)
+.env
+.env.*
+*.env
+*.env.*
+!config/*.env.example
+*.local.zsh
+*.local.sh
+*secrets*
+*credentials*
+auth.json
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Python environments and caches
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.cache/
+cache/
+.coverage
+htmlcov/
+
+# Machine-local run/session state and databases
+.state/
+state/
+runtime/
+runs/
+sessions/
+*registry*.json*
+*runs*.json*
+*session*.json*
+*.db*
+*.sqlite*
+*.pid
+*.sock
+*.socket
+
+# Logs and generated audit output
+logs/
+log/
+*.log
+*.log.*
+*.out
+*.err
+.secrets.baseline
+
+# External/downloaded binaries and build artifacts
+bin/
+binaries/
+downloads/
+build/
+dist/
+target/
+node_modules/
+*.exe
+*.dll
+*.so
+*.dylib
+*.whl
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+
+# Editor and OS-local state
+.idea/
+.vscode/
+.DS_Store

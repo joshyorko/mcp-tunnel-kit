@@ -1,0 +1,4 @@
+# Direct dependencies pinned to the existing adapter's verified runtime.
+mcp==2.0.0
+httpx==0.28.1
+python-dotenv==1.2.2
