@@ -1,184 +1,148 @@
 # MCP tunnel kit
 
-The existing Friday MCP adapter and launch scripts, imported from the working
-sandbox without moving it or copying its credentials or runtime state.
+Expose the Codex tools from the **already-running** Action Server through the
+**existing** tunnel. The launcher uses tunnel-client's native HTTP upstream:
 
 ```text
-MCP caller → existing tunnel control plane → tunnel-client
-           → stdio Friday adapter → already-running Hermes /p/friday API
+ChatGPT → existing tunnel control plane → tunnel-client
+        → http://127.0.0.1:8087/mcp → Action Server → configured Codex target
 ```
 
-This kit exposes `friday_submit`, `friday_status`, and `friday_stop`. It also
-keeps the separate embedded-stateless-stub launcher for transport experiments.
-It does not start Hermes, provision a workspace, implement MemoryD, or introduce
-another gateway, scheduler, or tunnel implementation.
+Use `payload.target = "local"` for Codex calls. This kit does not start an Action
+Server or Codex app-server, change FRIDAY's targets, or create a registration.
+It does not use Hermes's `/p/friday` route or profile key.
 
-**Validation boundary:** Friday submit/status previously passed a live tunnel
-test, as reported for the original sandbox. Stop has been tested offline only.
-This import's fresh checks use isolated fixtures; no production run was submitted
-or stopped. See [FRIDAY_TEST.md](FRIDAY_TEST.md).
+`launch-codex.zsh` launches the Codex HTTP integration. `codex_mcp_check.py`
+checks local readiness and never starts an MCP server. The former registration
+at `friday_mcp_adapter.py:140`, Friday launcher, tool module, run registry logic,
+profile-key reader and contracts have been retired. Existing ignored local files
+and credentials are not migrated or deleted.
 
-## Files
+## Requirements and setup
 
-- `friday_mcp_adapter.py`: stdio server, settings validation, and private run registry.
-- `friday_tools.py`: submit/status/stop and upstream error/timeout handling.
-- `friday_contract.py`: fixed session and input bounds.
-- `launch-friday.zsh`: attach the adapter to the existing tunnel.
-- `launch-stateless-stub.zsh`: tunnel-client's embedded stateless demo, without Friday.
-- `tests/`: original adapter tests plus offline launcher checks.
-- `config/`: placeholder-only examples, never live configuration.
-- [docs/EXTENDING.md](docs/EXTENDING.md): preserved MemoryD seam and tool rediscovery.
+Run on the Bluefin host, or in the same network namespace as the existing
+loopback Action Server. Container loopback is not the host's loopback.
 
-## Requirements
+- Existing `tunnel-client`, `zsh`, and Python 3.10 or newer.
+- Project-local Python environment from `requirements.txt`, with MCP SDK
+  `2.0.0` and `httpx` `0.28.1`, for readiness checks and tests.
+- Your existing exported `CONTROL_PLANE_API_KEY` and `CONTROL_PLANE_TUNNEL_ID`.
+  The launcher passes the key by environment reference, never as a key value.
 
-Use the same host/network namespace as the already-running Friday API. The
-adapter intentionally accepts only numeric loopback HTTP addresses scoped to
-`/p/friday`; it is not a general-purpose remote-URL relay.
+The inspected binary is `0.0.15+a390c168ff1b2d14e73a95991c186c6aba3ff5a0`.
+Its `run --help` documents `--mcp.server-url` with
+`url=...,channel=...`. No Python forwarding adapter or new daemon is needed.
+Use your existing trusted tunnel-client installation, outside this repository.
 
-You need:
-
-- Python 3.10 or newer. This import was exercised with Python 3.14.7.
-- `zsh` on `PATH` (or set `ZSH_BIN` for the test runner).
-- Python packages in `requirements.txt`, pinned to the existing adapter's runtime.
-- A separately installed, compatible `tunnel-client`. No downloaded binary is
-  included. The inspected installation reported version
-  `0.0.15+a390c168ff1b2d14e73a95991c186c6aba3ff5a0` and supports
-  `--mcp.command`, `--embedded-stateless-mcp-stub`, and loopback ephemeral health.
-- Your existing control-plane key and tunnel ID, and Friday's existing
-  profile-specific `API_SERVER_KEY`. The two keys serve different purposes.
-- An existing tunnel/connector registration and a running Hermes listener that
-  serves the Friday profile route. This kit does not configure either service.
-
-Obtain the external tunnel-client binary through your existing trusted
-installation process; inspect `tunnel-client --version` and `tunnel-client run
---help` before substituting another release. Do not copy a downloaded executable
-into this repository. There is no Docker or Podman dependency in this kit.
-
-### Install Python dependencies
-
-From a fresh checkout:
-
-```sh
-git clone https://github.com/joshyorko/mcp-tunnel-kit.git
-cd mcp-tunnel-kit
-python3 -m venv .venv
-.venv/bin/python -m pip install -r requirements.txt
-```
-
-With `uv`, the equivalent installation is:
+For a checkout without a prepared environment, use user-scoped `uv`:
 
 ```sh
 uv venv .venv
 uv pip install --python .venv/bin/python -r requirements.txt
 ```
 
-The launcher defaults to this checkout's `.venv/bin/python`, not an interpreter
-inside a particular Hermes installation. `FRIDAY_BRIDGE_PYTHON` is an explicit
-override and must point to an executable with these dependencies installed.
-Use checkout/interpreter paths without spaces or commas for the inherited
-`--mcp.command` encoding.
+If `uv` is unavailable, create a project `.venv` with Python's `venv` module and
+install `requirements.txt` there. Do not install packages into the Bluefin base OS.
 
-## Required local configuration
+## Configuration
 
-Copy `config/launcher.example.zsh` to `launcher.local.zsh`, restrict it to your
-user (`chmod 600 launcher.local.zsh`), and edit the placeholders locally.
-Never launch with placeholder values. The local copy is ignored by Git.
+Keep using the shell configuration that already supplies your existing tunnel
+credentials and ID. `config/launcher.example.zsh` is an optional placeholder-only
+example; `launcher.local.zsh` remains ignored. Do not overwrite existing local
+configuration with placeholders. The launcher does not automatically source it.
 
-- `CONTROL_PLANE_API_KEY`: existing tunnel control-plane credential, exported
-  only in the launching environment; the command passes an `env:` reference.
-- `CONTROL_PLANE_TUNNEL_ID`: the existing registered tunnel ID, not a new one
-  invented by this kit.
-- `TUNNEL_CLIENT_BIN`: optional executable override; default
-  `$HOME/.local/bin/tunnel-client` for both launchers.
-- `FRIDAY_API_ENV_FILE`: protected file containing Friday's `API_SERVER_KEY`;
-  default `$HOME/.hermes/profiles/friday/.env`. The launcher clears any inherited
-  `FRIDAY_API_KEY` so the adapter reads this explicitly selected profile file.
-  It reads only `API_SERVER_KEY`, without loading other entries or interpolation.
-- `FRIDAY_API_BASE_URL`: optional override for your local listener; default
-  `http://127.0.0.1:8642/p/friday`. Preserve the `/p/friday` route and loopback
-  address. `localhost`, non-loopback hosts, URL credentials, query strings, and
-  fragments are rejected.
-- `FRIDAY_HTTP_TIMEOUT_SECONDS`: optional timeout; default 30, greater than zero
-  and no greater than 120.
-- `FRIDAY_RUN_REGISTRY`: optional persistent private path; default
-  `$XDG_STATE_HOME/friday-chatgpt-tunnel/runs.json`, or
-  `$HOME/.local/state/friday-chatgpt-tunnel/runs.json` without `XDG_STATE_HOME`.
+| Variable | Purpose/default |
+| --- | --- |
+| `CONTROL_PLANE_API_KEY` | Existing control-plane credential, exported privately |
+| `CONTROL_PLANE_TUNNEL_ID` | Existing registered tunnel ID, unchanged |
+| `TUNNEL_CLIENT_BIN` | Defaults to `$HOME/.local/bin/tunnel-client` |
+| `CODEX_MCP_URL` | Defaults to `http://127.0.0.1:8087/mcp` |
+| `CODEX_CHECK_PYTHON` | Defaults to this checkout's `.venv/bin/python` |
 
-`config/friday-api.env.example` shows the single credential field using a
-placeholder. Prefer the existing protected profile file; creating a new local
-file does not require changing or rotating the existing credential.
+The URL must be numeric loopback HTTP with the exact `/mcp` path. URL credentials,
+queries, fragments, whitespace and commas are rejected without echoing the URL.
+All `FRIDAY_*` settings are unused by this Codex launch path.
 
-Do not source or copy the entire production profile environment into the kit.
-Keep credentials, local settings, run registries, session state, logs, databases,
-virtual environments, downloaded binaries, and caches out of commits.
+## Tool contract and authority
 
-## Offline checks
+Native HTTP forwarding exposes the Action Server's actual tool names, input and
+output schemas, annotations, structured/text results, metadata and MCP errors.
+There is no fixed local tool registration or generic-message translation.
+Discovery remains upstream-owned, so additional tools appear in a fresh catalog.
+
+The inspected live catalog contains 20 Codex tools, including `discover_threads`,
+`read_thread`, `list_thread_turns`, `list_thread_items`, `start_turn`, `steer_turn`
+and `interrupt_turn`. Exact CWD, thread and turn identifiers remain caller inputs
+validated by the Action Server. The upstream target allowlist and native
+permission/approval handling remain authoritative. This kit does not rewrite
+`payload`, inject a target, relax guards, or elevate permissions. Use `local`;
+other configured targets remain in the original schemas without config changes.
+
+The live Action Server currently publishes conservative annotations even for its
+read operations: `readOnlyHint=false`, `destructiveHint=true`. They are forwarded
+unchanged. Do not infer that every exposed operation is harmless.
+
+## Verify before the handoff
 
 ```zsh
-source ./launcher.local.zsh
-zsh -n ./launch-friday.zsh
-zsh -n ./launch-stateless-stub.zsh
-./launch-friday.zsh --check
-./launch-stateless-stub.zsh --check
+./launch-codex.zsh --check
+.venv/bin/python codex_mcp_check.py --probe --cwd "$PWD"
 .venv/bin/python -m unittest discover -s tests -v
+zsh -n launch-codex.zsh
+zsh -n launch-stateless-stub.zsh
 ```
 
-`--check` validates local prerequisites/settings only. It does not contact the
-API or start a tunnel, and it is not evidence of credentials being accepted,
-upstream reachability, or live tool discovery. The tests use temporary fixture
-credentials and registries, a loopback fake HTTP API, and a fixture tunnel binary.
-They do not start or restart the real Hermes service or tunnel.
+`--check` validates offline prerequisites/settings only. It sends no MCP request
+and starts no tunnel. `--probe` uses the pinned SDK to initialize local MCP,
+list the catalog with pagination, and call `discover_threads` on target `local`
+with the exact CWD and limit 1. If a matching thread exists, it calls `read_thread`
+with `include_turns=false`. It never resumes, starts, steers or interrupts a
+thread, and omits thread contents and raw upstream failures from output.
+A successful empty discovery page is still a valid read-only thread query.
 
-## Launch
+Tests use isolated loopback fixtures. Native forwarding cases run the installed
+binary against a fake control plane with a dummy ID and fixture credential;
+production environment/configuration is not inherited. They never connect to
+OpenAI's control plane or the running Action Server. These cases skip explicitly
+when tunnel-client is absent. Install it or set `TUNNEL_CLIENT_BIN` to include
+those checks. See [CODEX_TEST.md](CODEX_TEST.md) for the evidence boundary.
 
-When you deliberately choose to run this checkout, source the local configuration
-in a `zsh` session and select **one** launcher:
+## Foreground handoff, same tunnel
 
-```zsh
-source ./launcher.local.zsh
-./launch-friday.zsh
-```
+After fetching the pushed version with a fast-forward-only update, run the
+preflight and local probe above in the checkout. Keep the old client running
+until the replacement code is ready.
 
-For the embedded stateless transport demo instead:
+If the old foreground client is still running, press **Ctrl-C in that client's
+own terminal**, and wait for it to exit. This stops only that client. Do not use
+`pkill`, stop the Action Server, or start a second client on the same tunnel ID.
 
-```zsh
-source ./launcher.local.zsh
-./launch-stateless-stub.zsh
-```
+In a zsh terminal that already has your existing tunnel variables exported,
+launch `./launch-codex.zsh` from the updated checkout. If those variables are
+kept in your ignored `launcher.local.zsh`, source that existing file first.
+Do not enter credential values in command arguments or enable shell tracing.
+The launcher runs in the foreground and binds health/admin to loopback on an
+ephemeral port. It does not own the upstream services' lifecycles.
 
-Both run in the foreground and bind health/admin to loopback with an ephemeral
-port. The stub launcher does not start Friday or MemoryD. The Friday launcher
-uses the existing API and does not own its lifecycle.
+## Reconnect ChatGPT and verify the live catalog
 
-**Do not launch a second client for a tunnel ID already used by the sandbox.**
-A migration requires an explicitly planned handoff. Publishing this repository
-does not perform that handoff or alter the existing installation. Keep one
-adapter process per private run registry; atomic file replacement is not a
-cross-process synchronization scheme.
+After the replacement client is running, delete/reconnect the ChatGPT app using
+the **same tunnel**. A fresh MCP initialization and `tools/list` must show Codex
+tools such as `discover_threads` and `read_thread`, with their typed `payload`
+inputs. `read_thread` requires `target`, `cwd`, and `thread_id`; turn mutations
+also require exact turn identifiers. `friday_submit`, `friday_status` and
+`friday_stop` must no longer be present.
 
-## Shutdown and run cancellation
+Inspect the app's refreshed tool metadata, or request a fresh tool listing if
+the consumer exposes it. Then ask it to call only `discover_threads` with
+`{"payload":{"target":"local","cwd":"<exact absolute checkout path>","limit":1}}`.
+Use a path from your local probe. Compare its native response with local results;
+do not use resume/start/steer/interrupt tools to test discovery.
 
-Press **Ctrl-C in the foreground launcher terminal** to shut down that tunnel
-client and its adapter. Do not use a broad process-kill command. Closing the
-tunnel does not stop Hermes or prove that submitted Friday runs were cancelled.
+Local readiness and loopback fixture forwarding are tested here. Credential
+acceptance, routing through your existing live tunnel, and ChatGPT catalog
+refresh remain **live verification after your launch and reconnect**. Neither
+publishing code nor a local probe proves that remote gate.
 
-For one known run, `friday_stop(run_id)` requests cancellation. A `stopping`
-response is acknowledgment, **not terminal execution proof**. Read
-`friday_status(run_id)` until the API reports a terminal state. Unknown/unrecorded
-run IDs are rejected before an upstream call. Ambiguous POST timeouts are not
-retried automatically; preserve the caller's request ID and resolve acceptance
-before deciding on another submission.
-
-## Extending and rediscovering tools
-
-`build_server` registers the Friday module through `register_friday_tools`; that
-existing per-module registration call is the extension seam. MemoryD is not
-implemented. Adding a future module must preserve the Friday tools and their
-profile/run restrictions; do not add a parallel gateway for it.
-
-A changed source file is not a changed caller catalog. During an authorized
-handoff, restart only the adapter/tunnel instance that needs the new source,
-then use a fresh MCP initialization and `tools/list` to verify the actual tool
-names and schemas. Refresh/reconnect the consumer if it retains old metadata.
-Do not bounce the shared Hermes gateway merely to refresh the tunnel catalog.
-See [docs/EXTENDING.md](docs/EXTENDING.md) for the explicit verification sequence.
+The separate `launch-stateless-stub.zsh` remains a transport experiment. Do not
+use it for this Codex handoff or concurrently on the same tunnel ID.

@@ -25,8 +25,8 @@ class LauncherOfflineTests(unittest.TestCase):
         self.bundle = self.base / 'bundle'
         self.bundle.mkdir()
         for name in (
-            'launch-friday.zsh', 'launch-stateless-stub.zsh',
-            'friday_mcp_adapter.py', 'friday_contract.py', 'friday_tools.py',
+            'launch-codex.zsh', 'launch-stateless-stub.zsh',
+            'codex_mcp_check.py',
         ):
             shutil.copy2(ROOT / name, self.bundle / name)
         venv_bin = self.bundle / '.venv' / 'bin'
@@ -40,22 +40,21 @@ class LauncherOfflineTests(unittest.TestCase):
             '#!' + sys.executable + '\n'
             'import json, os, sys\n'
             'from pathlib import Path\n'
+            'if sys.argv[1:] == ["run", "--help"]:\n'
+            '    print("--mcp.server-url" if os.environ.get("FIXTURE_HTTP_SUPPORT", "1") == "1" else "--mcp.command")\n'
+            '    sys.exit(0)\n'
             'Path(os.environ["TUNNEL_TEST_MARKER"]).write_text(json.dumps(sys.argv[1:]))\n'
         )
         self.client.chmod(0o700)
         fixture_bin = self.base / 'bin'
         fixture_bin.mkdir()
         (fixture_bin / 'tunnel-client').symlink_to(self.client)
-        profile = self.base / 'friday-api.env'
-        profile.write_text('API_SERVER_KEY=REPLACE_ME_OFFLINE_FIXTURE\n')
         self.env = {
             'PATH': str(fixture_bin) + os.pathsep + os.environ.get('PATH', os.defpath),
             'HOME': str(self.base / 'home'),
             'TMPDIR': str(self.base),
             'CONTROL_PLANE_API_KEY': 'REPLACE_ME_OFFLINE_FIXTURE',
             'CONTROL_PLANE_TUNNEL_ID': 'REPLACE_ME_OFFLINE_TUNNEL_ID',
-            'FRIDAY_API_ENV_FILE': str(profile),
-            'FRIDAY_RUN_REGISTRY': str(self.base / 'runs.json'),
             'TUNNEL_CLIENT_BIN': str(self.client),
             'TUNNEL_TEST_MARKER': str(self.marker),
         }
@@ -66,10 +65,10 @@ class LauncherOfflineTests(unittest.TestCase):
             cwd=self.bundle, env=self.env, capture_output=True, text=True, timeout=5,
         )
 
-    def test_friday_check_uses_checkout_venv_without_invoking_tunnel(self):
-        result = self.run_launcher('launch-friday.zsh', '--check')
+    def test_codex_check_uses_checkout_venv_without_invoking_tunnel(self):
+        result = self.run_launcher('launch-codex.zsh', '--check')
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('no API request or tunnel was started', result.stdout)
+        self.assertIn('no MCP request or tunnel was started', result.stdout)
         self.assertFalse(self.marker.exists())
         self.assertFalse((self.base / 'runs.json').exists())
 
@@ -80,23 +79,25 @@ class LauncherOfflineTests(unittest.TestCase):
         self.assertFalse(self.marker.exists())
 
     def test_launchers_reject_unknown_arguments_before_tunnel(self):
-        for name in ('launch-friday.zsh', 'launch-stateless-stub.zsh'):
+        for name in ('launch-codex.zsh', 'launch-stateless-stub.zsh'):
             with self.subTest(name=name):
                 result = self.run_launcher(name, '--invalid-option')
                 self.assertEqual(result.returncode, 2, result.stderr)
                 self.assertIn('usage:', result.stderr)
                 self.assertFalse(self.marker.exists())
 
-    def test_friday_launch_uses_env_reference_and_stdio_adapter(self):
-        result = self.run_launcher('launch-friday.zsh')
+    def test_codex_launch_uses_native_codex_http_without_profile_key(self):
+        result = self.run_launcher('launch-codex.zsh')
         self.assertEqual(result.returncode, 0, result.stderr)
         arguments = json.loads(self.marker.read_text())
         self.assertEqual(arguments[:3], ['run', '--control-plane.api-key', 'env:CONTROL_PLANE_API_KEY'])
         self.assertNotIn(self.env['CONTROL_PLANE_API_KEY'], arguments)
         self.assertIn('127.0.0.1:0', arguments)
-        command = arguments[arguments.index('--mcp.command') + 1]
-        self.assertIn(str(self.bundle / '.venv' / 'bin' / 'python'), command)
-        self.assertIn('friday_mcp_adapter.py,channel=main', command)
+        self.assertNotIn('--mcp.command', arguments)
+        self.assertEqual(arguments[arguments.index('--mcp.server-url') + 1],
+                         'url=http://127.0.0.1:8087/mcp,channel=main')
+        self.assertEqual(arguments[arguments.index('--control-plane.tunnel-id') + 1],
+                         self.env['CONTROL_PLANE_TUNNEL_ID'])
 
     def test_stateless_launch_uses_configured_binary_and_embedded_stub(self):
         result = self.run_launcher('launch-stateless-stub.zsh')
@@ -108,8 +109,29 @@ class LauncherOfflineTests(unittest.TestCase):
         self.assertIn('127.0.0.1:0', arguments)
         self.assertNotIn('--mcp.command', arguments)
 
-    def test_adapter_has_portable_shebang(self):
-        self.assertEqual((ROOT / 'friday_mcp_adapter.py').read_text().splitlines()[0], '#!/usr/bin/env python3')
+    def test_codex_url_rejects_secrets_remote_hosts_and_mapping_injection(self):
+        for url in ('http://user:secret@127.0.0.1:8087/mcp',
+                    'http://example.com/mcp', 'http://127.0.0.1:8087/p/friday',
+                    'http://127.0.0.1:8087/mcp?key=secret',
+                    'http://127.0.0.1:8087/mcp,channel=other'):
+            with self.subTest(url=url):
+                self.env['CODEX_MCP_URL'] = url
+                result = self.run_launcher('launch-codex.zsh')
+                self.assertEqual(result.returncode, 2)
+                self.assertNotIn('secret', result.stderr)
+                self.assertFalse(self.marker.exists())
+
+    def test_missing_control_plane_credentials_never_invokes_tunnel(self):
+        self.env.pop('CONTROL_PLANE_API_KEY')
+        result = self.run_launcher('launch-codex.zsh')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.marker.exists())
+
+    def test_incompatible_tunnel_client_fails_before_launch(self):
+        self.env['FIXTURE_HTTP_SUPPORT'] = '0'
+        result = self.run_launcher('launch-codex.zsh', '--check')
+        self.assertEqual(result.returncode, 2)
+        self.assertFalse(self.marker.exists())
 
 
 if __name__ == '__main__':

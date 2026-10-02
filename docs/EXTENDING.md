@@ -1,33 +1,30 @@
-# MemoryD seam and MCP tool rediscovery
+# Upstream tool ownership and rediscovery
 
-`friday_mcp_adapter.py` retains the `build_server` registration seam: it calls
-`register_friday_tools` for the existing Friday module, with a comment reserving
-an adjacent future module. There is no MemoryD implementation, loader, service,
-router, or configuration added in this import.
+The Action Server at `CODEX_MCP_URL` owns the tool catalog. `launch-codex.zsh`
+binds the existing `main` channel with native `--mcp.server-url` HTTP forwarding.
+`codex_mcp_check.py` is a readiness checker, not a registration seam. The
+former Friday registration and generic-message bridge have been retired.
 
-A later MemoryD module can register its approved tools with the same MCP server.
-Keep its configuration/authority separate from Friday's and preserve all three
-Friday tool names, the fixed profile/session, run-ID registry restrictions, and
-upstream error semantics. Add module/discovery tests before enabling new tools;
-that work is outside this publication.
+Add or change Codex tools in the owning Action Server package, with its own
+schemas, permission checks and exact workstream guards. No such package change
+is part of this kit. MemoryD is not implemented, and this kit does not silently
+combine tool catalogs or introduce a second gateway.
 
-## Rediscovery after adding a tool
+For a catalog change, complete the local probe and fixture tests first. During
+an operator-controlled handoff, stop only the affected foreground tunnel client
+and launch the updated version on the same ID. Leave shared upstream services
+running unless their owner separately requires an update.
 
-1. Run the offline suite and explicitly check the expected discovery schemas.
-2. Plan a handoff for the specific foreground tunnel/adapter process. Do not
-   start a competing tunnel client or restart the shared Hermes gateway.
-3. During the authorized handoff, restart the affected adapter/tunnel so startup
-   registration uses the new code.
-4. Establish a fresh MCP session, initialize it, and issue `tools/list` against
-   the actual tunnel. Follow pagination if a catalog grows. Verify names and
-   input schemas; endpoint continuity does not prove catalog freshness.
-5. Refresh or reconnect a consuming app that retained old tool metadata, and
-   verify its rediscovered tools before attempting the new call.
+Reconnect the consumer, establish fresh MCP initialization and `tools/list`,
+follow pagination if present, and inspect names, input/output schemas and
+annotations. Then make one read-only `discover_threads` call using target
+`local` and an exact known worktree CWD. Do not resume, start, steer or interrupt
+threads to validate discovery. Endpoint continuity alone does not prove the
+consumer's cached catalog refreshed.
 
-The protocol provides `tools/list` and, when supported/declared, a
-`notifications/tools/list_changed` notification. This kit does not claim runtime
-hot registration or guaranteed automatic client refresh. Its offline discovery
-check is not evidence that a particular remote consumer refreshed its cache.
+This kit does not claim hot registration or guaranteed automatic consumer
+refresh. See README's reconnect procedure and CODEX_TEST.md for the distinction
+between local readiness and end-to-end verification.
 
 Protocol reference:
 https://modelcontextprotocol.io/specification/2025-11-25/server/tools

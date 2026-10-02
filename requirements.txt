@@ -1,4 +1,3 @@
-# Direct dependencies pinned to the existing adapter's verified runtime.
+# Pinned MCP v2 client for local readiness checks and fixture tests.
 mcp==2.0.0
 httpx==0.28.1
-python-dotenv==1.2.2
