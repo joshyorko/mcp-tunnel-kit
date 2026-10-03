@@ -1,5 +1,10 @@
 # Upstream tool ownership and rediscovery
 
+The normal tunnel now reaches Executor. Import the Action Server as app `codex`
+and discover its tools with `tools.search` through Executor's compact MCP
+surface. See [Executor registration and acceptance](EXECUTOR.md). The direct
+catalog procedure below applies only to the inactive break-glass launcher.
+
 The Action Server at `CODEX_MCP_URL` owns the tool catalog. `launch-codex.zsh`
 binds the existing `main` channel with native `--mcp.server-url` HTTP forwarding.
 `codex_mcp_check.py` is a readiness checker, not a registration seam. The

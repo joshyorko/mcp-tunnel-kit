@@ -20,7 +20,7 @@ import sys
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlsplit
 
-DEFAULT_MCP_URL = "http://127.0.0.1:8087/mcp"
+DEFAULT_MCP_URL = "http://127.0.0.1:8088/mcp"
 
 
 class ProbeError(Exception):
@@ -162,4 +162,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

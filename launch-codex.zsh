@@ -1,4 +1,6 @@
 #!/usr/bin/env zsh
+# Inactive direct Codex break-glass path. Stop the Executor-facing tunnel first.
+unsetopt XTRACE VERBOSE
 set -euo pipefail
 
 typeset -r SCRIPT_DIR="${0:A:h}"
@@ -30,7 +32,7 @@ fi
   exit 2
 }
 
-export CODEX_MCP_URL="${CODEX_MCP_URL:-http://127.0.0.1:8087/mcp}"
+export CODEX_MCP_URL="${CODEX_MCP_URL:-http://127.0.0.1:8088/mcp}"
 "$CHECK_PYTHON" "$CHECK_SCRIPT" --check-config
 
 if [[ "${1:-}" == "--check" && $# == 1 ]]; then
@@ -38,8 +40,9 @@ if [[ "${1:-}" == "--check" && $# == 1 ]]; then
   exit 0
 fi
 
+"$CHECK_PYTHON" "$SCRIPT_DIR/executor_mcp.py" --check-tunnel-ownership
+
 exec "$TUNNEL_CLIENT" run \
   --control-plane.api-key env:CONTROL_PLANE_API_KEY \
-  --control-plane.tunnel-id "$CONTROL_PLANE_TUNNEL_ID" \
   --health.listen-addr 127.0.0.1:0 \
   --mcp.server-url "url=$CODEX_MCP_URL,channel=main"

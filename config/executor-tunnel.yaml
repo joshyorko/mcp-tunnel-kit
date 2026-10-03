@@ -1,0 +1,13 @@
+config_version: 1
+control_plane:
+  api_key: env:CONTROL_PLANE_API_KEY
+health:
+  listen_addr: 127.0.0.1:0
+log:
+  level: info
+mcp:
+  server_urls:
+    - channel: main
+      url: http://127.0.0.1:4312/mcp
+  extra_headers:
+    Authorization: env:EXECUTOR_AUTH_HEADER
