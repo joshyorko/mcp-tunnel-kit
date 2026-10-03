@@ -5,6 +5,7 @@ health:
   listen_addr: 127.0.0.1:8080
 log:
   level: error
+  format: json
   http_raw_unsafe: false
 mcp:
   server_urls:
