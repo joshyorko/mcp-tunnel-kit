@@ -1,0 +1,9 @@
+# Acceptance only. The production file consumes the separately published image.
+services:
+  codex-action-server:
+    image: codex-action-server-local:acceptance
+    build:
+      context: ${CAS_SOURCE_PATH:-../codex-action-server}
+      dockerfile: Containerfile
+  app-ready:
+    image: codex-action-server-local:acceptance

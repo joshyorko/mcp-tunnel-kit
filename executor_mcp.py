@@ -50,15 +50,21 @@ def write_private(path: Path, text: str) -> None:
 def refuse_live_tunnel() -> None:
     # Refuse any local client conservatively, without reading or printing its secrets.
     configured = Path(os.environ.get("TUNNEL_CLIENT_BIN", str(Path.home() / ".local/bin/tunnel-client"))).resolve()
+    message = "A tunnel-client is already running. Stop its foreground pane before launching another client."
     for process in Path("/proc").iterdir():
         if not process.name.isdigit():
             continue
+        try:
+            if (process / "exe").samefile(configured):
+                raise SetupError(message)
+        except (FileNotFoundError, PermissionError, ProcessLookupError):
+            pass  # Keep the argv-name fallback when executable metadata is unavailable.
         try:
             arguments = (process / "cmdline").read_bytes().split(b"\0")
             if any(Path(os.fsdecode(arg)).name == "tunnel-client"
                    or (arg and not arg.startswith(b"-") and Path(os.fsdecode(arg)).resolve() == configured)
                    for arg in arguments[:2]):
-                raise SetupError("A tunnel-client is already running. Stop its foreground pane before launching another client.")
+                raise SetupError(message)
         except (FileNotFoundError, PermissionError, ProcessLookupError):
             continue
 

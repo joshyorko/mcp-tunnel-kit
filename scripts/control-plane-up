@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set +x
+set -euo pipefail
+cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
+mode=up
+case "${1:-}" in
+  "") ;;
+  --first-run) mode=first-run ;;
+  --secrets) mode=secrets ;;
+  --check) mode=check ;;
+  *) printf '%s\n' 'usage: scripts/control-plane-up [--first-run|--secrets|--check]' >&2; exit 2 ;;
+esac
+[[ $# -le 1 ]] || { printf '%s\n' 'Use one mode only.' >&2; exit 2; }
+exec "${CONTROL_PLANE_PYTHON:-python3}" scripts/compose_control.py "$mode"

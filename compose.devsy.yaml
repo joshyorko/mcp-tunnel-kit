@@ -1,0 +1,24 @@
+# Optional existing Devsy operator state. No credentials or state are created.
+services:
+  codex-action-server:
+    environment:
+      DEVSY_HOME: ${DEVSY_HOME:?Set the existing Devsy configuration parent directory}
+    volumes:
+      - type: bind
+        source: ${DEVSY_CONFIG_FILE:?Set the existing Devsy config.yaml path}
+        target: ${DEVSY_CONFIG_FILE:?Set the existing Devsy config.yaml path}
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${DEVSY_CONTEXT_DIR:?Set the selected existing context directory}
+        target: ${DEVSY_CONTEXT_DIR:?Set the selected existing context directory}
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${DEVSY_KUBECONFIG_FILE:?Set the existing provider-referenced kubeconfig file}
+        target: ${DEVSY_KUBECONFIG_FILE:?Set the existing provider-referenced kubeconfig file}
+        read_only: true
+        bind:
+          create_host_path: false

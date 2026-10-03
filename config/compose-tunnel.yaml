@@ -1,0 +1,15 @@
+config_version: 1
+control_plane:
+  api_key: file:/run/secrets/control-plane-api-key
+health:
+  listen_addr: 127.0.0.1:8080
+log:
+  level: error
+  format: json
+  http_raw_unsafe: false
+mcp:
+  server_urls:
+    - channel: main
+      url: http://executor:4312/mcp?elicitation_mode=browser
+  extra_headers:
+    Authorization: file:/run/secrets/executor-auth-header
