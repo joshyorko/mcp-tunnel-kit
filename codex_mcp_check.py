@@ -10,6 +10,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 import ipaddress
+import importlib
+import importlib.metadata
 import json
 import logging
 import os
@@ -136,6 +138,14 @@ def main() -> int:
             raise ValueError("Probe cwd must be an absolute path without parent traversal")
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
+        return 2
+    try:
+        for package, expected in {"mcp": "2.0.0", "httpx": "0.28.1"}.items():
+            if importlib.metadata.version(package) != expected:
+                raise ValueError("version mismatch")
+            importlib.import_module(package)
+    except (ImportError, ValueError, importlib.metadata.PackageNotFoundError):
+        print("Codex MCP dependencies unavailable or incompatible; install requirements.txt in the check Python environment.", file=sys.stderr)
         return 2
     if args.check_config:
         print("Codex MCP configuration OK; no MCP request made.", file=sys.stderr)

@@ -1,0 +1,24 @@
+[Unit]
+Description=Secure MCP Tunnel for standalone Codex API
+Requires=codex-action-server.service
+After=codex-action-server.service
+PartOf=codex-action-server.service
+StartLimitIntervalSec=120
+StartLimitBurst=3
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/mcp-tunnel-kit/codex-blue.env
+ExecStartPre=/usr/bin/test ${CODEX_MCP_URL} = http://127.0.0.1:8088/mcp
+ExecStart=/usr/bin/env zsh ${CODEX_TUNNEL_KIT_ROOT}/launch-codex.zsh
+WorkingDirectory=%h
+UMask=0077
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=30
+KillMode=control-group
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

@@ -33,3 +33,18 @@ After uncertainty use read_dispatch_receipt; never create another thread blindly
 Rollback: stop only the new tunnel-client, set CODEX_MCP_URL back to the prior8087
 endpoint, and launch the known working version. Do not restart native Codex/Devsy
 or interrupt user threads. A local fixture pass is not hosted ChatGPT acceptance.
+
+## Supervised blue tunnel
+
+`deploy/codex-mcp-blue-tunnel.service` is an optional, uninstalled user-unit
+candidate. It requires the standalone `codex-action-server.service`, uses an
+explicit 8088 URL, and keeps the old 8087 tunnel independent. Configure literal
+paths and the existing **blue** credentials locally using
+`deploy/codex-blue.env.example`; never put credentials in Git or chat. The launch
+preflight checks the pinned MCP and httpx imports/versions offline before starting
+any tunnel. It does not prove upstream health.
+
+Follow the standalone repository's `docs/SUPERVISION.md` for the staged activation
+and read-only acceptance sequence. Installation, credential-file setup, service
+start/enable/restart, and old-path retirement require operator approval. No such
+operation runs as part of this PR or its tests.
