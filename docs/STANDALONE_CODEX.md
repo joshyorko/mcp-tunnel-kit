@@ -1,5 +1,10 @@
 # Standalone Codex Action Server
 
+Historical direct-path handoff and supervision notes follow. The current
+foreground default is [Tunnel → Executor → Action Server](EXECUTOR.md).
+`launch-codex.zsh` is inactive break-glass; do not install the service templates
+for the current foreground setup or run both tunnel paths concurrently.
+
 `joshyorko/codex-action-server` owns typed controls and logical target resolution.
 This repo owns secure HTTP exposure. No adapter, router, thread registry, or new
 MCP tool translation is needed: launch-codex.zsh already uses the tunnel client's

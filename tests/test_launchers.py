@@ -27,6 +27,7 @@ class LauncherOfflineTests(unittest.TestCase):
         for name in (
             'launch-codex.zsh', 'launch-stateless-stub.zsh',
             'codex_mcp_check.py',
+            'executor_mcp.py',
         ):
             shutil.copy2(ROOT / name, self.bundle / name)
         venv_bin = self.bundle / '.venv' / 'bin'
@@ -95,9 +96,9 @@ class LauncherOfflineTests(unittest.TestCase):
         self.assertIn('127.0.0.1:0', arguments)
         self.assertNotIn('--mcp.command', arguments)
         self.assertEqual(arguments[arguments.index('--mcp.server-url') + 1],
-                         'url=http://127.0.0.1:8087/mcp,channel=main')
-        self.assertEqual(arguments[arguments.index('--control-plane.tunnel-id') + 1],
-                         self.env['CONTROL_PLANE_TUNNEL_ID'])
+                         'url=http://127.0.0.1:8088/mcp,channel=main')
+        self.assertNotIn('--control-plane.tunnel-id', arguments)
+        self.assertNotIn(self.env['CONTROL_PLANE_TUNNEL_ID'], arguments)
 
     def test_stateless_launch_uses_configured_binary_and_embedded_stub(self):
         result = self.run_launcher('launch-stateless-stub.zsh')

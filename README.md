@@ -1,11 +1,40 @@
 # MCP tunnel kit
 
+The normal path uses pinned, stock upstream Executor v2:
+
+```text
+ChatGPT / Jarvis → OpenAI Secure MCP Tunnel → Executor :4312/mcp
+                 → Codex Action Server :8088/mcp → native Codex app-servers
+```
+
+Run on the Bluefin host in foreground Herdr panes:
+
+1. Start the Action Server using its owner's existing command.
+2. Run `./launch-executor.zsh`.
+3. Run `./launch-executor-tunnel.zsh` in a shell with the existing tunnel
+   credentials exported. Stop any previous tunnel client first.
+
+See [Executor setup and acceptance](docs/EXECUTOR.md) for the pinned package,
+private key storage, registration, checks and current evidence boundary.
+The tracked normal config is `config/executor-tunnel.yaml`; its bearer header
+is an environment reference, never a credential literal. Executor advertises
+only `skills`, `execute` and `resume`; Codex tools are found through codemode.
+No daemon manager, systemd installation, workspace or native Codex change is
+part of this path.
+
+## Direct Codex break-glass, inactive
+
+The rest of this document describes the retained direct path. It is not the
+default. Stop the Executor-facing tunnel before using `./launch-codex.zsh`;
+never run both clients on the same tunnel ID. Existing `deploy/` service
+templates are historical and are not installed or used for this foreground setup.
+
 Expose the Codex tools from the **already-running** Action Server through the
 **existing** tunnel. The launcher uses tunnel-client's native HTTP upstream:
 
 ```text
 ChatGPT → existing tunnel control plane → tunnel-client
-        → http://127.0.0.1:8087/mcp → Action Server → configured Codex target
+        → http://127.0.0.1:8088/mcp → Action Server → configured Codex target
 ```
 
 Use `payload.target = "local"` for Codex calls. This kit does not start an Action
@@ -38,7 +67,7 @@ For a checkout without a prepared environment, use user-scoped `uv`:
 
 ```sh
 uv venv .venv
-uv pip install --python .venv/bin/python -r requirements.txt
+uv pip install --python .venv/bin/python -r requirements.txt pytest==9.1.1
 ```
 
 If `uv` is unavailable, create a project `.venv` with Python's `venv` module and
@@ -56,7 +85,7 @@ configuration with placeholders. The launcher does not automatically source it.
 | `CONTROL_PLANE_API_KEY` | Existing control-plane credential, exported privately |
 | `CONTROL_PLANE_TUNNEL_ID` | Existing registered tunnel ID, unchanged |
 | `TUNNEL_CLIENT_BIN` | Defaults to `$HOME/.local/bin/tunnel-client` |
-| `CODEX_MCP_URL` | Defaults to `http://127.0.0.1:8087/mcp` |
+| `CODEX_MCP_URL` | Break-glass only; defaults to `http://127.0.0.1:8088/mcp` |
 | `CODEX_CHECK_PYTHON` | Defaults to this checkout's `.venv/bin/python` |
 
 The URL must be numeric loopback HTTP with the exact `/mcp` path. URL credentials,

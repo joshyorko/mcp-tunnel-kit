@@ -1,5 +1,9 @@
 # Codex tunnel validation
 
+Current Executor foreground setup and pending Action Server/tunnel gates are
+documented in [EXECUTOR.md](docs/EXECUTOR.md). The dated direct-path evidence
+below is historical and does not prove the new chain or current process state.
+
 ## Local evidence, 2026-10-02
 
 The running `http://127.0.0.1:8087/mcp` initialized as Action Server with MCP
