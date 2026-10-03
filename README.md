@@ -1,26 +1,30 @@
 # MCP tunnel kit
 
-The normal path uses pinned, stock upstream Executor v2:
+The normal path uses Docker Compose and pinned, stock upstream Executor v2:
 
 ```text
-ChatGPT / Jarvis → OpenAI Secure MCP Tunnel → Executor :4312/mcp
-                 → Codex Action Server :8088/mcp → native Codex app-servers
+ChatGPT / Jarvis → OpenAI Secure MCP Tunnel → Executor browser MCP
+                 → Codex Action Server → existing native Codex app-servers
 ```
 
-Run on the Bluefin host in foreground Herdr panes:
+Run on the Bluefin host. Follow [Compose setup and acceptance](docs/COMPOSE.md)
+once for browser owner, organization, PAT, and narrow operator mounts. Then use:
 
-1. Start the Action Server using its owner's existing command.
-2. Run `./launch-executor.zsh`.
-3. Run `./launch-executor-tunnel.zsh` in a shell with the existing tunnel
-   credentials exported. Stop any previous tunnel client first.
+```sh
+./scripts/control-plane-up
+./scripts/control-plane-status
+./scripts/control-plane-down
+```
 
-See [Executor setup and acceptance](docs/EXECUTOR.md) for the pinned package,
-private key storage, registration, checks and current evidence boundary.
-The tracked normal config is `config/executor-tunnel.yaml`; its bearer header
-is an environment reference, never a credential literal. Executor advertises
-only `skills`, `execute` and `resume`; Codex tools are found through codemode.
-No daemon manager, systemd installation, workspace or native Codex change is
-part of this path.
+The stock Executor dashboard is `http://127.0.0.1:4312/`. The tunnel's `main`
+channel uses `http://executor:4312/mcp?elicitation_mode=browser` on Compose DNS.
+Executor advertises only `skills`, `execute`, and `resume`; Codex tools are found
+through codemode. Browser decisions stay in the signed-in browser. The kit
+does not install systemd services or change native Codex or Devsy state.
+
+The retained direct Codex launchers are break-glass paths. Stop the Compose
+tunnel before using them. [Foreground Executor notes](docs/EXECUTOR.md) describe
+the retired setup and its historical evidence.
 
 ## Direct Codex break-glass, inactive
 

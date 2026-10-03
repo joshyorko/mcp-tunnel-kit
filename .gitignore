@@ -4,9 +4,11 @@
 *.env
 *.env.*
 !config/*.env.example
+!.env.example
 *.local.zsh
 *.local.sh
 *secrets*
+!scripts/tunnel-secrets.sh
 *credentials*
 auth.json
 *.pem

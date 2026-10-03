@@ -1,0 +1,161 @@
+name: codex-control-plane
+
+x-operator:
+  targets_source: ${CAS_TARGETS_SOURCE:-}
+
+services:
+  executor:
+    image: ghcr.io/usefulsoftwareco/executor-selfhost:2.0.0-beta.8@sha256:a7d4e9d7c40aa02e08224757a59679ae61b6bfb59a61b3d06308e29f4652305a
+    restart: unless-stopped
+    environment:
+      HOST: 0.0.0.0
+      PORT: "4312"
+      BETTER_AUTH_URL: http://127.0.0.1:4312
+      EXECUTOR_DATA_DIR: /app/data
+      EXECUTOR_APPS_ALLOW_PRIVATE_FETCH: "true"
+      EXECUTOR_URL_ALLOW_HTTP_ORIGINS: '["http://${CONTROL_PLANE_GATEWAY:-172.30.86.1}:8088"]'
+    ports:
+      - "127.0.0.1:4312:4312"
+    volumes:
+      - executor-data:/app/data
+    networks:
+      - control-plane
+    healthcheck:
+      test: [CMD, executor-host, health]
+      interval: 10s
+      timeout: 5s
+      start_period: 30s
+      retries: 12
+
+  codex-action-server:
+    image: ${CAS_IMAGE:-ghcr.io/joshyorko/codex-action-server@sha256:a50b016f04f1cc6892a1d688d5c797f5c8a5e4e201239d8a6ef9f577d80ed614}
+    platform: linux/amd64
+    restart: unless-stopped
+    network_mode: host
+    user: "${CAS_UID:-1000}:${CAS_GID:-1000}"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,exec,nosuid,nodev,size=256m,mode=1777
+    environment:
+      CODEX_ACTION_BRIDGE_GATEWAY: ${CONTROL_PLANE_GATEWAY:-172.30.86.1}
+      CODEX_ACTION_PORT: "8088"
+      CODEX_ACTION_TARGETS: /run/codex-action-server/targets.json
+      CODEX_ACTION_DATA: /var/lib/codex-action-server/runtime
+      CODEX_ACTION_RECEIPTS: /var/lib/codex-action-server/receipts
+      ACTIONS_HOME: /var/lib/codex-action-server/actions
+      DEVSY_HOME: /run/operator-devsy
+    volumes:
+      - type: bind
+        source: ${CONTROL_PLANE_STATE_DIR:-./.state}/cas-targets.json
+        target: /run/codex-action-server/targets.json
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${NATIVE_CODEX_SOCKET_DIR:-/tmp/codex-daemon-1000}
+        target: /run/native-codex
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${CONTROL_PLANE_STATE_DIR:-./.state}/cas
+        target: /var/lib/codex-action-server
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${CAS_RUNTIME_DIR:-${CONTROL_PLANE_STATE_DIR:-./.state}/cas/runtime}
+        target: /var/lib/codex-action-server/runtime
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${CAS_RECEIPTS_DIR:-${CONTROL_PLANE_STATE_DIR:-./.state}/cas/receipts}
+        target: /var/lib/codex-action-server/receipts
+        bind:
+          create_host_path: false
+    healthcheck:
+      test: [CMD, python3, /opt/codex-action-server/scripts/container_health.py]
+      interval: 10s
+      timeout: 20s
+      start_period: 90s
+      retries: 18
+
+  app-ready:
+    image: ${CAS_IMAGE:-ghcr.io/joshyorko/codex-action-server@sha256:a50b016f04f1cc6892a1d688d5c797f5c8a5e4e201239d8a6ef9f577d80ed614}
+    platform: linux/amd64
+    restart: "no"
+    user: "${CAS_UID:-1000}:${CAS_GID:-1000}"
+    entrypoint: [python3, /opt/tunnel-kit/compose_control.py, bootstrap]
+    environment:
+      EXECUTOR_URL: http://executor:4312
+      CAS_MCP_URL: http://${CONTROL_PLANE_GATEWAY:-172.30.86.1}:8088/mcp
+      CONTROL_PLANE_BOOTSTRAP_DIR: /var/lib/tunnel-kit
+      EXECUTOR_PAT_FILE: /run/secrets/executor-pat
+    secrets:
+      - executor-pat
+    volumes:
+      - ./scripts/compose_control.py:/opt/tunnel-kit/compose_control.py:ro
+      - type: bind
+        source: ${CONTROL_PLANE_STATE_DIR:-./.state}/bootstrap
+        target: /var/lib/tunnel-kit
+        bind:
+          create_host_path: false
+    networks:
+      - control-plane
+    depends_on:
+      executor:
+        condition: service_healthy
+      codex-action-server:
+        condition: service_healthy
+    logging:
+      driver: none
+
+  tunnel-client:
+    image: ghcr.io/openai/tunnel-client:v0.0.15@sha256:119799b778ba8411a124f53588f9dc837fd62ba03e5fadf77d675123c92ab58e
+    restart: unless-stopped
+    entrypoint: [/bin/sh, /opt/tunnel-kit/tunnel-secrets.sh]
+    volumes:
+      - ./config/compose-tunnel.yaml:/etc/tunnel-client/config.yaml:ro
+      - ./scripts/tunnel-secrets.sh:/opt/tunnel-kit/tunnel-secrets.sh:ro
+    secrets:
+      - control-plane-api-key
+      - control-plane-tunnel-id
+      - executor-auth-header
+    networks:
+      - control-plane
+    depends_on:
+      app-ready:
+        condition: service_completed_successfully
+    healthcheck:
+      test: [CMD, /usr/bin/tunnel-client, health, --url, "http://127.0.0.1:8080", --require-control-plane-poll]
+      interval: 10s
+      timeout: 10s
+      start_period: 15s
+      retries: 9
+    # Stock startup/errors can include the tunnel ID. Keep them out of Docker logs.
+    logging:
+      driver: none
+
+networks:
+  control-plane:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: ${CONTROL_PLANE_SUBNET:-172.30.86.0/24}
+          gateway: ${CONTROL_PLANE_GATEWAY:-172.30.86.1}
+
+volumes:
+  executor-data:
+
+secrets:
+  executor-pat:
+    file: ${CONTROL_PLANE_SECRET_DIR:-./.state/secrets}/executor-pat
+  control-plane-api-key:
+    file: ${CONTROL_PLANE_SECRET_DIR:-./.state/secrets}/control-plane-api-key
+  control-plane-tunnel-id:
+    file: ${CONTROL_PLANE_SECRET_DIR:-./.state/secrets}/control-plane-tunnel-id
+  executor-auth-header:
+    file: ${CONTROL_PLANE_SECRET_DIR:-./.state/secrets}/executor-auth-header

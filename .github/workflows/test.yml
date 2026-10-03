@@ -18,3 +18,6 @@ jobs:
       - run: python -m pip install -r requirements.txt pytest==8.3.3
       - run: pytest -q -rs
       - run: zsh -n launch-codex.zsh launch-executor.zsh launch-executor-tunnel.zsh
+      - run: bash -n scripts/control-plane-up scripts/control-plane-down scripts/control-plane-status
+      - run: sh -n scripts/tunnel-secrets.sh
+      - run: docker compose --env-file .env.example config --quiet

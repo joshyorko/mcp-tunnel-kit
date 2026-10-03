@@ -1,4 +1,8 @@
-# Executor foreground path
+# Historical Executor foreground setup
+
+The normal deployment is [Compose setup](COMPOSE.md). These notes retain the
+retired foreground setup and evidence. Use the direct Codex launcher only for
+break-glass access after stopping the Compose tunnel.
 
 All commands run on the Bluefin host, in the same network namespace as both
 loopback servers. Container loopback is different. This kit starts neither the
