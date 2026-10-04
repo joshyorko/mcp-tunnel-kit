@@ -28,18 +28,25 @@ COMPACT = {"execute", "resume", "skills"}
 PROTOCOL_VERSIONS = {"2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"}
 PRIVATE_NETWORKS = tuple(ipaddress.ip_network(value) for value in
                          ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"))
+SECRET_VARIABLES = {
+    "control-plane-api-key": "CONTROL_PLANE_API_KEY",
+    "control-plane-tunnel-id": "CONTROL_PLANE_TUNNEL_ID",
+    "executor-pat": "EXECUTOR_PAT",
+}
 
 
 class ControlError(Exception):
     """Only fixed, credential-free diagnostics cross the command boundary."""
 
 
-def read_private(path: Path) -> str:
+def read_private(path: Path, *, strip=True) -> str:
     info = path.lstat()
     if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
             or stat.S_IMODE(info.st_mode) != 0o600):
         raise ControlError("Secret/state files must be regular, owned by you, mode 0600; symlinks are refused.")
-    return path.read_text().strip()
+    with path.open(newline="") as handle:
+        value = handle.read()
+    return value.strip() if strip else value
 
 
 def private_directory(path: Path) -> None:
@@ -217,25 +224,88 @@ def validate_secrets(configuration) -> None:
 
 
 def save_secrets(configuration) -> None:
-    for name, entry in configuration["secrets"].items():
-        if name == "executor-auth-header":
-            continue
-        path = Path(entry["file"])
+    materialize_secrets(configuration, interactive=True)
+    print("Private secret files ready; supplied values updated, absent values retained.")
+
+
+def validate_credential(name: str, value: str) -> str:
+    variable = SECRET_VARIABLES[name]
+    if not re.fullmatch(r"[!-~]+", value):
+        raise ControlError(f"Set {variable} to a nonempty single-line token without whitespace; values are never printed.")
+    if name == "control-plane-tunnel-id" and not re.fullmatch(r"tunnel_[0-9a-f]{32}", value):
+        raise ControlError("Set CONTROL_PLANE_TUNNEL_ID to a supported existing tunnel ID.")
+    return value
+
+
+def credential_dotenv() -> dict[str, str]:
+    """Read only literal credential assignments; Compose still owns other settings."""
+    path = ROOT / ".env"
+    if not path.exists() and not path.is_symlink():
+        return {}
+    info = path.lstat()
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+        raise ControlError("The repo-local .env must be a regular file owned by you; symlinks are refused.")
+    names = {variable: name for name, variable in SECRET_VARIABLES.items()}
+    values = {}
+    with path.open(newline="") as handle:
+        for line in handle:
+            # Other Compose settings are not evaluated, exported, or rewritten here.
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            match = re.match(r"(?:export\s+)?([A-Za-z_][A-Za-z_0-9]*)", stripped)
+            if not match or match[1] not in names:
+                continue
+            key = match[1]
+            assignment = re.fullmatch(r"([A-Z_]+)\s*=\s*(.*?)", stripped)
+            if not assignment or key in values:
+                raise ControlError(f"Use one literal {key}=value assignment in .env; values are never printed.")
+            value = assignment[2]
+            if value.startswith(("'", '"')):
+                if len(value) < 2 or value[-1] != value[0]:
+                    raise ControlError(f"Use one single-line literal value for {key} in .env.")
+                value = value[1:-1]
+            if any(char in value for char in "\\\"'"):
+                raise ControlError(f"Quotes inside values and backslash escapes are unsupported for {key} in .env.")
+            values[key] = validate_credential(names[key], value)
+    if values:
+        # cp .env.example .env needs no separate chmod step from the operator.
+        path.chmod(0o600)
+    return values
+
+
+def materialize_secrets(configuration, *, interactive=False) -> None:
+    """Validate the entire set before replacing any private, file-backed secret."""
+    dotenv = credential_dotenv()
+    desired, current = {}, {}
+    for name, variable in SECRET_VARIABLES.items():
+        path = Path(configuration["secrets"][name]["file"])
         if path.exists() or path.is_symlink():
-            read_private(path)
-            continue
-        variable = {"control-plane-api-key": "CONTROL_PLANE_API_KEY",
-                    "control-plane-tunnel-id": "CONTROL_PLANE_TUNNEL_ID"}.get(name)
-        value = os.environ.get(variable, "") if variable else ""
-        if not value:
-            value = getpass.getpass({"control-plane-api-key": "Existing control-plane API key: ",
-                                     "control-plane-tunnel-id": "Existing tunnel ID: ",
-                                     "executor-pat": "Executor organization PAT from the browser: "}[name])
-        if not value or any(char.isspace() for char in value):
-            raise ControlError("Use a nonempty token or ID without whitespace; no value was printed.")
-        write_private(path, value + "\n")
-    validate_secrets(configuration)
-    print("Private secret files ready; existing files retained.")
+            current[name] = read_private(path, strip=False)
+        if variable in os.environ:
+            value = os.environ[variable]
+        elif variable in dotenv:
+            value = dotenv[variable]
+        elif name in current:
+            value = current[name].removesuffix("\n")
+        elif interactive:
+            value = getpass.getpass(f"{variable} (input hidden): ")
+        else:
+            raise ControlError(f"Set {variable} in repo-local .env or the process environment, or use --secrets for hidden input.")
+        desired[name] = validate_credential(name, value) + "\n"
+    desired["executor-auth-header"] = "Bearer " + desired["executor-pat"]
+    header = Path(configuration["secrets"]["executor-auth-header"]["file"])
+    if header.exists() or header.is_symlink():
+        current["executor-auth-header"] = read_private(header, strip=False)
+    changed = {name: value for name, value in desired.items()
+               if current.get(name, "").removesuffix("\n") != value.removesuffix("\n")}
+    if not changed:
+        return
+    if any(row.get("Service") in {"codex-action-server", "app-ready", "tunnel-client"}
+           and row.get("State") in {"running", "paused", "restarting"} for row in compose_rows()):
+        raise ControlError("Secret files changed while containers are active. Run control-plane-down, then control-plane-up to refresh file mounts.")
+    for name, value in changed.items():
+        write_private(Path(configuration["secrets"][name]["file"]), value)
 
 
 def refuse_external_tunnel() -> None:
