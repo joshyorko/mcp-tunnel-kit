@@ -25,8 +25,19 @@ CAS has a read-only root filesystem, drops all capabilities, and uses
 `no-new-privileges`. Its bounded executable `/tmp` and selected private state
 mounts remain writable.
 
-For a new checkout, copy `.env.example` to the ignored `.env` and fill in its
-non-secret paths. Keep existing `.env` settings when updating a prepared checkout.
+For a new or restored checkout:
+
+```sh
+cp .env.example .env
+```
+
+Fill the machine-local paths/settings and uncomment/fill the three credential
+keys privately in your editor. With existing Executor state and credentials,
+`./scripts/control-plane-up` is the only setup command needed after that.
+Keep existing `.env` settings when updating a prepared checkout. Do not replace
+your selected `CAS_IMAGE`, `CAS_TARGETS_SOURCE`, socket, runtime, receipts, or
+state paths with example values. A fresh Executor needs the browser setup below
+before you can add its PAT.
 `CAS_IMAGE` defaults to the product image published from commit
 `45a27a0515bbfc12de278dd03e26751cecb91fc7`, pinned by its immutable digest. The
 production file never builds from a neighboring checkout. Executor and tunnel
@@ -64,8 +75,9 @@ first usable address in `CONTROL_PLANE_GATEWAY`.
 
 ## Create the browser owner and organization
 
-First run starts only the stock Executor. It does not need CAS or tunnel
-credentials and does not start the tunnel:
+First run starts only the stock Executor. It does not prepare CAS, read or
+materialize credentials, or start the tunnel. No CAS setup, control-plane key,
+tunnel ID, or Executor PAT is required:
 
 ```sh
 ./scripts/control-plane-up --first-run
@@ -77,20 +89,63 @@ an organization-scoped personal access token at **Account > Tokens**,
 `http://127.0.0.1:4312/account/tokens`. The browser owns password entry and token
 creation.
 
-Save the PAT privately as `executor-pat` in `CONTROL_PLANE_SECRET_DIR`, mode
-0600. The example directory is
-`$HOME/.local/share/codex-control-plane/secrets`. Do not paste tokens into
-command arguments, `.env`, chat, or shell history. The following command can
-read the PAT without echoing it and reuse your already-exported existing
-control-plane key and tunnel ID:
+Add the PAT to the ignored repo-local `.env` as `EXECUTOR_PAT`. Add the existing
+`CONTROL_PLANE_API_KEY` and `CONTROL_PLANE_TUNNEL_ID` there too, then run:
 
 ```sh
-./scripts/control-plane-up --secrets
+./scripts/control-plane-up
 ```
 
-The private files are `executor-pat`, `control-plane-api-key`, and
-`control-plane-tunnel-id`. Existing files are retained. Setup derives the
-private `executor-auth-header` containing the complete bearer header.
+Use your editor rather than command arguments, chat, or shell history to enter
+values. Never commit or share the filled `.env`. The helper changes its mode to
+0600 when it reads credentials. Existing machine-local settings stay in place.
+
+## Credential inputs and rotation
+
+Normal up and `--check` prepare the file-backed secrets automatically before CAS
+path preparation and stack startup. Each credential uses this precedence:
+
+1. An explicitly present process environment variable
+2. A supported assignment in this checkout's `.env`
+3. Its existing private secret file
+4. A concise error naming the missing variable and how to provide it
+
+The only credential keys parsed by the helper are `CONTROL_PLANE_API_KEY`,
+`CONTROL_PLANE_TUNNEL_ID`, and `EXECUTOR_PAT`. It accepts `KEY=value`, optionally
+with matching single or double quotes around the whole value. Values are literal,
+single-line nonempty printable ASCII tokens without whitespace. There is no shell
+sourcing, command execution, variable expansion, escape processing, `export`
+syntax, or inline comment syntax for these three keys. Full-line comments and
+blank lines are allowed. Duplicate keys, blank assignments, unmatched quotes,
+backslash escapes, and multiline values fail without printing their contents.
+An invalid explicitly supplied value never falls back to a saved credential,
+even when another source has a valid value. Compose continues to interpret the
+other path/settings entries normally, including `${HOME}` in existing paths.
+
+The helper validates the whole credential set before writing any secret file.
+Explicit values replace stale files through private temporary files and atomic
+rename. Absent values retain existing files. Each replacement is atomic; this is
+not a multi-file transaction. A filesystem failure stops startup, and a retry
+with the same inputs completes any remaining writes. The secret directory is
+0700; files are owned by the invoking user and mode 0600. Unsafe ownership,
+permissions, and symlinks fail closed. The private files remain `executor-pat`,
+`control-plane-api-key`, and `control-plane-tunnel-id` under the existing
+`CONTROL_PLANE_SECRET_DIR`. Setup derives `executor-auth-header` as the complete
+`Bearer <PAT>` header. Operators do not need to create those files themselves.
+
+To rotate a key, tunnel ID, or PAT, stop the stack with
+`./scripts/control-plane-down`, edit its `.env` value or replace the exported
+process value, then run `./scripts/control-plane-up`. Supplied process values
+still override `.env`. Remove or comment out a credential assignment to retain
+its existing private file; an empty assignment is an error. Rotation is refused
+before any secret write while affected containers are active, because their
+single-file mounts can retain the old inode after atomic replacement.
+
+`./scripts/control-plane-up --secrets` remains an optional recovery command.
+It uses the same precedence and validation, but prompts with hidden input for
+missing credentials. Existing private-file-only installations keep working
+without adding credentials to `.env`.
+
 The stock tunnel resolves key and header `file:` references. Its minimal
 POSIX entrypoint reads only the tunnel ID into the supported environment,
 then executes the unchanged stock binary. No credential or tunnel ID enters

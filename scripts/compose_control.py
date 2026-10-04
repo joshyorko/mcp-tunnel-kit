@@ -67,7 +67,7 @@ def private_directory(path: Path) -> None:
 def write_private(path: Path, value: str) -> None:
     private_directory(path.parent)
     if path.exists() or path.is_symlink():
-        if read_private(path) == value.strip():
+        if read_private(path, strip=False) == value:
             return
     with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, delete=False) as handle:
         temporary = Path(handle.name)
@@ -223,8 +223,8 @@ def validate_secrets(configuration) -> None:
             raise ControlError("The Executor auth file must contain the complete Bearer PAT header.")
 
 
-def save_secrets(configuration) -> None:
-    materialize_secrets(configuration, interactive=True)
+def save_secrets(configuration, dotenv=None) -> None:
+    materialize_secrets(configuration, interactive=True, dotenv=dotenv)
     print("Private secret files ready; supplied values updated, absent values retained.")
 
 
@@ -274,9 +274,10 @@ def credential_dotenv() -> dict[str, str]:
     return values
 
 
-def materialize_secrets(configuration, *, interactive=False) -> None:
+def materialize_secrets(configuration, *, interactive=False, dotenv=None) -> None:
     """Validate the entire set before replacing any private, file-backed secret."""
-    dotenv = credential_dotenv()
+    if dotenv is None:
+        dotenv = credential_dotenv()
     desired, current = {}, {}
     for name, variable in SECRET_VARIABLES.items():
         path = Path(configuration["secrets"][name]["file"])
@@ -304,6 +305,8 @@ def materialize_secrets(configuration, *, interactive=False) -> None:
     if any(row.get("Service") in {"codex-action-server", "app-ready", "tunnel-client"}
            and row.get("State") in {"running", "paused", "restarting"} for row in compose_rows()):
         raise ControlError("Secret files changed while containers are active. Run control-plane-down, then control-plane-up to refresh file mounts.")
+    for name in changed:
+        private_directory(Path(configuration["secrets"][name]["file"]).parent)
     for name, value in changed.items():
         write_private(Path(configuration["secrets"][name]["file"]), value)
 
@@ -627,9 +630,10 @@ def main():
             compose("down", "--timeout", "30", timeout=90)
             print("Control-plane containers stopped; persistent data and secret files retained.")
         else:
+            dotenv = credential_dotenv() if args.mode != "first-run" else {}
             configuration = config()
             if args.mode == "secrets":
-                save_secrets(configuration)
+                save_secrets(configuration, dotenv)
                 return 0
             network_preflight(configuration)
             if args.mode == "first-run":
@@ -640,6 +644,7 @@ def main():
             local_build = "build" in configuration["services"]["codex-action-server"]
             if not local_build and not re.fullmatch(r"ghcr\.io/joshyorko/codex-action-server(?:@sha256:[0-9a-f]{64}|:sha-[0-9a-f]{40})", image):
                 raise ControlError("Production CAS_IMAGE must be the published immutable digest or full SHA tag.")
+            materialize_secrets(configuration, dotenv=dotenv)
             prepare(configuration)
             validate_secrets(configuration)
             refuse_external_tunnel()

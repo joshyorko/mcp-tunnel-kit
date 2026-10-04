@@ -1,9 +1,12 @@
 """Offline onboarding regressions using only synthetic credentials and temp files."""
 
 import importlib.util
+import contextlib
+import io
 import os
 from pathlib import Path
 import tempfile
+import sys
 import unittest
 from unittest.mock import patch
 
@@ -140,6 +143,103 @@ class OnboardingTests(unittest.TestCase):
             with self.assertRaises(self.helper.ControlError):
                 self.materialize()
         self.assertEqual({p.name: p.read_bytes() for p in self.secrets.iterdir()}, before)
+
+    def test_normal_up_materializes_before_prepare_and_compose_start(self):
+        self.dotenv()
+        configuration = {**self.configuration, "services": {
+            "codex-action-server": {"image": "ghcr.io/joshyorko/codex-action-server:sha-" + "a" * 40},
+        }}
+        seen = []
+        def prepare(_configuration):
+            seen.append("prepare")
+            self.assertEqual((self.secrets / "executor-pat").read_text(), "FIXTURE_PAT\n")
+            self.assertEqual((self.secrets / "executor-auth-header").read_text(), "Bearer FIXTURE_PAT\n")
+        def compose(*args, **kwargs):
+            self.assertEqual(seen, ["prepare"])
+            seen.append(args)
+            return ""
+        with patch.object(sys, "argv", ["compose_control.py", "up"]), \
+                patch.object(self.helper, "config", return_value=configuration), \
+                patch.object(self.helper, "network_preflight"), \
+                patch.object(self.helper, "prepare", side_effect=prepare), \
+                patch.object(self.helper, "refuse_external_tunnel"), \
+                patch.object(self.helper, "status"), \
+                patch.object(self.helper, "compose", side_effect=compose), \
+                patch.object(self.helper.getpass, "getpass", side_effect=AssertionError("Unexpected prompt")):
+            self.assertEqual(self.helper.main(), 0)
+        self.assertEqual(seen[-1], ("up", "-d", "--wait", "--wait-timeout", "300"))
+
+    def test_first_run_needs_no_dotenv_credentials_cas_or_secret_files(self):
+        self.dotenv({key: "" for key in VALUES})
+        with patch.object(sys, "argv", ["compose_control.py", "first-run"]), \
+                patch.object(self.helper, "config", return_value={}), \
+                patch.object(self.helper, "network_preflight"), \
+                patch.object(self.helper, "credential_dotenv", side_effect=AssertionError("First run read credentials")), \
+                patch.object(self.helper, "prepare", side_effect=AssertionError("First run prepared CAS")), \
+                patch.object(self.helper, "compose", return_value="") as compose, \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(self.helper.main(), 0)
+        compose.assert_called_once_with("up", "-d", "--wait", "--wait-timeout", "120", "executor", timeout=150)
+        self.assertFalse(self.secrets.exists())
+        self.assertIn("browser owner, organization, and PAT", output.getvalue())
+
+    def test_secrets_mode_still_prompts_for_missing_values_and_derives_header(self):
+        with patch.object(self.helper.getpass, "getpass", side_effect=list(VALUES.values())) as prompt, \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            self.helper.save_secrets(self.configuration)
+        self.assertEqual(prompt.call_count, 3)
+        self.assertEqual((self.secrets / "executor-auth-header").read_text(), "Bearer FIXTURE_PAT\n")
+        for value in VALUES.values():
+            self.assertNotIn(value, output.getvalue())
+
+    def test_existing_blank_or_multiline_private_file_fails_closed(self):
+        self.dotenv()
+        self.materialize()
+        (self.root / ".env").unlink()
+        for value in ("", "\n", "FIXTURE_PAT\n\n", "FIXTURE_PAT\r\n", "\nFIXTURE_PAT"):
+            with self.subTest(value=value):
+                (self.secrets / "executor-pat").write_text(value)
+                with self.assertRaises(self.helper.ControlError):
+                    self.materialize()
+
+    def test_dotenv_supports_literal_quotes_comments_and_keeps_machine_settings_unchanged(self):
+        path = self.dotenv({key: f"'{value}'" for key, value in VALUES.items()})
+        settings = '# comment\nCAS_IMAGE=machine-image\nCAS_TARGETS_SOURCE=/operator/targets.json\nCONTROL_PLANE_STATE_DIR=${HOME}/existing-state\nUNKNOWN=$(touch should-not-exist)\n'
+        path.write_text(settings + path.read_text())
+        before = path.read_bytes()
+        self.materialize()
+        self.assertEqual(path.read_bytes(), before)
+        self.assertNotIn("CAS_IMAGE", os.environ)
+        self.assertFalse((self.root / "should-not-exist").exists())
+
+    def test_secret_and_dotenv_symlinks_and_unsafe_private_permissions_are_refused(self):
+        self.dotenv()
+        self.materialize()
+        pat = self.secrets / "executor-pat"
+        pat.chmod(0o644)
+        with self.assertRaises(self.helper.ControlError):
+            self.materialize()
+        pat.chmod(0o600)
+        original = pat.rename(self.root / "original-pat")
+        pat.symlink_to(original)
+        with self.assertRaises(self.helper.ControlError):
+            self.materialize()
+        path = self.root / ".env"
+        path.rename(self.root / "original-dotenv")
+        path.symlink_to(self.root / "original-dotenv")
+        with self.assertRaises(self.helper.ControlError):
+            self.materialize()
+
+    def test_normal_up_invalid_input_reports_no_values_and_never_starts(self):
+        self.dotenv({**VALUES, "EXECUTOR_PAT": '"PRIVATE_SENTINEL\nINJECTED"'})
+        with patch.object(sys, "argv", ["compose_control.py", "up"]), \
+                patch.object(self.helper, "config", return_value=self.configuration), \
+                patch.object(self.helper, "network_preflight"), \
+                patch.object(self.helper, "compose", side_effect=AssertionError("Invalid input reached Compose")), \
+                contextlib.redirect_stderr(io.StringIO()) as output:
+            self.assertEqual(self.helper.main(), 2)
+        self.assertNotIn("PRIVATE_SENTINEL", output.getvalue())
+        self.assertFalse(self.secrets.exists())
 
 
 if __name__ == "__main__":
