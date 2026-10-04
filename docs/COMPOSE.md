@@ -157,7 +157,14 @@ Executor generates authentication and encryption keys inside the persistent
 volume. Losing those encryption keys loses access to encrypted stored data.
 The foreground CLI's `keys.json` and bearer are unrelated to this browser PAT.
 
-## Include existing Devsy state when needed
+## Expose host-native Devsy MCP alongside Codex
+
+See [Host-native Devsy](HOST_DEVSY.md) for the opt-in host stdio bridge and its
+trusted-network boundary. Set explicit host binary/working-directory paths and
+`DEVSY_MCP_ENABLED=true`; normal up manages it and retains a second Executor app.
+No Devsy configuration or credentials are mounted into Executor.
+
+## Include existing Devsy state for CAS remote targets
 
 For a configured Devsy target, set `DEVSY_HOME`, `DEVSY_CONFIG_FILE`,
 `DEVSY_CONTEXT_DIR`, and the provider-referenced `DEVSY_KUBECONFIG_FILE` in `.env`.
@@ -200,8 +207,10 @@ and discovers its actual catalog. Executor readiness uses its stock native
 health command. The bounded `app-ready` job then imports Codex through the
 official organization API or retains the matching existing app. It verifies
 the stock generated source, authenticated compact MCP, browser `resume` schema,
-and Codex discovery before the tunnel starts. It makes no native Codex mutation
-or automatic approval.
+and Codex discovery before the tunnel starts. When host Devsy MCP is enabled,
+it also verifies and retains Devsy, discovers its namespace, and performs the two
+harmless list reads. The one-shot bootstrap reruns on every normal up. It makes
+no native Codex mutation or automatic approval.
 
 The generator archive inspected for source validation is revision
 `e1c4f014c89c3f27648fd77c728311b6a2767819`. The pulled official image declares
@@ -220,23 +229,21 @@ contents after atomic replacement. The helper refuses such updates while CAS,
 bootstrap, or tunnel containers are active. An unchanged repeated up retains
 the existing files and services.
 
-After one-time setup, the ordinary Compose commands also work:
+Use the wrapper scripts for normal startup and shutdown. They materialize
+credentials, manage the optional host bridge, and rerun both-app readiness before
+opening the tunnel. Raw `docker compose up` and `down` manage containers only;
+they bypass these checks and must not replace the wrappers when Devsy is enabled.
 
-```sh
-docker compose up -d
-docker compose down
-```
-
-For bounded startup and explicit readiness reporting, use the scripts. To stop
-the stack and retain persistent state:
+To stop the stack and retain persistent state:
 
 ```sh
 ./scripts/control-plane-down
 ```
 
 Do not add `--volumes` or delete the private state directory during normal
-shutdown. Those operations destroy durable data or credentials. This script
-does not stop native Codex, Devsy, or unrelated services.
+shutdown. Those operations destroy durable data or credentials. The script stops
+the kit-owned Devsy bridge and its MCP children. It preserves host Devsy
+configuration and workspaces and does not stop native Codex or unrelated services.
 
 ## Verify browser approval and the consumer
 
@@ -319,3 +326,4 @@ Record these nine live gates against the exact artifacts after a clean stop and
 Focused tests and image builds do not close these live gates. Remote native
 execution is unverified while the selected Devsy context has no workspace.
 Keep the deployment draft until every requested gate is proven.
+

@@ -155,20 +155,20 @@ class OnboardingTests(unittest.TestCase):
             seen.append("prepare")
             self.assertEqual((self.secrets / "executor-pat").read_text(), "FIXTURE_PAT\n")
             self.assertEqual((self.secrets / "executor-auth-header").read_text(), "Bearer FIXTURE_PAT\n")
-        def compose(*args, **kwargs):
+        def start(configuration):
             self.assertEqual(seen, ["prepare"])
-            seen.append(args)
-            return ""
+            self.assertEqual((self.secrets / "executor-auth-header").read_text(), "Bearer FIXTURE_PAT\n")
+            seen.append("start-control-plane")
         with patch.object(sys, "argv", ["compose_control.py", "up"]), \
                 patch.object(self.helper, "config", return_value=configuration), \
                 patch.object(self.helper, "network_preflight"), \
                 patch.object(self.helper, "prepare", side_effect=prepare), \
                 patch.object(self.helper, "refuse_external_tunnel"), \
                 patch.object(self.helper, "status"), \
-                patch.object(self.helper, "compose", side_effect=compose), \
+                patch.object(self.helper, "start_control_plane", side_effect=start), \
                 patch.object(self.helper.getpass, "getpass", side_effect=AssertionError("Unexpected prompt")):
             self.assertEqual(self.helper.main(), 0)
-        self.assertEqual(seen[-1], ("up", "-d", "--wait", "--wait-timeout", "300"))
+        self.assertEqual(seen, ["prepare", "start-control-plane"])
 
     def test_first_run_needs_no_dotenv_credentials_cas_or_secret_files(self):
         self.dotenv({key: "" for key in VALUES})
@@ -304,3 +304,4 @@ class OnboardingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

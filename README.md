@@ -191,3 +191,11 @@ publishing code nor a local probe proves that remote gate.
 
 The separate `launch-stateless-stub.zsh` remains a transport experiment. Do not
 use it for this Codex handoff or concurrently on the same tunnel ID.
+
+
+## Optional host-native Devsy MCP
+
+[Host-native Devsy setup](docs/HOST_DEVSY.md) adds the existing host Devsy MCP
+as a second Executor app through the same single tunnel. It is disabled by
+default, uses explicit host paths, and preserves host configuration/authentication.
+Only three read tools bypass Executor browser approval; unknown calls fail closed.
