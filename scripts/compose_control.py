@@ -683,17 +683,24 @@ def host_bridge():
     return module
 
 
+def devsy_call(bridge, operation, *arguments):
+    try:
+        return getattr(bridge, operation)(*arguments)
+    except bridge.BridgeError as error:
+        raise ControlError(str(error)) from None
+
+
 def start_control_plane(configuration):
     bridge = host_bridge()
-    value = bridge.settings(configuration)
+    value = devsy_call(bridge, "settings", configuration)
     # Close external access before revalidating either app on every up, including restarts.
     compose("stop", "--timeout", "30", "tunnel-client", timeout=45)
     compose("up", "-d", "--wait", "--wait-timeout", "300", "executor", "codex-action-server", timeout=330)
     network_preflight(configuration)
     if value:
-        bridge.start(value)
+        devsy_call(bridge, "start", value)
     else:
-        bridge.stop(configuration["x-operator"]["devsy_state"])
+        devsy_call(bridge, "stop", configuration["x-operator"]["devsy_state"])
     # Always rerun the completed job. Compose otherwise retains successful one-shot jobs.
     compose("up", "--force-recreate", "--no-deps", "--exit-code-from", "app-ready", "app-ready", timeout=210)
     compose("up", "-d", "--no-deps", "--wait", "--wait-timeout", "120", "tunnel-client", timeout=150)
@@ -704,14 +711,14 @@ def status():
         print(f"{row['Service']}: {row['State']} {row.get('Health', '')}".rstrip())
     configuration = config()
     bridge = host_bridge()
-    value = bridge.settings(configuration)
+    value = devsy_call(bridge, "settings", configuration)
     if value is None:
         print("Host Devsy: disabled")
     else:
         marker = Path(value["state"]) / "process.json"
         record = json.loads(read_private(marker)) if marker.exists() or marker.is_symlink() else None
         if record and bridge.owned_process(record):
-            bridge.health(value, record["instance"])
+            devsy_call(bridge, "health", value, record["instance"])
             print("Host Devsy: ready")
         else:
             print("Host Devsy: not running; run normal up to revalidate")
@@ -737,7 +744,7 @@ def main():
         elif args.mode == "down":
             configuration = config()
             compose("stop", "--timeout", "30", "tunnel-client", timeout=45)
-            host_bridge().stop(configuration["x-operator"]["devsy_state"])
+            devsy_call(host_bridge(), "stop", configuration["x-operator"]["devsy_state"])
             compose("down", "--timeout", "30", timeout=90)
             print("Control-plane containers stopped; persistent data and secret files retained.")
         else:
@@ -755,7 +762,7 @@ def main():
             local_build = "build" in configuration["services"]["codex-action-server"]
             if not local_build and not re.fullmatch(r"ghcr\.io/joshyorko/codex-action-server(?:@sha256:[0-9a-f]{64}|:sha-[0-9a-f]{40})", image):
                 raise ControlError("Production CAS_IMAGE must be the published immutable digest or full SHA tag.")
-            host_bridge().settings(configuration)
+            devsy_call(host_bridge(), "settings", configuration)
             materialize_secrets(configuration, dotenv=dotenv)
             prepare(configuration)
             validate_secrets(configuration)
@@ -776,4 +783,3 @@ def main():
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

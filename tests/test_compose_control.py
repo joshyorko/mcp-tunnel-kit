@@ -2,6 +2,7 @@
 
 import importlib.util
 import inspect
+import io
 import json
 import os
 from pathlib import Path
@@ -14,6 +15,7 @@ import copy
 import threading
 import time
 import urllib.error
+from contextlib import redirect_stderr
 from unittest.mock import patch
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from mcp_fixtures import LoopbackServer
@@ -44,6 +46,29 @@ class ComposeBoundaryTests(unittest.TestCase):
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         return module
+
+    def test_host_devsy_errors_are_actionable_at_the_command_boundary(self):
+        helper = self.helper()
+        bridge = helper.host_bridge()
+        message = "Set an absolute existing Devsy executable and working directory."
+        for operation in ("settings", "start", "stop", "health"):
+            with self.subTest(operation=operation):
+                stderr = io.StringIO()
+                with patch.object(bridge, operation, side_effect=bridge.BridgeError(message)), \
+                     patch.object(helper, "status", side_effect=lambda: helper.devsy_call(bridge, operation, {})), \
+                     patch("sys.argv", ["compose_control.py", "status"]), redirect_stderr(stderr):
+                    self.assertEqual(helper.main(), 2)
+                self.assertEqual(stderr.getvalue(), message + "\n")
+
+    def test_unexpected_host_devsy_errors_keep_private_details_omitted(self):
+        helper = self.helper()
+        bridge = helper.host_bridge()
+        stderr = io.StringIO()
+        with patch.object(bridge, "settings", side_effect=RuntimeError("PRIVATE_FIXTURE_VALUE")), \
+             patch.object(helper, "status", side_effect=lambda: helper.devsy_call(bridge, "settings", {})), \
+             patch("sys.argv", ["compose_control.py", "status"]), redirect_stderr(stderr):
+            self.assertEqual(helper.main(), 1)
+        self.assertEqual(stderr.getvalue(), "Control-plane setup/probe failed; raw errors and private values omitted.\n")
 
     def test_existing_unrelated_network_overlap_is_rejected(self):
         helper = self.helper()
