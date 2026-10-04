@@ -523,8 +523,8 @@ def ensure_codex_app(http, url, receipt=None):
 
 
 def ensure_mcp_app(http, url, name, receipt=None):
-    if name not in {"Codex", "Devsy"}:
-        raise ControlError("Only the configured Codex and Devsy integrations are managed.")
+    if name not in {"Codex", "Devsy", "LunaFactory"}:
+        raise ControlError("Only the configured Codex, Devsy and LunaFactory integrations are managed.")
     slug = name.lower()
     context, _ = http.request("GET", "/api/context")
     organization = context.get("organization")
