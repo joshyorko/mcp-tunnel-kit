@@ -7,14 +7,26 @@ ChatGPT / Jarvis → OpenAI Secure MCP Tunnel → Executor browser MCP
                  → Codex Action Server → existing native Codex app-servers
 ```
 
-Run on the Bluefin host. Follow [Compose setup and acceptance](docs/COMPOSE.md)
-once for browser owner, organization, PAT, and narrow operator mounts. Then use:
+Run on the Bluefin host with Docker Compose and Python 3.10+. For a new checkout,
+copy `.env.example` to the ignored `.env`, preserve/fill the operator paths, and
+add `CONTROL_PLANE_API_KEY`, `CONTROL_PLANE_TUNNEL_ID`, and `EXECUTOR_PAT` privately
+in your editor. Then run:
 
 ```sh
 ./scripts/control-plane-up
 ./scripts/control-plane-status
 ./scripts/control-plane-down
 ```
+
+Normal startup validates the credentials and prepares private file-backed Docker
+secrets automatically. A restored setup with all three credentials needs no
+separate `--secrets` step. Keep your existing `.env` when updating a checkout.
+
+For a fresh Executor, first run `./scripts/control-plane-up --first-run` without
+credentials. Finish the browser owner/organization setup, create the organization
+PAT, add it to `.env`, and run normal up. See [Compose setup and
+acceptance](docs/COMPOSE.md) for operator paths, credential precedence, rotation,
+and browser acceptance.
 
 The stock Executor dashboard is `http://127.0.0.1:4312/`. The tunnel's `main`
 channel uses `http://executor:4312/mcp?elicitation_mode=browser` on Compose DNS.
