@@ -240,14 +240,20 @@ def validate_credential(name: str, value: str) -> str:
 def credential_dotenv() -> dict[str, str]:
     """Read only literal credential assignments; Compose still owns other settings."""
     path = ROOT / ".env"
-    if not path.exists() and not path.is_symlink():
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
         return {}
-    info = path.lstat()
-    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
-        raise ControlError("The repo-local .env must be a regular file owned by you; symlinks are refused.")
+    except OSError:
+        raise ControlError("Cannot read repo-local .env; use a regular file owned by you, without symlinks.") from None
     names = {variable: name for name, variable in SECRET_VARIABLES.items()}
     values = {}
-    with path.open(newline="") as handle:
+    with os.fdopen(descriptor, encoding="utf-8-sig", newline="") as handle:
+        info = os.fstat(handle.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+            raise ControlError("The repo-local .env must be a regular file owned by you; symlinks are refused.")
+        # Protect even malformed credentials, without following a swapped path.
+        os.fchmod(handle.fileno(), 0o600)
         for line in handle:
             # Other Compose settings are not evaluated, exported, or rewritten here.
             stripped = line.strip()
@@ -257,6 +263,8 @@ def credential_dotenv() -> dict[str, str]:
             if not match or match[1] not in names:
                 continue
             key = match[1]
+            if "\r" in line.removesuffix("\r\n"):
+                raise ControlError(f"Use one single-line literal value for {key} in .env.")
             assignment = re.fullmatch(r"([A-Z_]+)\s*=\s*(.*?)", stripped)
             if not assignment or key in values:
                 raise ControlError(f"Use one literal {key}=value assignment in .env; values are never printed.")
@@ -268,9 +276,6 @@ def credential_dotenv() -> dict[str, str]:
             if any(char in value for char in "\\\"'"):
                 raise ControlError(f"Quotes inside values and backslash escapes are unsupported for {key} in .env.")
             values[key] = validate_credential(names[key], value)
-    if values:
-        # cp .env.example .env needs no separate chmod step from the operator.
-        path.chmod(0o600)
     return values
 
 
@@ -279,6 +284,10 @@ def materialize_secrets(configuration, *, interactive=False, dotenv=None) -> Non
     if dotenv is None:
         dotenv = credential_dotenv()
     desired, current = {}, {}
+    for entry in configuration["secrets"].values():
+        parent = Path(entry["file"]).parent
+        if parent.exists() or parent.is_symlink():
+            private_directory(parent)
     for name, variable in SECRET_VARIABLES.items():
         path = Path(configuration["secrets"][name]["file"])
         if path.exists() or path.is_symlink():

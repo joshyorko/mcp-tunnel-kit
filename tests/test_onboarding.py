@@ -116,6 +116,7 @@ class OnboardingTests(unittest.TestCase):
     def test_malformed_dotenv_fails_closed_without_echoing_its_contents(self):
         for line in ('EXECUTOR_PAT="PRIVATE_SENTINEL\nINJECTED"\n',
                      'EXECUTOR_PAT="PRIVATE_SENTINEL\\nINJECTED"\n',
+                     'EXECUTOR_PAT=PRIVATE_SENTINEL\rINJECTED\n',
                      'EXECUTOR_PAT=\n', 'EXECUTOR_PAT PRIVATE_SENTINEL\n',
                      'EXECUTOR_PAT=PRIVATE_SENTINEL\nEXECUTOR_PAT=duplicate\n'):
             with self.subTest(line=line):
@@ -240,6 +241,65 @@ class OnboardingTests(unittest.TestCase):
             self.assertEqual(self.helper.main(), 2)
         self.assertNotIn("PRIVATE_SENTINEL", output.getvalue())
         self.assertFalse(self.secrets.exists())
+
+    def test_crlf_dotenv_is_supported_but_crlf_private_credentials_are_rejected(self):
+        path = self.dotenv()
+        path.write_bytes(path.read_bytes().replace(b"\n", b"\r\n"))
+        self.materialize()
+        self.assertEqual((self.secrets / "executor-pat").read_text(), "FIXTURE_PAT\n")
+
+    def test_invalid_tunnel_id_rejects_whole_set_without_writes(self):
+        self.dotenv({**VALUES, "CONTROL_PLANE_TUNNEL_ID": "PRIVATE_SENTINEL"})
+        with self.assertRaises(self.helper.ControlError) as raised:
+            self.materialize()
+        self.assertNotIn("PRIVATE_SENTINEL", str(raised.exception))
+        self.assertFalse(self.secrets.exists())
+
+    def test_interrupted_atomic_rotation_keeps_original_and_leaves_no_temp_file(self):
+        self.dotenv()
+        self.materialize()
+        self.dotenv({**VALUES, "EXECUTOR_PAT": "ROTATED_FIXTURE_PAT"})
+        before = {p.name: p.read_bytes() for p in self.secrets.iterdir()}
+        with patch.object(self.helper.os, "replace", side_effect=OSError("fixture rename failure")):
+            with self.assertRaises(OSError):
+                self.materialize()
+        self.assertEqual({p.name: p.read_bytes() for p in self.secrets.iterdir()}, before)
+        self.materialize()
+        self.assertEqual((self.secrets / "executor-auth-header").read_text(), "Bearer ROTATED_FIXTURE_PAT\n")
+
+    def test_explicit_value_repairs_extra_newlines_in_stale_file(self):
+        self.dotenv()
+        self.materialize()
+        path = self.secrets / "executor-pat"
+        path.write_text("FIXTURE_PAT\n\n")
+        self.materialize()
+        self.assertEqual(path.read_text(), "FIXTURE_PAT\n")
+
+    def test_dotenv_is_private_even_when_credential_validation_fails(self):
+        path = self.dotenv({**VALUES, "EXECUTOR_PAT": ""})
+        path.chmod(0o644)
+        with self.assertRaises(self.helper.ControlError):
+            self.materialize()
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
+    def test_unchanged_private_files_do_not_bypass_directory_permissions(self):
+        self.dotenv()
+        self.materialize()
+        self.secrets.chmod(0o777)
+        with self.assertRaises(self.helper.ControlError):
+            self.materialize()
+        self.secrets.chmod(0o700)
+        original = self.secrets.rename(self.root / "real-private")
+        self.secrets.symlink_to(original, target_is_directory=True)
+        with self.assertRaises(self.helper.ControlError):
+            self.materialize()
+
+    def test_utf8_bom_does_not_silently_skip_explicit_rotation(self):
+        self.dotenv()
+        self.materialize()
+        (self.root / ".env").write_text("\ufeffCONTROL_PLANE_API_KEY=ROTATED_FIXTURE_KEY\n")
+        self.materialize()
+        self.assertEqual((self.secrets / "control-plane-api-key").read_text(), "ROTATED_FIXTURE_KEY\n")
 
 
 if __name__ == "__main__":
