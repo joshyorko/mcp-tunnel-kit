@@ -2,6 +2,11 @@ name: codex-control-plane
 
 x-operator:
   targets_source: ${CAS_TARGETS_SOURCE:-}
+  devsy_enabled: ${DEVSY_MCP_ENABLED:-false}
+  devsy_binary: ${DEVSY_MCP_BIN:-}
+  devsy_cwd: ${DEVSY_MCP_CWD:-}
+  devsy_home: ${DEVSY_MCP_HOME:-}
+  devsy_state: ${CONTROL_PLANE_STATE_DIR:-./.state}/devsy-bridge
 
 services:
   executor:
@@ -13,7 +18,7 @@ services:
       BETTER_AUTH_URL: http://127.0.0.1:4312
       EXECUTOR_DATA_DIR: /app/data
       EXECUTOR_APPS_ALLOW_PRIVATE_FETCH: "true"
-      EXECUTOR_URL_ALLOW_HTTP_ORIGINS: '["http://${CONTROL_PLANE_GATEWAY:-172.30.86.1}:8088"]'
+      EXECUTOR_URL_ALLOW_HTTP_ORIGINS: '["http://${CONTROL_PLANE_GATEWAY:-172.30.86.1}:8088","http://${CONTROL_PLANE_GATEWAY:-172.30.86.1}:8089"]'
     ports:
       - "127.0.0.1:4312:4312"
     volumes:
@@ -92,6 +97,8 @@ services:
     environment:
       EXECUTOR_URL: http://executor:4312
       CAS_MCP_URL: http://${CONTROL_PLANE_GATEWAY:-172.30.86.1}:8088/mcp
+      DEVSY_MCP_ENABLED: ${DEVSY_MCP_ENABLED:-false}
+      DEVSY_MCP_URL: http://${CONTROL_PLANE_GATEWAY:-172.30.86.1}:8089/mcp
       CONTROL_PLANE_BOOTSTRAP_DIR: /var/lib/tunnel-kit
       EXECUTOR_PAT_FILE: /run/secrets/executor-pat
     secrets:
@@ -159,3 +166,4 @@ secrets:
     file: ${CONTROL_PLANE_SECRET_DIR:-./.state/secrets}/control-plane-tunnel-id
   executor-auth-header:
     file: ${CONTROL_PLANE_SECRET_DIR:-./.state/secrets}/executor-auth-header
+

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bounded Compose setup and probes. No daemon, credential output, or native lifecycle."""
+"""Compose setup, bounded probes and the optional owned host Devsy bridge."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import argparse
 import getpass
 import hashlib
 import ipaddress
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -26,6 +27,10 @@ PROJECT = "codex-control-plane"
 NETWORK = PROJECT + "_control-plane"
 COMPACT = {"execute", "resume", "skills"}
 PROTOCOL_VERSIONS = {"2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"}
+DEVSY_READS = {"provider_list", "workspace_list", "workspace_status"}
+DEVSY_TOOLS = DEVSY_READS | {"workspace_create", "workspace_start", "workspace_stop",
+                           "workspace_delete", "workspace_exec", "provider_add",
+                           "provider_delete", "provider_use"}
 PRIVATE_NETWORKS = tuple(ipaddress.ip_network(value) for value in
                          ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"))
 SECRET_VARIABLES = {
@@ -514,30 +519,71 @@ def search_codex(session):
 
 
 def ensure_codex_app(http, url, receipt=None):
+    return ensure_mcp_app(http, url, "Codex", receipt)
+
+
+def ensure_mcp_app(http, url, name, receipt=None):
+    if name not in {"Codex", "Devsy"}:
+        raise ControlError("Only the configured Codex and Devsy integrations are managed.")
+    slug = name.lower()
     context, _ = http.request("GET", "/api/context")
     organization = context.get("organization")
     if not isinstance(organization, str) or not organization:
         raise ControlError("Use a PAT scoped to the browser-created organization.")
     prefix = "/api/organizations/" + urllib.parse.quote(organization, safe="")
     inventory, _ = http.request("GET", prefix + "/inventory")
-    existing = [app for app in inventory["apps"] if app.get("slug") == "codex" or app.get("name") == "Codex"]
+    existing = [app for app in inventory["apps"] if app.get("slug") == slug or app.get("name") == name]
     if receipt:
         identity = [app for app in inventory["apps"] if app.get("id") == receipt.get("id")]
         if (receipt.get("organization") != organization or receipt.get("url") != url
-                or len(identity) != 1 or identity[0].get("slug") != "codex"
-                or identity[0].get("name") != "Codex" or existing != identity):
-            raise ControlError("The saved Codex app identity, organization, or URL changed. Inspect the dashboard; no app was imported.")
+                or len(identity) != 1 or identity[0].get("slug") != slug
+                or identity[0].get("name") != name or existing != identity):
+            raise ControlError("The saved MCP app identity, organization, or URL changed. Inspect the dashboard; no app was imported.")
     if len(existing) > 1:
-        raise ControlError("Multiple Codex apps exist. Inspect the dashboard before retrying.")
+        raise ControlError("Multiple matching MCP apps exist. Inspect the dashboard before retrying.")
     if existing:
         app = existing[0]
     else:
-        app, _ = http.request("POST", prefix + "/apps/import", {"source": {"kind": "mcp", "name": "Codex", "url": url}})
-    if app.get("slug") != "codex" or not app.get("id") or not app.get("activeDeployment"):
-        raise ControlError("Codex import returned an unexpected or undeployed app; inspect the dashboard.")
+        app, _ = http.request("POST", prefix + "/apps/import", {"source": {"kind": "mcp", "name": name, "url": url}})
+    if app.get("slug") != slug or not app.get("id") or not app.get("activeDeployment"):
+        raise ControlError("MCP import returned an unexpected or undeployed app; inspect the dashboard.")
     source, _ = http.request("GET", prefix + "/apps/" + urllib.parse.quote(app["id"], safe="") + "/source")
     verify_app_source(source, url)
     return {"organization": organization, "id": app["id"], "url": url}
+
+
+def verify_devsy_catalog(tools):
+    names = {tool["name"] for tool in tools}
+    if not DEVSY_TOOLS.issubset(names) or len(names) != len(tools):
+        raise ControlError("Devsy bridge catalog lacks the required tools or contains duplicates.")
+    for tool in tools:
+        annotations = tool.get("annotations", {})
+        readonly = tool["name"] in DEVSY_READS
+        if (annotations.get("readOnlyHint") is not readonly
+                or annotations.get("destructiveHint") is not (not readonly)):
+            raise ControlError("Devsy bridge approval hints do not match the explicit read-only allowlist.")
+
+
+def search_devsy(session):
+    paths = set()
+    for query in ("workspace", "provider"):
+        data = execution(session.call("tools/call", {"name": "execute", "arguments": {"code":
+            "return await tools.search(" + json.dumps({"namespace": "devsy", "query": query, "limit": 100}) + ");"}}))
+        if (data.get("status") != "completed" or not data.get("execution", {}).get("ok")
+                or data.get("unavailableApps")):
+            raise ControlError("Devsy discovery through Executor is unavailable.")
+        paths.update(item["path"] for item in data["execution"]["value"].get("items", []))
+    if not {"tools.devsy." + name for name in DEVSY_TOOLS}.issubset(paths):
+        raise ControlError("Executor Devsy discovery lacks required workspace/provider tools.")
+
+
+def read_devsy(session):
+    for name in ("provider_list", "workspace_list"):
+        data = execution(session.call("tools/call", {"name": "execute", "arguments": {
+            "code": "return await tools.devsy." + name + "({});"}}))
+        if (data.get("status") != "completed" or not data.get("execution", {}).get("ok")
+                or data["execution"]["value"].get("isError")):
+            raise ControlError("Devsy read did not complete without approval; no mutation was attempted.")
 
 
 def bootstrap():
@@ -559,7 +605,24 @@ def bootstrap():
     receipt = ensure_codex_app(http, url, receipt)
     write_private(marker, json.dumps(receipt) + "\n")
     search_codex(session)
-    print("Codex import retained; authenticated browser MCP and Codex discovery ready.")
+    enabled = os.environ.get("DEVSY_MCP_ENABLED", "false")
+    if enabled not in {"true", "false"}:
+        raise ControlError("DEVSY_MCP_ENABLED must be true or false.")
+    if enabled == "true":
+        devsy_url = os.environ["DEVSY_MCP_URL"]
+        if devsy_url != f"http://{address}:8089/mcp":
+            raise ControlError("Devsy import must use the same managed bridge gateway at port 8089 and /mcp.")
+        devsy = Mcp(Http(devsy_url.removesuffix("/mcp")), "/mcp")
+        verify_devsy_catalog(devsy.tools())
+        marker = state / "devsy-integration.json"
+        receipt = json.loads(read_private(marker)) if marker.exists() or marker.is_symlink() else None
+        receipt = ensure_mcp_app(http, devsy_url, "Devsy", receipt)
+        write_private(marker, json.dumps(receipt) + "\n")
+        search_devsy(session)
+        read_devsy(session)
+        print("Codex and Devsy retained; browser MCP, discovery and harmless Devsy reads ready.")
+    else:
+        print("Codex import retained; authenticated browser MCP and Codex discovery ready. Devsy disabled.")
 
 
 def probe(resume=False):
@@ -613,9 +676,45 @@ def probe(resume=False):
     return 0
 
 
+def host_bridge():
+    spec = importlib.util.spec_from_file_location("devsy_bridge", Path(__file__).with_name("devsy_bridge.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def start_control_plane(configuration):
+    bridge = host_bridge()
+    value = bridge.settings(configuration)
+    # Close external access before revalidating either app on every up, including restarts.
+    compose("stop", "--timeout", "30", "tunnel-client", timeout=45)
+    compose("up", "-d", "--wait", "--wait-timeout", "300", "executor", "codex-action-server", timeout=330)
+    network_preflight(configuration)
+    if value:
+        bridge.start(value)
+    else:
+        bridge.stop(configuration["x-operator"]["devsy_state"])
+    # Always rerun the completed job. Compose otherwise retains successful one-shot jobs.
+    compose("up", "--force-recreate", "--no-deps", "--exit-code-from", "app-ready", "app-ready", timeout=210)
+    compose("up", "-d", "--no-deps", "--wait", "--wait-timeout", "120", "tunnel-client", timeout=150)
+
+
 def status():
     for row in compose_rows():
         print(f"{row['Service']}: {row['State']} {row.get('Health', '')}".rstrip())
+    configuration = config()
+    bridge = host_bridge()
+    value = bridge.settings(configuration)
+    if value is None:
+        print("Host Devsy: disabled")
+    else:
+        marker = Path(value["state"]) / "process.json"
+        record = json.loads(read_private(marker)) if marker.exists() or marker.is_symlink() else None
+        if record and bridge.owned_process(record):
+            bridge.health(value, record["instance"])
+            print("Host Devsy: ready")
+        else:
+            print("Host Devsy: not running; run normal up to revalidate")
     print("Browser and ChatGPT acceptance require their separate live gates.")
 
 
@@ -636,6 +735,9 @@ def main():
         elif args.mode == "status":
             status()
         elif args.mode == "down":
+            configuration = config()
+            compose("stop", "--timeout", "30", "tunnel-client", timeout=45)
+            host_bridge().stop(configuration["x-operator"]["devsy_state"])
             compose("down", "--timeout", "30", timeout=90)
             print("Control-plane containers stopped; persistent data and secret files retained.")
         else:
@@ -653,6 +755,7 @@ def main():
             local_build = "build" in configuration["services"]["codex-action-server"]
             if not local_build and not re.fullmatch(r"ghcr\.io/joshyorko/codex-action-server(?:@sha256:[0-9a-f]{64}|:sha-[0-9a-f]{40})", image):
                 raise ControlError("Production CAS_IMAGE must be the published immutable digest or full SHA tag.")
+            host_bridge().settings(configuration)
             materialize_secrets(configuration, dotenv=dotenv)
             prepare(configuration)
             validate_secrets(configuration)
@@ -660,7 +763,7 @@ def main():
             if args.mode == "check":
                 print("Compose paths, socket ownership, private files, immutable image and bridge collision checks passed; no service started.")
             else:
-                compose("up", "-d", "--wait", "--wait-timeout", "300", timeout=330)
+                start_control_plane(configuration)
                 status()
     except ControlError as error:
         print(str(error), file=sys.stderr)
@@ -673,3 +776,4 @@ def main():
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
