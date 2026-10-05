@@ -1,0 +1,10 @@
+# Explicit opt-in. Applying the changed origin allowlist recreates only Executor.
+# No new runtime, host mount, tunnel, or automatic Luna import is introduced.
+services:
+  executor:
+    environment:
+      EXECUTOR_URL_ALLOW_HTTP_ORIGINS: '["http://${CONTROL_PLANE_GATEWAY:-172.30.86.1}:8088","http://${CONTROL_PLANE_GATEWAY:-172.30.86.1}:8089","http://${CONTROL_PLANE_GATEWAY:-172.30.86.1}:8090"]'
+  app-ready:
+    environment:
+      CONTROL_PLANE_GATEWAY: ${CONTROL_PLANE_GATEWAY:-172.30.86.1}
+      LUNA_VERIFY_RUN_ID: ${LUNA_VERIFY_RUN_ID:-}

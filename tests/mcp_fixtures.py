@@ -62,7 +62,7 @@ RPC_ERROR = {'code': -32602, 'message': 'Exact turn guard rejected',
 
 
 class LoopbackServer:
-    def __init__(self, dispatch):
+    def __init__(self, dispatch, host='127.0.0.1'):
         class Handler(BaseHTTPRequestHandler):
             def handle_request(self):
                 raw = b''
@@ -95,9 +95,9 @@ class LoopbackServer:
             def log_message(self, *_args):
                 pass
 
-        self.server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        self.server = ThreadingHTTPServer((host, 0), Handler)
         self.server.daemon_threads = True
-        self.url = f'http://127.0.0.1:{self.server.server_port}'
+        self.url = f'http://{host}:{self.server.server_port}'
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
 

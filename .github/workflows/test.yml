@@ -21,6 +21,7 @@ jobs:
       - run: bash -n scripts/control-plane-up scripts/control-plane-down scripts/control-plane-status
       - run: sh -n scripts/tunnel-secrets.sh
       - run: docker compose --env-file .env.example config --quiet
+      - run: docker compose --env-file .env.example -f compose.yaml -f compose.luna.yaml config --quiet
 
 
   executor-devsy-fixture:
@@ -33,3 +34,28 @@ jobs:
           python-version: '3.12'
       - run: python tests/executor_devsy_live.py
       - run: python tests/devsy_lifecycle_live.py
+
+  executor-luna-fixture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.14.0'
+      - uses: dtolnay/rust-toolchain@1.90.0
+      - uses: actions/checkout@v4
+        with:
+          repository: joshyorko/plugins
+          ref: f2c81429db651c0bfe9da7a22b3853dfb6d9c9ac
+          path: .product-fixture
+      - run: cargo build --locked --manifest-path .product-fixture/plugins/luna-factory/server/Cargo.toml
+      - run: npm ci && npm run build
+        working-directory: .product-fixture/plugins/luna-factory/ui
+      - run: >-
+          python tests/executor_luna_live.py
+          --binary .product-fixture/plugins/luna-factory/server/target/debug/luna-factoryd
+          --ui .product-fixture/plugins/luna-factory/ui/dist/index.html

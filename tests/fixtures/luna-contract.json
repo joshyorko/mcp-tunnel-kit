@@ -1,0 +1,478 @@
+{
+  "product_sha": "f2c81429db651c0bfe9da7a22b3853dfb6d9c9ac",
+  "discovery": {
+    "resultType": "complete",
+    "supportedVersions": [
+      "2024-11-05",
+      "2025-03-26",
+      "2025-06-18",
+      "2025-11-25",
+      "2026-07-28"
+    ],
+    "capabilities": {
+      "extensions": {
+        "io.modelcontextprotocol/ui": {
+          "mimeTypes": [
+            "text/html;profile=mcp-app"
+          ]
+        },
+        "openai/settings": {
+          "readTool": "read_factory_settings",
+          "updateTool": "update_factory_settings"
+        }
+      },
+      "resources": {},
+      "tools": {}
+    },
+    "instructions": "One canonical Luna Factory runtime. Status and UI reads make no inference calls. Start requests require an approved repository alias and explicit bounded authority. Never treat a tool response as live model-route or tunnel/UI proof.",
+    "ttlMs": 0,
+    "cacheScope": "private",
+    "_meta": {
+      "io.modelcontextprotocol/serverInfo": {
+        "name": "luna-factory",
+        "title": "Luna Factory",
+        "version": "0.2.0"
+      }
+    }
+  },
+  "tools": [
+    {
+      "name": "start_factory",
+      "title": "Start Luna Factory",
+      "description": "Start one bounded objective in an operator-approved repository. Explicit finish authority and finite limits are required.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "acceptance": {
+            "items": {
+              "maxLength": 1000,
+              "type": "string"
+            },
+            "maxItems": 32,
+            "minItems": 1,
+            "type": "array"
+          },
+          "capacity": {
+            "maximum": 8,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "finish": {
+            "enum": [
+              "local_candidate",
+              "push",
+              "pr"
+            ],
+            "type": "string"
+          },
+          "idempotency_key": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "non_goals": {
+            "items": {
+              "maxLength": 1000,
+              "type": "string"
+            },
+            "maxItems": 32,
+            "type": "array"
+          },
+          "objective": {
+            "maxLength": 8000,
+            "minLength": 1,
+            "type": "string"
+          },
+          "profile": {
+            "maxLength": 64,
+            "type": "string"
+          },
+          "repair_attempts": {
+            "maximum": 10,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "repository": {
+            "maxLength": 64,
+            "type": "string"
+          },
+          "wall_seconds": {
+            "maximum": 86400,
+            "minimum": 30,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "repository",
+          "objective",
+          "acceptance",
+          "non_goals",
+          "finish",
+          "profile",
+          "capacity",
+          "repair_attempts",
+          "wall_seconds",
+          "idempotency_key"
+        ],
+        "type": "object"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true
+      },
+      "_meta": {
+        "ui": {
+          "resourceUri": "ui://luna-factory/workbench.html"
+        }
+      }
+    },
+    {
+      "name": "list_factory_runs",
+      "title": "Factory runs",
+      "description": "Read recent runs and operator attention without inference.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "limit": {
+            "maximum": 100,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "get_factory_run",
+      "title": "Factory run",
+      "description": "Read one run, remaining gap and bounded evidence without inference.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "run_id": {
+            "maxLength": 64,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "run_id"
+        ],
+        "type": "object"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "_meta": {
+        "ui": {
+          "resourceUri": "ui://luna-factory/workbench.html"
+        }
+      }
+    },
+    {
+      "name": "get_factory_capabilities",
+      "title": "Factory capabilities",
+      "description": "Read trusted repository aliases, runtime capability and routing evidence. This never starts a model.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "steer_factory_run",
+      "title": "Steer factory run",
+      "description": "Send an in-scope correction to the current owner, fenced to the expected turn. Does not expand authority.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "expected_turn_id": {
+            "maxLength": 64,
+            "minLength": 1,
+            "type": "string"
+          },
+          "message": {
+            "maxLength": 4000,
+            "minLength": 1,
+            "type": "string"
+          },
+          "run_id": {
+            "maxLength": 64,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "run_id",
+          "expected_turn_id",
+          "message"
+        ],
+        "type": "object"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true
+      }
+    },
+    {
+      "name": "cancel_factory_run",
+      "title": "Stop factory run",
+      "description": "Interrupt only owned execution and verify stopped descendants before releasing its repository claim.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "run_id": {
+            "maxLength": 64,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "run_id"
+        ],
+        "type": "object"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true
+      }
+    },
+    {
+      "name": "resume_factory_run",
+      "title": "Resume factory run",
+      "description": "Reconcile the same native thread with preserved authority and limits. To answer a completed decision, include message and the current pending_decision.id as expected_decision_id. Identical answer retries never dispatch twice.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "expected_decision_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "message": {
+            "maxLength": 4000,
+            "minLength": 1,
+            "type": "string"
+          },
+          "run_id": {
+            "maxLength": 64,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "run_id"
+        ],
+        "type": "object"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true
+      }
+    },
+    {
+      "name": "open_factory",
+      "title": "Luna Factory",
+      "description": "Open the Luna Factory workbench.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "_meta": {
+        "openai/ui": {
+          "entrypoints": [
+            {
+              "type": "global"
+            }
+          ]
+        },
+        "ui": {
+          "resourceUri": "ui://luna-factory/workbench.html",
+          "visibility": [
+            "app"
+          ]
+        }
+      }
+    },
+    {
+      "name": "open_factory_panel",
+      "title": "Factory run panel",
+      "description": "Open the currently selected factory run beside this conversation.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "_meta": {
+        "openai/ui": {
+          "entrypoints": [
+            {
+              "type": "thread"
+            }
+          ]
+        },
+        "ui": {
+          "resourceUri": "ui://luna-factory/workbench.html",
+          "visibility": [
+            "app"
+          ]
+        }
+      }
+    },
+    {
+      "name": "refresh_factory",
+      "title": "Refresh workbench",
+      "description": "Read bounded workbench data without inference.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "run_id": {
+            "maxLength": 64,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "_meta": {
+        "ui": {
+          "resourceUri": "ui://luna-factory/workbench.html",
+          "visibility": [
+            "app"
+          ]
+        }
+      }
+    },
+    {
+      "name": "read_factory_settings",
+      "title": "Factory settings",
+      "description": "Read safe UI defaults. Trusted server configuration remains authoritative.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "layout": {
+            "type": "array"
+          },
+          "schema": {
+            "type": "object"
+          },
+          "values": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "schema",
+          "values"
+        ],
+        "type": "object"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "_meta": {
+        "ui": {
+          "visibility": [
+            "app"
+          ]
+        }
+      }
+    },
+    {
+      "name": "update_factory_settings",
+      "title": "Update factory defaults",
+      "description": "Change safe UI defaults within trusted limits. Does not change repository access or runtime permissions.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "capacity": {
+            "maximum": 8,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "finish": {
+            "enum": [
+              "local_candidate",
+              "push",
+              "pr"
+            ],
+            "type": "string"
+          },
+          "profile": {
+            "maxLength": 64,
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true
+      },
+      "_meta": {
+        "ui": {
+          "visibility": [
+            "app"
+          ]
+        }
+      }
+    }
+  ]
+}
