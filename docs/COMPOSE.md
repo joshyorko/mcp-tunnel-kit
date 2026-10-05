@@ -50,6 +50,12 @@ The default narrow mount is `/tmp/codex-daemon-1000` at `/run/native-codex`, rea
 only. The generated private target file changes only `local.socket_path` to
 that mounted socket name. The original target file remains untouched.
 
+The repo-local `.env` uses `CAS_TARGETS_SOURCE`, `CAS_RUNTIME_DIR`, and
+`CAS_RECEIPTS_DIR` for operator-owned host paths. Compose sets
+`CODEX_ACTION_TARGETS`, `CODEX_ACTION_DATA`, `CODEX_ACTION_RECEIPTS`, and
+`CODEX_ACTION_PORT` inside CAS. Those four keys are unnecessary in this
+checkout's `.env`; retain them separately if you still use host-native CAS.
+
 The state directory and its CAS data, receipts, and Actions Runtime cache must
 be owned by that same user, mode 0700. Generated configuration and secret files
 must be mode 0600. Setup refuses symlinks and unsafe ownership or permissions.
@@ -232,7 +238,9 @@ the existing files and services.
 Use the wrapper scripts for normal startup and shutdown. They materialize
 credentials, manage the optional host bridge, and rerun both-app readiness before
 opening the tunnel. Raw `docker compose up` and `down` manage containers only;
-they bypass these checks and must not replace the wrappers when Devsy is enabled.
+they bypass orchestration and must not replace the wrappers, including for
+Codex-only deployments. A successful cached `app-ready` job does not prove
+the apps are ready after a restart.
 
 To stop the stack and retain persistent state:
 
@@ -308,8 +316,8 @@ docker compose --env-file .env.example config --quiet
 git diff --check
 ```
 
-Record these nine live gates against the exact artifacts after a clean stop and
-`docker compose up -d`:
+Record these nine live gates against the exact artifacts after
+`./scripts/control-plane-down` and `./scripts/control-plane-up`:
 
 | Gate | Required evidence |
 | --- | --- |
@@ -321,9 +329,8 @@ Record these nine live gates against the exact artifacts after a clean stop and
 | 6 | Tunnel-client connects and records a successful control-plane poll |
 | 7 | ChatGPT reaches Executor through the Secure MCP Tunnel |
 | 8 | A harmless Codex call pauses, Josh approves in the browser, and the original execution resumes |
-| 9 | Compose down stops the stack while host native Codex and persistent Executor and receipt state survive |
+| 9 | `control-plane-down` stops the containers and owned host Devsy bridge while native Codex and persistent Executor and receipt state survive |
 
 Focused tests and image builds do not close these live gates. Remote native
 execution is unverified while the selected Devsy context has no workspace.
 Keep the deployment draft until every requested gate is proven.
-

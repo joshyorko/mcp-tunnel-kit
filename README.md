@@ -21,6 +21,8 @@ in your editor. Then run:
 Normal startup validates the credentials and prepares private file-backed Docker
 secrets automatically. A restored setup with all three credentials needs no
 separate `--secrets` step. Keep your existing `.env` when updating a checkout.
+Use these wrappers for the stack lifecycle. Raw `docker compose up` and `down`
+bypass host Devsy bridge management and startup revalidation.
 
 For a fresh Executor, first run `./scripts/control-plane-up --first-run` without
 credentials. Finish the browser owner/organization setup, create the organization
