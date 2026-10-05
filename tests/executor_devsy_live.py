@@ -39,6 +39,9 @@ IMAGE = ("ghcr.io/usefulsoftwareco/executor-selfhost:2.0.0-beta.8"
          "@sha256:a7d4e9d7c40aa02e08224757a59679ae61b6bfb59a61b3d06308e29f4652305a")
 READS = {"provider_list", "workspace_list", "workspace_status"}
 MUTATION = "workspace_delete"
+CODEX_CONTROLS = {"start_thread", "create_thread_and_start_turn", "start_turn", "resume_thread",
+                  "steer_turn", "interrupt_turn", "update_thread_settings", "update_turn_settings",
+                  "set_thread_goal", "clear_thread_goal"}
 FIXTURE_TOOLS = READS | {"workspace_create", "workspace_start", "workspace_stop", MUTATION,
                         "workspace_exec", "provider_add", "provider_delete", "provider_use",
                         "future_tool"}
@@ -139,7 +142,8 @@ def fixture_servers(directory):
             reply["result"] = {"protocolVersion": "2025-11-25", "capabilities": {"tools": {}},
                                "serverInfo": {"name": "synthetic-codex", "version": "1"}}
         elif message["method"] == "tools/list":
-            reply["result"] = {"tools": [tool("list_targets"), tool("discover_threads")]}
+            reply["result"] = {"tools": [tool(name, destructive=True) for name in sorted(
+                {"list_targets", "discover_threads"} | CODEX_CONTROLS)]}
         elif message["method"] == "tools/call":
             codex_calls.append(message["params"])
             reply["result"] = CODEX_RESULT
@@ -289,13 +293,13 @@ def exercise_executor(control, origin, fixtures, restart):
         require(codex.get("slug") == "codex", "Unexpected Codex namespace")
         codex_source_path = prefix + "/apps/" + codex["id"] + "/source"
         codex_source, _ = http.request("GET", codex_source_path)
-        control.verify_app_source(codex_source, fixtures["codex"])
+        control.verify_codex_app_source(codex_source, fixtures["codex"])
         devsy_receipt = control.ensure_mcp_app(http, fixtures["devsy"], "Devsy")
         devsy, _ = http.request("GET", prefix + "/apps/" + devsy_receipt["id"])
         require(devsy.get("slug") == "devsy", "Unexpected Devsy namespace")
         devsy_source_path = prefix + "/apps/" + devsy["id"] + "/source"
         devsy_source, _ = http.request("GET", devsy_source_path)
-        control.verify_app_source(devsy_source, fixtures["devsy"])
+        control.verify_devsy_app_source(devsy_source, fixtures["devsy"])
         require(http.request("GET", codex_source_path)[0] == codex_source,
                 "Importing Devsy changed Codex source or deployment")
         for receipt, name in ((codex_receipt, "Codex"), (devsy_receipt, "Devsy")):
@@ -356,6 +360,12 @@ def exercise_executor(control, origin, fixtures, restart):
         STAGE = "Codex read pass-through"
         require(successful(control, session, "return await tools.codex.list_targets({});") == CODEX_RESULT,
                 "Codex read changed after Devsy import")
+        STAGE = "Codex control calls bypass Executor approval"
+        for name in sorted(CODEX_CONTROLS):
+            result = successful(control, session, "return await tools.codex." + name + "({});")
+            require(result == CODEX_RESULT, "Codex control call did not reach the synthetic CAS fixture")
+            require(fixtures["codex_calls"][-1] == {"name": name, "arguments": {}},
+                    "Codex control call reached a different native operation")
         STAGE = "browser mutation approval"
         before = fixtures["calls"]()
         pending = control.execution(session.call("tools/call", {"name": "execute", "arguments": {
@@ -410,7 +420,7 @@ def main():
             STAGE = "disposable Executor startup"
             with disposable_executor(control, [fixtures["codex"], fixtures["devsy"]]) as (origin, restart):
                 exercise_executor(control, origin, fixtures, restart)
-    print("Pinned Executor: Codex + Devsy import/retention/restart, scoped search, read pass-through, and browser mutation pause passed.")
+    print("Pinned Executor: Codex import/update, ten control calls without approval, Devsy reads, and browser mutation pause passed.")
     print("No mutation was approved or forwarded; only disposable fixture state was used.")
     return 0
 

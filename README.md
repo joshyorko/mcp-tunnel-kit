@@ -33,8 +33,10 @@ and browser acceptance.
 The stock Executor dashboard is `http://127.0.0.1:4312/`. The tunnel's `main`
 channel uses `http://executor:4312/mcp?elicitation_mode=browser` on Compose DNS.
 Executor advertises only `skills`, `execute`, and `resume`; Codex tools are found
-through codemode. Browser decisions stay in the signed-in browser. The kit
-does not install systemd services or change native Codex or Devsy state.
+through codemode. The trusted Codex app has no Executor browser-approval wrapper,
+while Devsy mutations remain browser-gated. CAS validation and native Codex
+safety are unchanged. The kit does not install systemd services or change native
+Codex or Devsy state.
 
 The retained direct Codex launchers are break-glass paths. Stop the Compose
 tunnel before using them. [Foreground Executor notes](docs/EXECUTOR.md) describe

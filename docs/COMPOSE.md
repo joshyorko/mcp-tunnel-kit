@@ -212,8 +212,12 @@ and subnet collisions before starting services. CAS readiness initializes MCP
 and discovers its actual catalog. Executor readiness uses its stock native
 health command. The bounded `app-ready` job then imports Codex through the
 official organization API or retains the matching existing app. It verifies
-the stock generated source, authenticated compact MCP, browser `resume` schema,
-and Codex discovery before the tunnel starts. When host Devsy MCP is enabled,
+the generated Codex source, authenticated compact MCP, browser `resume` schema,
+and Codex discovery before the tunnel starts. Codex tools are imported without
+Executor browser-approval wrapping. If the existing app still has the exact
+source emitted by the previous pinned generator, bootstrap deploys the updated
+source to that app ID and verifies it; unknown or edited source remains a hard
+stop. When host Devsy MCP is enabled,
 it also verifies and retains Devsy, discovers its namespace, and performs the two
 harmless list reads. The one-shot bootstrap reruns on every normal up. It makes
 no native Codex mutation or automatic approval.
@@ -221,8 +225,8 @@ no native Codex mutation or automatic approval.
 The generator archive inspected for source validation is revision
 `e1c4f014c89c3f27648fd77c728311b6a2767819`. The pulled official image declares
 OCI revision `4930a44e9ed7b8556f61984fae7786b4a79344c5`. Live import readback must
-prove compatibility. A source mismatch stops bootstrap, reports only the source
-hash, and preserves the app for inspection.
+prove compatibility. An unrecognized source mismatch stops bootstrap, reports
+only the source hash, and preserves the app for inspection.
 
 The tunnel healthcheck requires liveness, readiness, and a successful
 control-plane poll. Healthy services do not prove browser approval or ChatGPT
@@ -253,7 +257,7 @@ shutdown. Those operations destroy durable data or credentials. The script stops
 the kit-owned Devsy bridge and its MCP children. It preserves host Devsy
 configuration and workspaces and does not stop native Codex or unrelated services.
 
-## Verify browser approval and the consumer
+## Verify approval policy and the consumer
 
 Use the stock CAS image's Python for the harmless target-list probe through the
 browser MCP endpoint:
@@ -263,7 +267,9 @@ docker compose run --rm --no-deps --entrypoint python3 app-ready /opt/tunnel-kit
 docker compose run --rm --no-deps --entrypoint python3 app-ready /opt/tunnel-kit/compose_control.py resume
 ```
 
-Exit 3 means a browser approval is pending. Its exact URL and request ID are
+The harmless Codex target-list probe should complete without browser approval.
+Exit 3 means a browser approval is pending, for example after a Devsy mutation.
+Its exact URL and request ID are
 kept with the original MCP session ID and negotiated protocol only in the
 private bootstrap `browser-approval.json`. Resume reuses that transport identity
 without initializing a new session. Open the request in
@@ -287,7 +293,9 @@ helper never retries `execute` automatically.
 
 Reconnect ChatGPT or Jarvis to the same existing tunnel. Verify a fresh catalog
 of exactly `skills`, `execute`, and `resume`, Codex discovery through
-`tools.search`, and the harmless read with browser approval where requested.
+`tools.search`, and a harmless Codex control call without browser approval.
+Verify that a Devsy mutation returns `approval-required`; do not approve it as
+part of this check. Devsy reads should complete without approval.
 Local tests, container health, and a successful poll do not close this consumer
 gate.
 
@@ -328,8 +336,9 @@ Record these nine live gates against the exact artifacts after
 | 5 | `list_targets` traverses Executor to Action Server |
 | 6 | Tunnel-client connects and records a successful control-plane poll |
 | 7 | ChatGPT reaches Executor through the Secure MCP Tunnel |
-| 8 | A harmless Codex call pauses, Josh approves in the browser, and the original execution resumes |
-| 9 | `control-plane-down` stops the containers and owned host Devsy bridge while native Codex and persistent Executor and receipt state survive |
+| 8 | A harmless Codex control call executes without browser approval |
+| 9 | A Devsy read completes and a Devsy mutation returns `approval-required` without execution |
+| 10 | `control-plane-down` stops the containers and owned host Devsy bridge while native Codex and persistent Executor and receipt state survive |
 
 Focused tests and image builds do not close these live gates. Remote native
 execution is unverified while the selected Devsy context has no workspace.

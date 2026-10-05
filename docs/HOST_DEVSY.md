@@ -93,7 +93,9 @@ It is not authenticated per host user: every local host user and every container
 attached to this managed network must be trusted. Such peers can call known
 Devsy tools directly with the Devsy owner's authority. Do not attach untrusted
 containers, route/publish this endpoint, or use this on a multi-user untrusted
-host. Browser approval is enforced at Executor for tunneled calls; this adapter
+host. Executor browser approval remains enabled for Devsy mutations. The trusted
+Codex app is imported without the redundant Executor approval wrapper; CAS target,
+CWD and thread validation and native Codex safety remain unchanged. This adapter
 does not invent a second approval service. A deployment requiring hostile-peer
 isolation needs a separately designed authenticated transport before enabling.
 
@@ -106,12 +108,14 @@ The adapter ignores Devsy's safety hints and supplies its own policy:
 - Unknown tools are advertised consequential and calls are refused, even after
   an approval, until the repo's allowlist is deliberately updated
 
-Missing or misleading annotations cannot make a tool safe. The pinned stock
-Executor generator wraps destructive tools with `withApprovals(...always())`.
-Bootstrap rejects edited/mismatched app source instead of overwriting it or
-creating duplicates. The existing Codex rule is unchanged. Neither bootstrap
-nor health checks approve a mutation. Executor's external tools remain exactly
-`execute`, `resume`, and `skills`; browser resume accepts only `requestId`.
+Missing or misleading annotations cannot make a Devsy tool safe. Its pinned
+stock Executor source wraps destructive tools with
+`withApprovals(...always())`. Bootstrap preserves that source and rejects
+edited/mismatched Devsy apps. For Codex, bootstrap updates the existing app in
+place only when its source exactly matches the previous generator; other edits
+remain a hard stop. Neither bootstrap nor health checks approve a mutation.
+Executor's external tools remain exactly `execute`, `resume`, and `skills`;
+browser resume accepts only `requestId`.
 
 ## Failure and lifecycle behavior
 

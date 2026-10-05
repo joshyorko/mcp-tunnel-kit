@@ -470,10 +470,22 @@ def verify_compact(session):
         raise ControlError("Browser resume must declare only the string requestId, with no decision response field.")
 
 
-def verify_app_source(source, url):
-    files = source.get("files", [])
-    index = next((file["content"] for file in files if file.get("path") == "index.ts"), "")
-    expected = '''import { defineApp, toolAnnotations, withApprovals } from "apps"
+def codex_app_source(url):
+    return '''import { defineApp } from "apps"
+import { mcpRouter } from "apps/mcp"
+
+export default defineApp({ accounts: {} }, async ({ signal, cache }) => ({
+  tools: await mcpRouter({
+    url: URL_PLACEHOLDER,
+    cache,
+    signal,
+  }),
+}))
+'''.replace("URL_PLACEHOLDER", json.dumps(url))
+
+
+def devsy_app_source(url):
+    return '''import { defineApp, toolAnnotations, withApprovals } from "apps"
 import { mcpRouter } from "apps/mcp"
 import { always } from "apps/operations/approval"
 
@@ -488,9 +500,22 @@ export default defineApp({ accounts: {} }, async ({ signal, cache }) => ({
   ),
 }))
 '''.replace("URL_PLACEHOLDER", json.dumps(url))
+
+
+def verify_generated_source(source, expected, name):
+    files = source.get("files", [])
+    index = next((file["content"] for file in files if file.get("path") == "index.ts"), "")
     if index.strip() != expected.strip():
         digest = hashlib.sha256(index.encode()).hexdigest()
-        raise ControlError("Retained Codex source differs from the pinned generator; source SHA-256=" + digest + ". Inspect it in the dashboard; no source was changed.")
+        raise ControlError("Retained " + name + " source differs from the pinned generator; source SHA-256=" + digest + ". Inspect it in the dashboard; no source was changed.")
+
+
+def verify_codex_app_source(source, url):
+    verify_generated_source(source, codex_app_source(url), "Codex")
+
+
+def verify_devsy_app_source(source, url):
+    verify_generated_source(source, devsy_app_source(url), "Devsy")
 
 
 def execution(result):
@@ -547,8 +572,37 @@ def ensure_mcp_app(http, url, name, receipt=None):
         app, _ = http.request("POST", prefix + "/apps/import", {"source": {"kind": "mcp", "name": name, "url": url}})
     if app.get("slug") != slug or not app.get("id") or not app.get("activeDeployment"):
         raise ControlError("MCP import returned an unexpected or undeployed app; inspect the dashboard.")
-    source, _ = http.request("GET", prefix + "/apps/" + urllib.parse.quote(app["id"], safe="") + "/source")
-    verify_app_source(source, url)
+    app_path = prefix + "/apps/" + urllib.parse.quote(app["id"], safe="")
+    source, _ = http.request("GET", app_path + "/source")
+    if name == "Codex":
+        try:
+            verify_codex_app_source(source, url)
+        except ControlError:
+            # Migrate only the exact source emitted by the previous pinned generator.
+            verify_devsy_app_source(source, url)
+            files = source.get("files", [])
+            index_files = [file for file in files if file.get("path") == "index.ts"]
+            if len(index_files) != 1:
+                raise ControlError("The legacy Codex source cannot be updated safely.")
+            updated_files = [
+                {"path": file["path"], "content": codex_app_source(url) if file["path"] == "index.ts" else file["content"]}
+                for file in files
+            ]
+            deployment, _ = http.request("POST", app_path + "/deploy",
+                                         {"files": updated_files})
+            updated = deployment.get("app", {})
+            if (updated.get("id") != app["id"] or updated.get("slug") != slug
+                    or not updated.get("activeDeployment")
+                    or updated["activeDeployment"] == app["activeDeployment"]):
+                raise ControlError("Codex approval-policy update did not retain the app identity and create a deployment.")
+            retained, _ = http.request("GET", app_path)
+            if (retained.get("id") != app["id"] or retained.get("slug") != slug
+                    or retained.get("activeDeployment") != updated["activeDeployment"]):
+                raise ControlError("Codex approval-policy update changed app identity or deployment state unexpectedly.")
+            source, _ = http.request("GET", app_path + "/source")
+            verify_codex_app_source(source, url)
+    else:
+        verify_devsy_app_source(source, url)
     return {"organization": organization, "id": app["id"], "url": url}
 
 

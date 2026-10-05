@@ -36,6 +36,17 @@ export default defineApp({ accounts: {} }, async ({ signal, cache }) => ({
   ),
 }))
 '''
+CODEX_INDEX = '''import { defineApp } from "apps"
+import { mcpRouter } from "apps/mcp"
+
+export default defineApp({ accounts: {} }, async ({ signal, cache }) => ({
+  tools: await mcpRouter({
+    url: "http://172.30.86.1:8088/mcp",
+    cache,
+    signal,
+  }),
+}))
+'''
 
 
 class ComposeBoundaryTests(unittest.TestCase):
@@ -146,20 +157,29 @@ class ComposeBoundaryTests(unittest.TestCase):
             with self.assertRaises(helper.ControlError):
                 helper.read_private(link)
 
-    def test_retained_app_source_requires_exact_url_and_stock_approval_rule(self):
+    def test_codex_source_imports_every_tool_without_executor_approval_wrapper(self):
         helper = self.helper()
         url = "http://172.30.86.1:8088/mcp"
-        source = {"files": [{"path": "index.ts", "content": INDEX}]}
-        helper.verify_app_source(source, url)
-        for text in ('url: "http://172.30.86.1:8089/mcp"', 'url: "http://172.30.86.1:8088/mcp"'):
+        source = {"files": [{"path": "index.ts", "content": CODEX_INDEX}]}
+        helper.verify_codex_app_source(source, url)
+        self.assertNotIn("withApprovals", CODEX_INDEX)
+        for text in (CODEX_INDEX.replace(url, "http://172.30.86.1:8089/mcp"), INDEX):
             with self.assertRaises(helper.ControlError):
-                helper.verify_app_source({"files": [{"path": "index.ts", "content": text}]}, url)
+                helper.verify_codex_app_source({"files": [{"path": "index.ts", "content": text}]}, url)
+
+    def test_devsy_retains_stock_destructive_approval_source(self):
+        helper = self.helper()
+        helper.verify_devsy_app_source({"files": [{"path": "index.ts", "content": INDEX.replace(
+            "http://172.30.86.1:8088/mcp", "http://172.30.86.1:8089/mcp")}]},
+                                       "http://172.30.86.1:8089/mcp")
+        self.assertIn("withApprovals", INDEX)
+        self.assertIn("toolAnnotations(tool)?.destructiveHint === true ? always()", INDEX)
 
     def test_comments_cannot_impersonate_stock_import_source(self):
         helper = self.helper()
         fake = '// url: "http://172.30.86.1:8088/mcp" mcpRouter( withApprovals( toolAnnotations(tool)?.destructiveHint === true ? always() : undefined\nexport default unrelated()'
         with self.assertRaises(helper.ControlError):
-            helper.verify_app_source({"files": [{"path": "index.ts", "content": fake}]}, "http://172.30.86.1:8088/mcp")
+            helper.verify_codex_app_source({"files": [{"path": "index.ts", "content": fake}]}, "http://172.30.86.1:8088/mcp")
 
     def test_fresh_private_parent_creation_survives_normal_umask(self):
         helper = self.helper()
@@ -224,7 +244,7 @@ class ComposeBoundaryTests(unittest.TestCase):
                 apps.append(app)
                 return 200, app, False
             if path.endswith("/source"):
-                return 200, {"files": [{"path": "index.ts", "content": INDEX}]}, False
+                return 200, {"files": [{"path": "index.ts", "content": CODEX_INDEX}]}, False
             return 400, {}, False
         server = LoopbackServer(dispatch)
         try:
@@ -234,6 +254,64 @@ class ComposeBoundaryTests(unittest.TestCase):
             server.close()
         self.assertEqual(first, second)
         self.assertEqual(sum(method == "POST" for method, _ in requests), 1)
+
+    def test_existing_codex_app_is_updated_in_place_from_exact_legacy_source(self):
+        helper = self.helper()
+        app = {"id": "fixture_app", "slug": "codex", "name": "Codex", "activeDeployment": "dpl_old"}
+        apps, requests = [app.copy()], []
+        retained_files = [{"path": "index.ts", "content": INDEX},
+                          {"path": "metadata.json", "content": "{\"fixture\":true}"}]
+        def dispatch(method, path, headers, body):
+            requests.append((method, path, body))
+            if path == "/api/context":
+                return 200, {"organization": "fixture_org"}, False
+            if path.endswith("/inventory"):
+                return 200, {"apps": apps}, False
+            if path.endswith("/apps/fixture_app"):
+                return 200, apps[0], False
+            if path.endswith("/apps/fixture_app/source"):
+                if apps[0]["activeDeployment"] == "dpl_new":
+                    return 200, {"files": [{"path": "index.ts", "content": CODEX_INDEX}, retained_files[1]]}, False
+                return 200, {"files": retained_files}, False
+            if method == "POST" and path.endswith("/apps/fixture_app/deploy"):
+                apps[0]["activeDeployment"] = "dpl_new"
+                return 200, {"app": apps[0]}, False
+            return 400, {}, False
+        server = LoopbackServer(dispatch)
+        try:
+            receipt = helper.ensure_codex_app(helper.Http(server.url),
+                                              "http://172.30.86.1:8088/mcp",
+                                              {"organization": "fixture_org", "id": "fixture_app",
+                                               "url": "http://172.30.86.1:8088/mcp"})
+        finally:
+            server.close()
+        self.assertEqual(receipt["id"], "fixture_app")
+        self.assertEqual(sum(method == "POST" and path.endswith("/apps/import")
+                             for method, path, _ in requests), 0)
+        deployments = [body for method, path, body in requests if method == "POST" and path.endswith("/deploy")]
+        self.assertEqual(len(deployments), 1)
+        self.assertEqual(deployments[0]["files"], [{"path": "index.ts", "content": CODEX_INDEX}, retained_files[1]])
+
+    def test_unknown_existing_codex_source_is_not_overwritten_or_duplicated(self):
+        helper = self.helper()
+        requests = []
+        def dispatch(method, path, headers, body):
+            requests.append((method, path))
+            if path == "/api/context":
+                return 200, {"organization": "fixture_org"}, False
+            if path.endswith("/inventory"):
+                return 200, {"apps": [{"id": "fixture_app", "slug": "codex", "name": "Codex",
+                                         "activeDeployment": "dpl_current"}]}, False
+            if path.endswith("/source"):
+                return 200, {"files": [{"path": "index.ts", "content": "export default unrelated()"}]}, False
+            return 400, {}, False
+        server = LoopbackServer(dispatch)
+        try:
+            with self.assertRaises(helper.ControlError):
+                helper.ensure_codex_app(helper.Http(server.url), "http://172.30.86.1:8088/mcp")
+        finally:
+            server.close()
+        self.assertFalse(any(method == "POST" for method, _ in requests))
 
     def test_undeployed_or_replaced_saved_app_is_not_imported_over(self):
         helper = self.helper()
@@ -295,7 +373,7 @@ class ComposeBoundaryTests(unittest.TestCase):
                 apps.append({"id": "fixture_app", "slug": "codex", "name": "Codex", "activeDeployment": "fixture_deployment"})
                 return 500, {}, False
             if path.endswith("/source"):
-                return 200, {"files": [{"path": "index.ts", "content": INDEX}]}, False
+                return 200, {"files": [{"path": "index.ts", "content": CODEX_INDEX}]}, False
             return 400, {}, False
         server = LoopbackServer(dispatch)
         try:

@@ -1,4 +1,4 @@
-"""Two-app bootstrap preserves identity and existing Codex approval policy."""
+"""Codex imports without Executor approvals while Devsy keeps its mutation gate."""
 import importlib.util
 import json
 from pathlib import Path
@@ -15,7 +15,7 @@ def helper():
 
 def test_imports_and_retains_both_apps_without_overwriting_sources():
     from mcp_fixtures import LoopbackServer
-    from test_compose_control import INDEX
+    from test_compose_control import CODEX_INDEX, INDEX
     module = helper()
     apps, posts = [], []
     urls = {'Codex': 'http://172.30.86.1:8088/mcp', 'Devsy': 'http://172.30.86.1:8089/mcp'}
@@ -32,7 +32,8 @@ def test_imports_and_retains_both_apps_without_overwriting_sources():
             return 200, app, False
         if path.endswith('/source'):
             name = next(app['name'] for app in apps if '/' + app['id'] + '/' in path)
-            return 200, {'files': [{'path': 'index.ts', 'content': INDEX.replace(urls['Codex'], urls[name])}]}, False
+            content = CODEX_INDEX if name == 'Codex' else INDEX.replace(urls['Codex'], urls[name])
+            return 200, {'files': [{'path': 'index.ts', 'content': content}]}, False
         return 400, {}, False
     server = LoopbackServer(dispatch)
     try:
