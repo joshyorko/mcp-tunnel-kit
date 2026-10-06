@@ -14,6 +14,11 @@ networking to preserve the existing Devsy loopback SSH route. Its API binds only
 to the bridge gateway, `172.30.86.1:8088` by default. It never binds to all host
 interfaces. Executor's dashboard is published only at `127.0.0.1:4312`.
 
+Open the Action Server UI at <http://172.30.86.1:8088/> from the host browser.
+If you customize `CONTROL_PLANE_GATEWAY`, use that address instead.
+`scripts/control-plane-status` prints the configured browser URL. Host networking
+already exposes this listener; no Compose port mapping is needed.
+
 ## Prepare operator paths
 
 Use rootful Linux Docker with Compose, Bash, and Python 3.10 or later. Rootless

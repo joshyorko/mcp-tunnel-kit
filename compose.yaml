@@ -36,6 +36,8 @@ services:
     image: ${CAS_IMAGE:-ghcr.io/joshyorko/codex-action-server@sha256:a50b016f04f1cc6892a1d688d5c797f5c8a5e4e201239d8a6ef9f577d80ed614}
     platform: linux/amd64
     restart: unless-stopped
+    # Browser UI: http://${CONTROL_PLANE_GATEWAY:-172.30.86.1}:8088/
+    # Host networking exposes the UI on the bridge gateway; ports are not needed.
     network_mode: host
     user: "${CAS_UID:-1000}:${CAS_GID:-1000}"
     read_only: true
@@ -166,4 +168,3 @@ secrets:
     file: ${CONTROL_PLANE_SECRET_DIR:-./.state/secrets}/control-plane-tunnel-id
   executor-auth-header:
     file: ${CONTROL_PLANE_SECRET_DIR:-./.state/secrets}/executor-auth-header
-

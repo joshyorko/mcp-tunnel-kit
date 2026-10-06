@@ -764,6 +764,8 @@ def status():
     for row in compose_rows():
         print(f"{row['Service']}: {row['State']} {row.get('Health', '')}".rstrip())
     configuration = config()
+    gateway = configuration["networks"]["control-plane"]["ipam"]["config"][0]["gateway"]
+    print(f"Action Server UI (host browser): http://{gateway}:8088/")
     bridge = host_bridge()
     value = devsy_call(bridge, "settings", configuration)
     if value is None:
