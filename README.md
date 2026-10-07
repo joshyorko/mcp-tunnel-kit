@@ -203,3 +203,10 @@ use it for this Codex handoff or concurrently on the same tunnel ID.
 as a second Executor app through the same single tunnel. It is disabled by
 default, uses explicit host paths, and preserves host configuration/authentication.
 Only three read tools bypass Executor browser approval; unknown calls fail closed.
+
+## Optional Luna Factory tools
+
+[The Luna integration runbook](docs/LUNA_FACTORY.md) connects seven model tools to
+Executor while preserving the canonical runtime/history and native app endpoint.
+The opt-in overlay and explicit import command leave existing Codex/Devsy identities
+and the single tunnel intact. Native ChatGPT UI acceptance is a separate gate.

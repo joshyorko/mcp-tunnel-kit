@@ -110,7 +110,7 @@ def stdio_fixture(log_path):
 
 
 @contextlib.contextmanager
-def fixture_servers(directory):
+def fixture_servers(directory, host="127.0.0.1", subnet="127.0.0.0/8"):
     from mcp_fixtures import LoopbackServer
 
     bridge = load_script("devsy_bridge")
@@ -126,8 +126,8 @@ def fixture_servers(directory):
     binary.chmod(0o700)
     env = {"PATH": os.defpath, "HOME": str(directory), "DEVSY_HOME": str(directory / "devsy")}
     devsy = bridge.Devsy(str(binary), str(directory), env=env, timeout=15)
-    server = bridge.BridgeServer(("127.0.0.1", 0), devsy,
-                                 ipaddress.ip_network("127.0.0.0/8"), "executor-ci-fixture")
+    server = bridge.BridgeServer((host, 0), devsy,
+                                 ipaddress.ip_network(subnet), "executor-ci-fixture")
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     codex_calls = []
@@ -151,9 +151,9 @@ def fixture_servers(directory):
             reply["error"] = {"code": -32601, "message": "Unknown fixture method"}
         return 200, reply, False
 
-    codex = LoopbackServer(dispatch)
+    codex = LoopbackServer(dispatch, host)
     try:
-        yield {"devsy": f"http://127.0.0.1:{server.server_port}/mcp", "codex": codex.url + "/mcp",
+        yield {"devsy": f"http://{host}:{server.server_port}/mcp", "codex": codex.url + "/mcp",
                "calls": lambda: [json.loads(line) for line in log_path.read_text().splitlines()]
                if log_path.exists() else [], "codex_calls": codex_calls}
     finally:
@@ -171,7 +171,7 @@ def docker(*arguments, timeout=60):
 
 
 @contextlib.contextmanager
-def disposable_executor(control, fixture_urls):
+def disposable_executor(control, fixture_urls, network="host"):
     require(sys.platform == "linux" and shutil.which("docker"), "This live check requires Linux Docker")
     # The native runtime also allocates ephemeral ports. Match upstream release tests
     # by keeping the public listener below Linux's usual ephemeral range.
@@ -188,8 +188,12 @@ def disposable_executor(control, fixture_urls):
     origin = f"http://127.0.0.1:{port}"
     name = "executor-devsy-fixture-" + uuid.uuid4().hex
     # No host directories, named existing volumes, Docker socket, or credentials are mounted.
-    args = ["run", "--detach", "--name", name, "--init", "--network", "host",
-            "--volume", "/app/data", "--env", "DO_NOT_TRACK=1", "--env", "HOST=127.0.0.1",
+    networking = ["--network", network]
+    if network != "host":
+        networking += ["--publish", f"127.0.0.1:{port}:{port}"]
+    args = ["run", "--detach", "--name", name, "--init", *networking,
+            "--volume", "/app/data", "--env", "DO_NOT_TRACK=1", "--env",
+            "HOST=" + ("127.0.0.1" if network == "host" else "0.0.0.0"),
             "--env", f"PORT={port}", "--env", f"BETTER_AUTH_URL={origin}",
             "--env", "EXECUTOR_APPS_ALLOW_PRIVATE_FETCH=true",
             "--env", "EXECUTOR_URL_ALLOW_LOOPBACK_HTTP=false", "--env",
@@ -421,7 +425,7 @@ def main():
             with disposable_executor(control, [fixtures["codex"], fixtures["devsy"]]) as (origin, restart):
                 exercise_executor(control, origin, fixtures, restart)
     print("Pinned Executor: Codex import/update, ten control calls without approval, Devsy reads, and browser mutation pause passed.")
-    print("No mutation was approved or forwarded; only disposable fixture state was used.")
+    print("No Devsy mutation was approved or forwarded; Codex controls used only disposable synthetic fixture state.")
     return 0
 
 

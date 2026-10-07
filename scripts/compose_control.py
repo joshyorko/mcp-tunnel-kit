@@ -28,6 +28,9 @@ NETWORK = PROJECT + "_control-plane"
 COMPACT = {"execute", "resume", "skills"}
 PROTOCOL_VERSIONS = {"2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"}
 DEVSY_READS = {"provider_list", "workspace_list", "workspace_status"}
+LUNA_READS = {"list_factory_runs", "get_factory_run", "get_factory_capabilities"}
+LUNA_MUTATIONS = {"start_factory", "steer_factory_run", "cancel_factory_run", "resume_factory_run"}
+LUNA_TOOLS = LUNA_READS | LUNA_MUTATIONS
 DEVSY_TOOLS = DEVSY_READS | {"workspace_create", "workspace_start", "workspace_stop",
                            "workspace_delete", "workspace_exec", "provider_add",
                            "provider_delete", "provider_use"}
@@ -347,9 +350,10 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 class Http:
-    def __init__(self, origin, authorization=None):
+    def __init__(self, origin, authorization=None, *, max_response_bytes=2 * 1024 * 1024):
         self.origin = origin.rstrip("/")
         self.authorization = authorization
+        self.max_response_bytes = max_response_bytes
         self.deadline = time.monotonic() + 150
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
 
@@ -362,7 +366,7 @@ class Http:
             request_headers["Authorization"] = self.authorization
         if headers:
             request_headers.update(headers)
-        encoded = None if body is None else json.dumps(body).encode()
+        encoded = None if body is None else json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode()
         if encoded is not None:
             request_headers["Content-Type"] = "application/json"
         request = urllib.request.Request(self.origin + path, data=encoded,
@@ -377,7 +381,7 @@ class Http:
                 if not chunk:
                     break
                 total += len(chunk)
-                if total > 2 * 1024 * 1024:
+                if total > self.max_response_bytes:
                     raise ControlError("HTTP/MCP response exceeded the bounded probe size.")
                 raw += chunk
                 if sse:
@@ -385,10 +389,14 @@ class Http:
                         line, raw = raw.split(b"\n", 1)
                         line = line.rstrip(b"\r").decode()
                         if not line and event:
-                            data = json.loads("\n".join(event))
+                            payload = "\n".join(event)
+                            event = []
+                            # Legacy MCP streams may start with an empty priming event.
+                            if not payload.strip():
+                                continue
+                            data = json.loads(payload)
                             if "result" in data or "error" in data:
                                 return data, response.headers
-                            event = []
                         elif line.startswith("data:"):
                             event.append(line[5:].lstrip())
             if sse:
@@ -547,9 +555,9 @@ def ensure_codex_app(http, url, receipt=None):
     return ensure_mcp_app(http, url, "Codex", receipt)
 
 
-def ensure_mcp_app(http, url, name, receipt=None):
-    if name not in {"Codex", "Devsy"}:
-        raise ControlError("Only the configured Codex and Devsy integrations are managed.")
+def ensure_mcp_app(http, url, name, receipt=None, *, allow_import=True):
+    if name not in {"Codex", "Devsy", "LunaFactory"}:
+        raise ControlError("Only the configured Codex, Devsy and LunaFactory integrations are managed.")
     slug = name.lower()
     context, _ = http.request("GET", "/api/context")
     organization = context.get("organization")
@@ -569,6 +577,8 @@ def ensure_mcp_app(http, url, name, receipt=None):
     if existing:
         app = existing[0]
     else:
+        if not allow_import:
+            raise ControlError("The configured MCP app is missing; read-only verification never imports it.")
         app, _ = http.request("POST", prefix + "/apps/import", {"source": {"kind": "mcp", "name": name, "url": url}})
     if app.get("slug") != slug or not app.get("id") or not app.get("activeDeployment"):
         raise ControlError("MCP import returned an unexpected or undeployed app; inspect the dashboard.")
@@ -580,6 +590,8 @@ def ensure_mcp_app(http, url, name, receipt=None):
         except ControlError:
             # Migrate only the exact source emitted by the previous pinned generator.
             verify_devsy_app_source(source, url)
+            if not allow_import:
+                raise ControlError("Codex needs its authorized source migration; read-only verification never deploys it.")
             files = source.get("files", [])
             index_files = [file for file in files if file.get("path") == "index.ts"]
             if len(index_files) != 1:
@@ -602,8 +614,86 @@ def ensure_mcp_app(http, url, name, receipt=None):
             source, _ = http.request("GET", app_path + "/source")
             verify_codex_app_source(source, url)
     else:
-        verify_devsy_app_source(source, url)
+        verify_generated_source(source, devsy_app_source(url), name)
     return {"organization": organization, "id": app["id"], "url": url}
+
+
+def luna_url(gateway):
+    try:
+        address = ipaddress.IPv4Address(gateway)
+        if (not any(address in network for network in PRIVATE_NETWORKS)
+                or int(address) % 256 != 1):
+            raise ValueError()
+    except ValueError:
+        raise ControlError("Luna import requires the managed private /24 gateway's first usable address.") from None
+    return f"http://{address}:8090/executor/mcp"
+
+
+def verify_luna_catalog(tools):
+    names = {tool["name"] for tool in tools}
+    if names != LUNA_TOOLS or len(tools) != len(LUNA_TOOLS):
+        raise ControlError("Luna's Executor view must contain exactly the seven model tools.")
+    for tool in tools:
+        annotations = tool.get("annotations", {})
+        read = tool["name"] in LUNA_READS
+        if (annotations.get("readOnlyHint") is not read
+                or annotations.get("destructiveHint") is not (not read)):
+            raise ControlError("Luna approval hints do not match the explicit read-only allowlist.")
+
+
+def luna_execution(session, code):
+    data = execution(session.call("tools/call", {"name": "execute", "arguments": {"code": code}}))
+    if (data.get("status") != "completed" or not data.get("execution", {}).get("ok")
+            or data.get("unavailableApps")):
+        raise ControlError("Luna read-only discovery/probe did not complete; no mutation was attempted.")
+    return data["execution"]["value"]
+
+
+def search_luna(session):
+    data = luna_execution(session, "return await tools.search(" + json.dumps({
+        "namespace": "lunafactory", "query": "", "limit": 100}) + ");")
+    paths = {item["path"] for item in data.get("items", [])}
+    if paths != {"tools.lunafactory." + name for name in LUNA_TOOLS}:
+        raise ControlError("Executor Luna discovery must expose exactly its seven model tools.")
+
+
+def read_luna(session, run_id=None):
+    calls = [("get_factory_capabilities", {}), ("list_factory_runs", {"limit": 1})]
+    if run_id is not None:
+        if not isinstance(run_id, str) or not 1 <= len(run_id) <= 64:
+            raise ControlError("Use an existing Luna run ID of at most 64 characters.")
+        calls.append(("get_factory_run", {"run_id": run_id}))
+    for name, arguments in calls:
+        condition = {
+            "get_factory_capabilities": "data?.status_inference_calls === 0 && Array.isArray(data.repositories) && Array.isArray(data.profiles)",
+            "list_factory_runs": "Array.isArray(data?.runs) && data.runs.length <= 1",
+            "get_factory_run": "data?.id === " + json.dumps(run_id),
+        }[name]
+        # Executor bounds returned/logged codemode output to 64 KiB. Validate the
+        # full MCP value inside codemode and return only a fixed-size receipt.
+        result = luna_execution(session, "const result = await tools.lunafactory." + name + "("
+            + json.dumps(arguments) + "); const data = result.structuredContent; "
+            + "return {isError: result.isError === true, valid: " + condition + "};")
+        if (not isinstance(result, dict) or result.get("isError")
+                or result.get("valid") is not True):
+            raise ControlError("Luna's read returned an MCP error; no mutation was attempted.")
+
+
+def luna_setup(import_allowed=False):
+    """Separate opt-in setup: never bootstrap/restart Codex, Devsy, or the tunnel."""
+    url = luna_url(os.environ.get("CONTROL_PLANE_GATEWAY", "172.30.86.1"))
+    marker = Path(os.environ["CONTROL_PLANE_BOOTSTRAP_DIR"]) / "luna-integration.json"
+    receipt = json.loads(read_private(marker)) if marker.exists() or marker.is_symlink() else None
+    adapter = Mcp(Http(url.removesuffix("/executor/mcp")), "/executor/mcp")
+    verify_luna_catalog(adapter.tools())
+    http, session = executor_session()
+    verify_compact(session)
+    verified = ensure_mcp_app(http, url, "LunaFactory", receipt, allow_import=import_allowed)
+    if import_allowed and receipt is None:
+        write_private(marker, json.dumps(verified) + "\n")
+    search_luna(session)
+    read_luna(session, os.environ.get("LUNA_VERIFY_RUN_ID") or None)
+    print("Luna tools verified through Executor; existing app identities and pending approvals retained. Native app acceptance is separate.")
 
 
 def verify_devsy_catalog(tools):
@@ -783,15 +873,17 @@ def status():
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("first-run", "secrets", "check", "up", "down", "status", "bootstrap", "probe", "resume"))
+    parser.add_argument("mode", choices=("first-run", "secrets", "check", "up", "down", "status", "bootstrap", "probe", "resume", "luna-import", "luna-verify"))
     args = parser.parse_args()
     try:
-        if args.mode in {"bootstrap", "probe", "resume"}:
+        if args.mode in {"bootstrap", "probe", "resume", "luna-import", "luna-verify"}:
             def expire(_signal, _frame):
                 raise ControlError("The bounded bootstrap/probe deadline expired.")
             signal.signal(signal.SIGALRM, expire)
             signal.alarm(180)
-        if args.mode == "bootstrap":
+        if args.mode in {"luna-import", "luna-verify"}:
+            luna_setup(args.mode == "luna-import")
+        elif args.mode == "bootstrap":
             bootstrap()
         elif args.mode in {"probe", "resume"}:
             return probe(args.mode == "resume")
