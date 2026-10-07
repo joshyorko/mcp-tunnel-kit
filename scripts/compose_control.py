@@ -534,7 +534,7 @@ def search_codex(session):
     paths = set()
     for query in ("target", "thread"):
         data = execution(session.call("tools/call", {"name": "execute", "arguments": {"code":
-            "return await tools.search(" + json.dumps({"namespace": "codex", "query": query, "limit": 100}) + ");"}}))
+            "const result = await tools.search(" + json.dumps({"namespace": "codex", "query": query, "limit": 100}) + "); return {items: result.items.map(item => ({path: item.path}))};"}}))
         if (data.get("status") != "completed" or not data.get("execution", {}).get("ok")
                 or data.get("unavailableApps")):
             raise ControlError("Codex discovery through Executor is unavailable; inspect app access and CAS health.")
@@ -622,7 +622,7 @@ def search_devsy(session):
     paths = set()
     for query in ("workspace", "provider"):
         data = execution(session.call("tools/call", {"name": "execute", "arguments": {"code":
-            "return await tools.search(" + json.dumps({"namespace": "devsy", "query": query, "limit": 100}) + ");"}}))
+            "const result = await tools.search(" + json.dumps({"namespace": "devsy", "query": query, "limit": 100}) + "); return {items: result.items.map(item => ({path: item.path}))};"}}))
         if (data.get("status") != "completed" or not data.get("execution", {}).get("ok")
                 or data.get("unavailableApps")):
             raise ControlError("Devsy discovery through Executor is unavailable.")
