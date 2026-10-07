@@ -33,7 +33,7 @@ services:
       retries: 12
 
   codex-action-server:
-    image: ${CAS_IMAGE:-ghcr.io/joshyorko/codex-action-server@sha256:a50b016f04f1cc6892a1d688d5c797f5c8a5e4e201239d8a6ef9f577d80ed614}
+    image: ${CAS_IMAGE:-ghcr.io/joshyorko/codex-action-server@sha256:942f8f69a40ce729e5e66cfc244fedf6c8ddae6812955e10626bc762485f8bc2}
     platform: linux/amd64
     restart: unless-stopped
     # Browser UI: http://${CONTROL_PLANE_GATEWAY:-172.30.86.1}:8088/
@@ -91,7 +91,7 @@ services:
       retries: 18
 
   app-ready:
-    image: ${CAS_IMAGE:-ghcr.io/joshyorko/codex-action-server@sha256:a50b016f04f1cc6892a1d688d5c797f5c8a5e4e201239d8a6ef9f577d80ed614}
+    image: ${CAS_IMAGE:-ghcr.io/joshyorko/codex-action-server@sha256:942f8f69a40ce729e5e66cfc244fedf6c8ddae6812955e10626bc762485f8bc2}
     platform: linux/amd64
     restart: "no"
     user: "${CAS_UID:-1000}:${CAS_GID:-1000}"

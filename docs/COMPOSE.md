@@ -44,7 +44,7 @@ your selected `CAS_IMAGE`, `CAS_TARGETS_SOURCE`, socket, runtime, receipts, or
 state paths with example values. A fresh Executor needs the browser setup below
 before you can add its PAT.
 `CAS_IMAGE` defaults to the product image published from commit
-`45a27a0515bbfc12de278dd03e26751cecb91fc7`, pinned by its immutable digest. The
+`92b569bcaa953c2914a90bbd1ca42c2880832e8a`, pinned by its immutable digest. The
 production file never builds from a neighboring checkout. Executor and tunnel
 images are pinned by exact release and immutable digest in `compose.yaml`.
 
