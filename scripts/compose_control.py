@@ -831,8 +831,17 @@ def main():
     except ControlError as error:
         print(str(error), file=sys.stderr)
         return 2
-    except Exception:
-        print("Control-plane setup/probe failed; raw errors and private values omitted.", file=sys.stderr)
+    except Exception as error:
+        # Report only code metadata, never exception text, arguments or locals.
+        location = "main"
+        trace = error.__traceback__
+        while trace is not None:
+            code = trace.tb_frame.f_code
+            if Path(code.co_filename).resolve().parent == Path(__file__).resolve().parent:
+                location = f"{Path(code.co_filename).name}:{code.co_name}:{trace.tb_lineno}"
+            trace = trace.tb_next
+        print(f"Control-plane setup/probe failed ({type(error).__name__} at {location}); "
+              "raw errors and private values omitted.", file=sys.stderr)
         return 1
     return 0
 

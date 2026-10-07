@@ -79,7 +79,10 @@ class ComposeBoundaryTests(unittest.TestCase):
              patch.object(helper, "status", side_effect=lambda: helper.devsy_call(bridge, "settings", {})), \
              patch("sys.argv", ["compose_control.py", "status"]), redirect_stderr(stderr):
             self.assertEqual(helper.main(), 1)
-        self.assertEqual(stderr.getvalue(), "Control-plane setup/probe failed; raw errors and private values omitted.\n")
+        self.assertIn("Control-plane setup/probe failed (RuntimeError at ", stderr.getvalue())
+        self.assertIn("devsy_call:", stderr.getvalue())
+        self.assertIn("raw errors and private values omitted.", stderr.getvalue())
+        self.assertNotIn("PRIVATE_FIXTURE_VALUE", stderr.getvalue())
 
     def test_existing_unrelated_network_overlap_is_rejected(self):
         helper = self.helper()
