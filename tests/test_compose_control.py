@@ -58,6 +58,25 @@ class ComposeBoundaryTests(unittest.TestCase):
         spec.loader.exec_module(module)
         return module
 
+    def test_bridge_only_restart_never_mutates_compose_or_bootstraps_apps(self):
+        helper = self.helper()
+        bridge = helper.host_bridge()
+        state = '/fixture/private/devsy-bridge'
+        configuration = {'x-operator': {'devsy_state': state}}
+        value = {'state': state}
+        events = []
+        with patch.object(helper, 'config', return_value=configuration), \
+             patch.object(helper, 'host_bridge', return_value=bridge), \
+             patch.object(helper, 'network_preflight', side_effect=lambda config: events.append('preflight')), \
+             patch.object(bridge, 'settings', return_value=value), \
+             patch.object(bridge, 'stop', side_effect=lambda path: events.append(('stop', path))), \
+             patch.object(bridge, 'start', side_effect=lambda config: events.append(('start', config))), \
+             patch.object(helper, 'compose', side_effect=AssertionError('Container mutation forbidden')), \
+             patch.object(helper, 'bootstrap', side_effect=AssertionError('App bootstrap forbidden')), \
+             patch('sys.argv', ['compose_control.py', 'restart-devsy']):
+            self.assertEqual(helper.main(), 0)
+        self.assertEqual(events, ['preflight', ('stop', state), ('start', value)])
+
     def test_host_devsy_errors_are_actionable_at_the_command_boundary(self):
         helper = self.helper()
         bridge = helper.host_bridge()

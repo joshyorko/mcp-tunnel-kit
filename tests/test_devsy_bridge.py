@@ -59,6 +59,26 @@ def test_real_stdio_catalog_and_read_call(tmp_path):
     assert all(tool['annotations']['destructiveHint'] for tool in catalog if tool['name'] not in module.READ_ONLY)
 
 
+def test_running_bridge_follows_executable_symlink_after_upgrade(tmp_path):
+    module = bridge()
+    old_directory = tmp_path / '1.22.0'
+    new_directory = tmp_path / '1.23.0'
+    old_directory.mkdir()
+    new_directory.mkdir()
+    old = fixture(module, old_directory)
+    new = fixture(module, new_directory)
+    executable = tmp_path / 'devsy'
+    executable.symlink_to(old.binary)
+    devsy = module.Devsy(str(executable), str(tmp_path), old.env, timeout=0.4)
+    assert devsy.catalog()
+
+    executable.unlink()
+    executable.symlink_to(new.binary)
+    Path(old.binary).unlink()
+    assert devsy.catalog()
+    assert devsy.call('workspace_list', {})['content'][0]['type'] == 'text'
+
+
 def test_unknown_calls_never_reach_child(tmp_path):
     import pytest
     module = bridge()

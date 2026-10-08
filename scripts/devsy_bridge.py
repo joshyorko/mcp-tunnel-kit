@@ -143,7 +143,8 @@ class Devsy:
                 or not directory.is_absolute() or not directory.is_dir() or not 0 < timeout <= 120):
             raise BridgeError("Set an absolute existing Devsy executable and working directory.")
         self.stopping = threading.Event()
-        self.binary, self.cwd, self.env, self.timeout = str(executable.resolve()), str(directory.resolve()), env, timeout
+        # Follow the configured launcher on each call after package-manager upgrades.
+        self.binary, self.cwd, self.env, self.timeout = str(executable), str(directory.resolve()), env, timeout
 
     @contextlib.contextmanager
     def session(self, timeout=None):

@@ -783,7 +783,7 @@ def status():
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("first-run", "secrets", "check", "up", "down", "status", "bootstrap", "probe", "resume"))
+    parser.add_argument("mode", choices=("first-run", "secrets", "check", "up", "down", "status", "bootstrap", "probe", "resume", "restart-devsy"))
     args = parser.parse_args()
     try:
         if args.mode in {"bootstrap", "probe", "resume"}:
@@ -797,6 +797,16 @@ def main():
             return probe(args.mode == "resume")
         elif args.mode == "status":
             status()
+        elif args.mode == "restart-devsy":
+            configuration = config()
+            bridge = host_bridge()
+            value = devsy_call(bridge, "settings", configuration)
+            if value is None:
+                raise ControlError("Host Devsy is disabled; no bridge was restarted.")
+            network_preflight(configuration)
+            devsy_call(bridge, "stop", value["state"])
+            devsy_call(bridge, "start", value)
+            print("Host Devsy bridge restarted and healthy; containers and native Codex unchanged.")
         elif args.mode == "down":
             configuration = config()
             compose("stop", "--timeout", "30", "tunnel-client", timeout=45)

@@ -24,6 +24,11 @@ separate `--secrets` step. Keep your existing `.env` when updating a checkout.
 Use these wrappers for the stack lifecycle. Raw `docker compose up` and `down`
 bypass host Devsy bridge management and startup revalidation.
 
+After a host Devsy upgrade, `./scripts/control-plane-up --restart-devsy`
+reconciles only the managed host bridge and verifies its health. It preserves
+Executor, CAS, the tunnel, native Codex, and workspace state. The bridge follows
+the configured executable symlink on each call, including after package upgrades.
+
 For a fresh Executor, first run `./scripts/control-plane-up --first-run` without
 credentials. Finish the browser owner/organization setup, create the organization
 PAT, add it to `.env`, and run normal up. See [Compose setup and
