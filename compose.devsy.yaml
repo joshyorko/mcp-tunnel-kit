@@ -2,17 +2,18 @@
 services:
   codex-action-server:
     environment:
-      DEVSY_HOME: ${DEVSY_HOME:?Set the existing Devsy configuration parent directory}
+      # Controller agent state is writable; selected operator inputs stay read-only.
+      DEVSY_HOME: ${CAS_DEVSY_HOME:-/tmp}
     volumes:
       - type: bind
         source: ${DEVSY_CONFIG_FILE:?Set the existing Devsy config.yaml path}
-        target: ${DEVSY_CONFIG_FILE:?Set the existing Devsy config.yaml path}
+        target: ${CAS_DEVSY_HOME:-/tmp}/config.yaml
         read_only: true
         bind:
           create_host_path: false
       - type: bind
         source: ${DEVSY_CONTEXT_DIR:?Set the selected existing context directory}
-        target: ${DEVSY_CONTEXT_DIR:?Set the selected existing context directory}
+        target: ${CAS_DEVSY_HOME:-/tmp}/contexts/${DEVSY_CONTEXT:-default}
         read_only: true
         bind:
           create_host_path: false

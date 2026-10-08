@@ -77,6 +77,29 @@ class ComposeBoundaryTests(unittest.TestCase):
             self.assertEqual(helper.main(), 0)
         self.assertEqual(events, ['preflight', ('stop', state), ('start', value)])
 
+    def test_remote_controller_home_uses_writable_tmpfs_with_readonly_operator_mounts(self):
+        environment = {**os.environ, 'DEVSY_HOME': '/fixture/operator',
+                       'DEVSY_CONFIG_FILE': '/fixture/operator/config.yaml',
+                       'DEVSY_CONTEXT_DIR': '/fixture/operator/contexts/default',
+                       'DEVSY_KUBECONFIG_FILE': '/fixture/kubeconfig',
+                       'DEVSY_CONTEXT': 'default'}
+        environment.pop('CAS_DEVSY_HOME', None)
+        result = subprocess.run(['docker', 'compose', '--env-file', '.env.example',
+                                 '-f', 'compose.yaml', '-f', 'compose.devsy.yaml',
+                                 'config', '--format', 'json'], cwd=ROOT, env=environment,
+                                capture_output=True, text=True, timeout=10, check=True)
+        service = json.loads(result.stdout)['services']['codex-action-server']
+        self.assertEqual(service['environment']['DEVSY_HOME'], '/tmp')
+        mounts = {volume['target']: volume for volume in service['volumes']}
+        self.assertEqual(mounts['/tmp/config.yaml']['source'],
+                         '/fixture/operator/config.yaml')
+        self.assertEqual(mounts['/tmp/contexts/default']['source'],
+                         '/fixture/operator/contexts/default')
+        for target in ['/tmp/config.yaml', '/tmp/contexts/default',
+                       '/fixture/kubeconfig']:
+            self.assertTrue(mounts[target]['read_only'])
+        self.assertTrue(any(value.startswith('/tmp:rw,exec,') for value in service['tmpfs']))
+
     def test_host_devsy_errors_are_actionable_at_the_command_boundary(self):
         helper = self.helper()
         bridge = helper.host_bridge()

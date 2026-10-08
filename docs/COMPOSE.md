@@ -185,9 +185,12 @@ Add `compose.devsy.yaml` to `COMPOSE_FILE`:
 COMPOSE_FILE=compose.yaml:compose.devsy.yaml ./scripts/control-plane-up --check
 ```
 
-That override mounts only the existing configuration file, selected context
-directory, and referenced kubeconfig, read only, at their original absolute
-paths. `DEVSY_HOME` points at the original configuration parent. Check external
+That override mounts only the existing configuration file and selected context
+directory read only inside `CAS_DEVSY_HOME` (default `/tmp`). The
+referenced kubeconfig stays read only at its original absolute path. CAS's
+controller agent can write its own state under this private home without
+changing operator state. `DEVSY_CONTEXT` selects the context directory name.
+The host bridge retains its separate operator home. Check external
 certificate, key, token-file, exec, and auth-provider dependencies before using
 this override. If an existing workspace proves it needs selected SSH files,
 add only those exact read-only files in an ignored operator Compose override.
