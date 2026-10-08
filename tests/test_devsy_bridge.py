@@ -89,6 +89,40 @@ def test_unknown_calls_never_reach_child(tmp_path):
     assert not marker.exists()
 
 
+def test_operator_scoped_diagnostics_are_readonly_and_not_upstream_tools(tmp_path):
+    import json
+    module = bridge()
+    devsy = fixture(module, tmp_path)
+    source = tmp_path / 'operator-targets.json'
+    source.write_text(json.dumps({'targets': {'devsy': {'context': 'default',
+        'provider': 'kubernetes', 'workspace': 'codex-action-server',
+        'workspace_uid': 'default-co-f715f'}}}))
+    source.chmod(0o600)
+    devsy.targets_source = str(source)
+    tools = {tool['name']: tool for tool in devsy.catalog()}
+    assert tools['workspace_diagnostics']['annotations']['readOnlyHint'] is True
+    assert tools['workspace_diagnostics']['annotations']['destructiveHint'] is False
+    assert tools['workspace_exec']['annotations']['destructiveHint'] is True
+
+
+def test_wrong_diagnostic_uid_is_a_classified_refusal_without_upstream_execution(tmp_path):
+    import json
+    module = bridge()
+    marker = tmp_path / 'calls'
+    devsy = fixture(module, tmp_path, FIXTURE_CALLS=str(marker))
+    source = tmp_path / 'operator-targets.json'
+    source.write_text(json.dumps({'targets': {'devsy': {'context': 'default',
+        'provider': 'kubernetes', 'workspace': 'codex-action-server',
+        'workspace_uid': 'default-co-f715f'}}}))
+    source.chmod(0o600)
+    devsy.targets_source = str(source)
+    result = devsy.call('workspace_diagnostics', {'name': 'codex-action-server',
+                                                 'workspace_uid': 'default-co-93408'})
+    assert result['isError'] is True
+    assert result['structuredContent']['error']['code'] == 'worker_diagnostics_refused'
+    assert not marker.exists()
+
+
 def test_incomplete_catalog_and_hung_child_fail_closed(tmp_path):
     import pytest
     import time

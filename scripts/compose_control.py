@@ -27,8 +27,8 @@ PROJECT = "codex-control-plane"
 NETWORK = PROJECT + "_control-plane"
 COMPACT = {"execute", "resume", "skills"}
 PROTOCOL_VERSIONS = {"2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"}
-DEVSY_READS = {"provider_list", "workspace_list", "workspace_status"}
-DEVSY_TOOLS = DEVSY_READS | {"workspace_create", "workspace_start", "workspace_stop",
+DEVSY_READS = {"provider_list", "workspace_list", "workspace_status", "workspace_diagnostics"}
+DEVSY_TOOLS = (DEVSY_READS - {"workspace_diagnostics"}) | {"workspace_create", "workspace_start", "workspace_stop",
                            "workspace_delete", "workspace_exec", "provider_add",
                            "provider_delete", "provider_use"}
 PRIVATE_NETWORKS = tuple(ipaddress.ip_network(value) for value in

@@ -207,4 +207,10 @@ use it for this Codex handoff or concurrently on the same tunnel ID.
 [Host-native Devsy setup](docs/HOST_DEVSY.md) adds the existing host Devsy MCP
 as a second Executor app through the same single tunnel. It is disabled by
 default, uses explicit host paths, and preserves host configuration/authentication.
-Only three read tools bypass Executor browser approval; unknown calls fail closed.
+Provider/workspace list and workspace status bypass Executor browser approval.
+When an operator target file is configured, `workspace_diagnostics` also reads
+fixed startup, process, daemon and authentication metadata for its exact pinned
+Kubernetes workspace. It requires both name and UID, rejects arbitrary commands
+and changed identities, and never starts or restarts the workspace or daemon.
+Arbitrary exec and material mutations retain browser approval; unknown calls
+fail closed.

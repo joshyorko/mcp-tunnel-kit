@@ -5,8 +5,9 @@ from __future__ import annotations
 
 import ipaddress
 
-READ_ONLY = frozenset({"provider_list", "workspace_list", "workspace_status"})
-KNOWN_TOOLS = READ_ONLY | {"workspace_create", "workspace_start", "workspace_stop",
+UPSTREAM_READS = frozenset({"provider_list", "workspace_list", "workspace_status"})
+READ_ONLY = UPSTREAM_READS | {"workspace_diagnostics"}
+KNOWN_TOOLS = UPSTREAM_READS | {"workspace_create", "workspace_start", "workspace_stop",
                          "workspace_delete", "workspace_exec", "provider_add",
                          "provider_delete", "provider_use"}
 
@@ -136,7 +137,7 @@ class Stdio:
 
 
 class Devsy:
-    def __init__(self, binary, cwd, env=None, timeout=120):
+    def __init__(self, binary, cwd, env=None, timeout=120, targets_source=None):
         executable = Path(binary)
         directory = Path(cwd)
         if (not executable.is_absolute() or not executable.is_file() or not os.access(executable, os.X_OK)
@@ -145,6 +146,16 @@ class Devsy:
         self.stopping = threading.Event()
         # Follow the configured launcher on each call after package-manager upgrades.
         self.binary, self.cwd, self.env, self.timeout = str(executable), str(directory.resolve()), env, timeout
+        self.targets_source = targets_source
+
+    @staticmethod
+    def diagnostic_module():
+        import importlib.util
+        path = Path(__file__).with_name('worker_diagnostics.py')
+        spec = importlib.util.spec_from_file_location('worker_diagnostics', path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
 
     @contextlib.contextmanager
     def session(self, timeout=None):
@@ -202,9 +213,22 @@ class Devsy:
 
     def catalog(self):
         with self.session(timeout=10) as session:
-            return self.discover(session)
+            tools = self.discover(session)
+        if self.targets_source:
+            tools.append(normalize_tool(self.diagnostic_module().TOOL))
+        return tools
 
     def call(self, name, arguments):
+        if name == 'workspace_diagnostics' and self.targets_source:
+            module = self.diagnostic_module()
+            try:
+                result = module.diagnose(self.targets_source, arguments, self.call, self.env)
+            except module.DiagnosticError as error:
+                result = {'error': {'code': 'worker_diagnostics_refused', 'message': str(error)}}
+                return {'content': [{'type': 'text', 'text': json.dumps(result)}],
+                        'structuredContent': result, 'isError': True}
+            return {'content': [{'type': 'text', 'text': json.dumps(result)}],
+                    'structuredContent': result, 'isError': False}
         if name not in KNOWN_TOOLS or not isinstance(arguments, dict):
             raise BridgeError("Unknown Devsy tool or invalid arguments; call refused.")
         with self.session() as session:
@@ -392,7 +416,8 @@ def settings(configuration):
     network = configuration['networks']['control-plane']['ipam']['config'][0]
     result = {'subnet': network['subnet'], 'gateway': network['gateway'],
               'binary': operator.get('devsy_binary', ''), 'cwd': operator.get('devsy_cwd', ''),
-              'state': str(Path(operator.get('devsy_state', './.state/devsy-bridge')).resolve()), 'home': operator.get('devsy_home', '')}
+              'state': str(Path(operator.get('devsy_state', './.state/devsy-bridge')).resolve()), 'home': operator.get('devsy_home', ''),
+              'targets_source': operator.get('targets_source')}
     validate_settings(result)
     return result
 
@@ -567,7 +592,8 @@ def serve(config):
         environment = dict(os.environ)
         if value.get('home'):
             environment['DEVSY_HOME'] = value['home']
-        devsy = Devsy(value['binary'], value['cwd'], environment)
+        devsy = Devsy(value['binary'], value['cwd'], environment,
+                      targets_source=value.get('targets_source'))
         devsy.catalog()
         instance = secrets.token_hex(16)
         server = BridgeServer((value['gateway'], 8089), devsy,
