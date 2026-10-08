@@ -40,7 +40,7 @@ for item in /proc/[0-9]*; do
 done
 if test -x /home/vscode/.local/bin/codex; then
   printf 'codex_binary=present\n'
-  printf 'codex_version=%s\n' "$(timeout 5s /home/vscode/.local/bin/codex --version 2>/dev/null || :)"
+  printf 'codex_version=%s\n' "$(timeout 5s su -s /bin/sh -c 'CODEX_HOME=/home/vscode/.codex /home/vscode/.local/bin/codex --version' vscode 2>/dev/null || :)"
 else printf 'codex_binary=absent\n'; fi
 if test -S /home/vscode/.codex/app-server-control/app-server-control.sock; then printf 'daemon_socket=present\n';
 else printf 'daemon_socket=absent\n'; fi
