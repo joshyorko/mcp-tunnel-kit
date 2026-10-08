@@ -32,7 +32,7 @@ Bind authority to context default; provider kubernetes; Kubernetes context ror; 
 
 Names must be an explicit operator-approved finite set of valid DNS labels, with a cap on active workspaces and pending creates. The protected codex-action-server workspace cannot be deleted or recreated by this repair. Approve new worker names separately rather than interpreting its present absence as permission to recreate it. New tools accept only a name from that set and a bounded request ID. They do not accept caller-selected source, recipe, provider options, namespace, force, shell command, volume mounts or cluster operations.
 
-The private scope must specify an expiry and revocation mechanism. Renewing the same bounded scope can be authorized through the existing owner/operator API without a browser. Revocation denies new submissions; in-flight effects and their receipts must be reconciled, not assumed undone.
+The owner chose a persistent scope with no automatic expiry. It remains revocable: disabling the scope or rotating its private capability denies new submissions. Explicit finite expiries, when configured, still fail closed after expiry. In-flight effects and receipts must be reconciled, not assumed undone.
 
 ## False failure and long operations
 
@@ -64,7 +64,7 @@ Prove signed-in owner success with zero browser elicitation, including first use
 
 The owner approved the finite names/resource cap/expiry, private profile/capability and scoped creation/start exemption. Activation used organization-authenticated profile/connect/submit and app-deploy APIs without a browser. No public dashboard, Tailscale or global policy disable was introduced.
 
-The approved limits are in devsy-worker-scope.proposed.json:1: only cas-worker-01, at most one active workspace and pending create, a 20-minute bounded provisioning job, and a 24-hour revocable capability. codex-action-server is protected; target rebinding remains separately authorized. Scoped CLI options disable namespace creation and cluster-role binding, and select the existing namespace's default service account. Frozen provider/cluster file fingerprints refuse drift.
+The approved limits are in devsy-worker-scope.proposed.json:1: only cas-worker-01, at most one active workspace and pending create, a 20-minute bounded provisioning job, and a persistent revocable capability. codex-action-server is protected; target rebinding remains separately authorized. Scoped CLI options disable namespace creation and cluster-role binding, and select the existing namespace's default service account. Frozen provider/cluster file fingerprints refuse drift.
 
 After account setup, discover the current owner profile with tools.search(namespace: devsy, query: scoped). Call workspace_create_scoped with name=cas-worker-01 and a bounded request_id, then poll workspace_status_scoped. A retry with another request ID returns the same creation receipt instead of starting another create. Unknown outcomes require inspection, not replay. The legacy account-free tool path is replaced by the private owner's profile path.
 

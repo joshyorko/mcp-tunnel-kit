@@ -178,3 +178,25 @@ def test_expired_capability_and_configuration_drift_fail_closed(tmp_path):
             "Bearer fixture-owner-secret",
         )
     assert calls == []
+
+
+def test_persistent_capability_has_no_expiry_but_can_be_revoked(tmp_path):
+    module, scope, calls = manager(tmp_path)
+    data = json.loads(scope.config.read_text())
+    data["expires_at"] = None
+    scope.config.write_text(json.dumps(data))
+    result = scope.call(
+        "workspace_status_scoped",
+        {"name": "cas-worker-01"},
+        "Bearer fixture-owner-secret",
+    )
+    assert result["status"] == "not_submitted"
+    data["enabled"] = False
+    scope.config.write_text(json.dumps(data))
+    with pytest.raises(module.ScopeError):
+        scope.call(
+            "workspace_create_scoped",
+            {"name": "cas-worker-01", "request_id": "revoked"},
+            "Bearer fixture-owner-secret",
+        )
+    assert calls == []
