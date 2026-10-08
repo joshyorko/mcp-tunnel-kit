@@ -38,6 +38,15 @@ for line in sys.stdin:
             with open(marker, 'a') as handle:
                 handle.write(name + '\n')
         result = {'content': [{'type': 'text', 'text': json.dumps({'tool': name, 'items': []})}]}
+        if mode == 'create-uncertain':
+            resources = Path(os.environ['FIXTURE_RESOURCES'])
+            if name == 'workspace_list':
+                value = {'workspaces': json.loads(resources.read_text()) if resources.exists() else []}
+                result = {'content': [{'type': 'text', 'text': json.dumps(value)}], 'structuredContent': value}
+            elif name == 'workspace_create':
+                # Simulate external effects followed by a lost transport response.
+                resources.write_text(json.dumps([{'name': request['params']['arguments']['name']}]))
+                raise SystemExit(1)
     else:
         result = {}
     print(json.dumps({'jsonrpc': '2.0', 'id': request['id'], 'result': result}), flush=True)

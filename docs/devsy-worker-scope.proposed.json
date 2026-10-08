@@ -1,0 +1,22 @@
+{
+  "enabled": false,
+  "principal": "authenticated_owner_private_profile",
+  "context": "default",
+  "provider": "kubernetes",
+  "kubernetes_context": "ror",
+  "namespace": "devsy",
+  "namespace_must_exist": true,
+  "repository": "https://github.com/joshyorko/codex-action-server.git",
+  "revision": "bf0b3823e033b9b5abd86904e0a565d6b3586206",
+  "recipe": ".devcontainer/remote-worker/devcontainer.json",
+  "recipe_sha256": "932f04620bf5d55079d353fa6ebf86e704fe2f3f7689f63ee0f2e4eebe0c07a5",
+  "allowed_new_names": ["cas-worker-01"],
+  "protected_names": ["codex-action-server"],
+  "max_active_workspaces": 1,
+  "max_pending_creates": 1,
+  "job_timeout_seconds": 1200,
+  "capability_ttl_seconds": 86400,
+  "no_browser_tool_names": ["workspace_create_scoped", "workspace_start_scoped"],
+  "read_tool_names": ["workspace_status_scoped", "workspace_create_receipt"],
+  "automatic_target_rebind": false
+}
