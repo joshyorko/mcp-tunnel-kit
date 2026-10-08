@@ -15,7 +15,7 @@
   "max_active_workspaces": 1,
   "max_pending_creates": 1,
   "job_timeout_seconds": 1200,
-  "capability_ttl_seconds": 86400,
+  "capability_ttl_seconds": null,
   "no_browser_tool_names": ["workspace_create_scoped", "workspace_start_scoped"],
   "read_tool_names": ["workspace_status_scoped", "workspace_create_receipt"],
   "automatic_target_rebind": false

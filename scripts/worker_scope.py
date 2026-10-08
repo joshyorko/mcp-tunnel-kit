@@ -4,6 +4,7 @@ import fcntl
 import hashlib
 import hmac
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -90,10 +91,14 @@ class WorkerScope:
         for key, want in expected.items():
             if key != "enabled" and value.get(key) != want:
                 raise ScopeError("Approved lifecycle scope changed; call refused.")
-        if (
-            value.get("enabled") is not True
-            or value.get("expires_at", 0) <= time.time()
-        ):
+        expiration = value.get("expires_at", 0)
+        invalid_expiration = expiration is not None and (
+            isinstance(expiration, bool)
+            or not isinstance(expiration, (int, float))
+            or not math.isfinite(expiration)
+            or expiration <= time.time()
+        )
+        if value.get("enabled") is not True or invalid_expiration:
             raise ScopeError("Owner lifecycle capability is disabled or expired.")
         if not re.fullmatch("[a-f0-9]{64}", value.get("capability_sha256", "")):
             raise ScopeError("Owner capability is not configured.")
