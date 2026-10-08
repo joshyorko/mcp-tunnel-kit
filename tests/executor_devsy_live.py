@@ -33,6 +33,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+import re
+
 
 ROOT = Path(__file__).resolve().parents[1]
 IMAGE = ("ghcr.io/usefulsoftwareco/executor-selfhost:2.0.0-beta.8"
@@ -262,7 +264,7 @@ def verify_fixtures(control, fixtures):
     require(fixtures["calls"]() == before, "Unknown tool reached the synthetic Devsy process")
 
 
-def exercise_executor(control, origin, fixtures, restart):
+def exercise_executor(control, origin, fixtures, restart, mcp_origin, restart_adapter):
     global STAGE
     STAGE = "first-owner setup"
     browser = control.Http(origin)
@@ -317,8 +319,13 @@ def exercise_executor(control, origin, fixtures, restart):
                 and http.request("GET", devsy_source_path)[0] == devsy_source,
                 "Restart changed source or deployment")
         # A pinned PAT needs no organization header on the bare /mcp endpoint.
-        session = control.Mcp(http, "/mcp?elicitation_mode=browser")
+        session = control.Mcp(control.Http(mcp_origin, "Bearer " + token["key"]), "/mcp?elicitation_mode=browser")
         control.verify_compact(session)
+        resume_schema = next(tool for tool in session.tools() if tool['name'] == 'resume')['inputSchema']
+        variants = resume_schema['properties']['requestId']['anyOf']
+        for value in ('apr_fixture', 'elc_fixture'):
+            require(any(re.fullmatch(v['pattern'], value) for v in variants),
+                    'Connector full-match validation still rejects a valid resume ID')
         STAGE = "read-only catalog readiness after restart"
         deadline = time.monotonic() + 30
         for namespace, required in (("codex", {"list_targets"}),
@@ -392,6 +399,17 @@ def exercise_executor(control, origin, fixtures, restart):
         require(review.get("request", {}).get("requestId") == pending["requestId"],
                 "Owner review returned a different pending interaction")
         require(fixtures["calls"]() == before, "Reading browser review executed the mutation")
+        STAGE = "pending resume survives adapter restart without approval bypass"
+        original_session = session.session_state()
+        restart_adapter()
+        resumed = control.execution(session.call('tools/call', {
+            'name': 'resume', 'arguments': {'requestId': pending['requestId']},
+        }))
+        require(resumed.get('status') == 'approval-required'
+                and resumed.get('requestId') == pending['requestId'],
+                'Same-session resume did not preserve the pending browser approval')
+        require(session.session_state() == original_session and fixtures['calls']() == before,
+                'Adapter restart changed the MCP session or executed an unapproved mutation')
         unknown = control.execution(session.call("tools/call", {"name": "execute", "arguments": {
             "code": "return await tools.devsy.future_tool({});",
         }}))
@@ -399,7 +417,7 @@ def exercise_executor(control, origin, fixtures, restart):
         require(fixtures["calls"]() == before, "Unknown tool reached the native fixture")
         require(http.request("GET", codex_source_path)[0] == codex_source,
                 "Devsy execution changed Codex source or deployment")
-        # No browser answer or MCP resume is sent. Revocation and container teardown retire the pause.
+        # No browser answer is sent. Revocation and container teardown retire the pause.
     finally:
         browser.request("POST", "/api/auth/api-key/delete", {"keyId": token["id"]}, browser_headers)
 
@@ -410,6 +428,7 @@ def main():
         stdio_fixture(sys.argv[2])
         return 0
     require(sys.argv[1:] in ([], ["--check-fixtures"]), "Use no arguments or --check-fixtures")
+    from executor_schema_fixture import schema_adapter
     control = load_script("compose_control")
     with tempfile.TemporaryDirectory(prefix="executor-devsy-fixture-") as temporary:
         with fixture_servers(Path(temporary)) as fixtures:
@@ -419,8 +438,9 @@ def main():
                 return 0
             STAGE = "disposable Executor startup"
             with disposable_executor(control, [fixtures["codex"], fixtures["devsy"]]) as (origin, restart):
-                exercise_executor(control, origin, fixtures, restart)
-    print("Pinned Executor: Codex import/update, ten control calls without approval, Devsy reads, and browser mutation pause passed.")
+                with schema_adapter(origin) as (mcp_origin, restart_adapter):
+                    exercise_executor(control, origin, fixtures, restart, mcp_origin, restart_adapter)
+    print("Pinned Executor through schema adapter: reads, controls, browser mutation pause, and same-session pending resume after adapter restart passed.")
     print("No mutation was approved or forwarded; only disposable fixture state was used.")
     return 0
 

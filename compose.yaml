@@ -33,6 +33,30 @@ services:
       start_period: 30s
       retries: 12
 
+  executor-schema-proxy:
+    # Reuse the pinned CAS Python/aiohttp runtime; Executor stays stock and running.
+    image: ${CAS_IMAGE:-ghcr.io/joshyorko/codex-action-server@sha256:942f8f69a40ce729e5e66cfc244fedf6c8ddae6812955e10626bc762485f8bc2}
+    platform: linux/amd64
+    restart: unless-stopped
+    user: "${CAS_UID:-1000}:${CAS_GID:-1000}"
+    entrypoint: [python3, /opt/tunnel-kit/executor_schema_proxy.py]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    volumes:
+      - ./scripts/executor_schema_proxy.py:/opt/tunnel-kit/executor_schema_proxy.py:ro
+    networks: [control-plane]
+    depends_on:
+      executor:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, python3, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:4313/healthz', timeout=2).read()"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    logging:
+      driver: none
+
   codex-action-server:
     image: ${CAS_IMAGE:-ghcr.io/joshyorko/codex-action-server@sha256:942f8f69a40ce729e5e66cfc244fedf6c8ddae6812955e10626bc762485f8bc2}
     platform: linux/amd64
@@ -99,6 +123,7 @@ services:
     entrypoint: [python3, /opt/tunnel-kit/compose_control.py, bootstrap]
     environment:
       EXECUTOR_URL: http://executor:4312
+      EXECUTOR_MCP_ORIGIN: http://executor-schema-proxy:4313
       CAS_MCP_URL: http://${CONTROL_PLANE_GATEWAY:-172.30.86.1}:8088/mcp
       DEVSY_MCP_ENABLED: ${DEVSY_MCP_ENABLED:-false}
       DEVSY_MCP_URL: http://${CONTROL_PLANE_GATEWAY:-172.30.86.1}:8089/mcp
@@ -117,6 +142,8 @@ services:
       - control-plane
     depends_on:
       executor:
+        condition: service_healthy
+      executor-schema-proxy:
         condition: service_healthy
       codex-action-server:
         condition: service_healthy

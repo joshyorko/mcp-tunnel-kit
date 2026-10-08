@@ -1,3 +1,5 @@
 # Pinned MCP v2 client for local readiness checks and fixture tests.
 mcp==2.0.0
 httpx==0.28.1
+# Schema adapter; also supplied by the pinned CAS container runtime.
+aiohttp==3.14.4

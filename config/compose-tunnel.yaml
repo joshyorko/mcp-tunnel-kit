@@ -10,6 +10,6 @@ log:
 mcp:
   server_urls:
     - channel: main
-      url: http://executor:4312/mcp?elicitation_mode=browser
+      url: http://executor-schema-proxy:4313/mcp?elicitation_mode=browser
   extra_headers:
     Authorization: file:/run/secrets/executor-auth-header

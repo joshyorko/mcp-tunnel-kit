@@ -5,7 +5,7 @@ the control-plane containers. Existing native Codex and Devsy state remain
 operator-owned.
 
 ```text
-ChatGPT → official tunnel-client → executor:4312/mcp?elicitation_mode=browser
+ChatGPT → official tunnel-client → executor-schema-proxy:4313 → executor:4312/mcp?elicitation_mode=browser
         → private bridge gateway:8088/mcp → CAS → existing native Codex
 ```
 
@@ -239,6 +239,30 @@ only the source hash, and preserves the app for inspection.
 The tunnel healthcheck requires liveness, readiness, and a successful
 control-plane poll. Healthy services do not prove browser approval or ChatGPT
 consumer acceptance.
+
+### Resume schema compatibility
+
+The private `executor-schema-proxy` service rewrites only the `resume` input
+schema's `^apr_` and `^elc_` prefix patterns to equivalent patterns ending in
+`[\s\S]*$`. This accommodates connector validators that require a full-string
+match. Minimum lengths and all other schema constraints remain unchanged.
+JSON and SSE discovery are supported; request bodies, authentication headers,
+MCP session headers, approval URLs, and non-discovery responses pass through.
+The adapter never supplies an approval decision or retries a tool call.
+
+The adapter has no published host port, credentials, or durable state. It reuses
+the pinned CAS image's Python/aiohttp runtime. Executor and its persistent volume
+remain stock. Bootstrap checks discovery through the adapter before opening the
+tunnel. Normal wrapper startup adds the adapter without recreating an unchanged
+Executor container, preserving its pending programs. Do not use down/up for this
+change while an approval is pending.
+
+A connector may retain an old tool schema after deployment. Verify external
+`resume` using a fresh nonexistent diagnostic ID: an `unavailable` response
+proves validation reached Executor; a pattern error means the consumer still
+has the old schema. Refresh that consumer's catalog before resuming the original
+request in its original MCP session. Never recreate the workspace to recover
+from a resume validation failure.
 
 Before changing targets or token files, stop the stack with
 `./scripts/control-plane-down`. Make the changes, then run

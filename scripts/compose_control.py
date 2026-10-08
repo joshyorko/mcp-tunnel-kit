@@ -453,7 +453,11 @@ def executor_session(state=None):
         raise ControlError("The Executor PAT file must contain a nonempty token without whitespace.")
     header = "Bearer " + pat
     http = Http(origin, header)
-    return http, Mcp(http, "/mcp?elicitation_mode=browser", state=state)
+    mcp_origin = os.environ.get("EXECUTOR_MCP_ORIGIN", origin)
+    if mcp_origin not in {origin, "http://executor-schema-proxy:4313"}:
+        raise ControlError("Executor MCP probes use only the documented origin or schema adapter.")
+    mcp_http = http if mcp_origin == origin else Http(mcp_origin, header)
+    return http, Mcp(mcp_http, "/mcp?elicitation_mode=browser", state=state)
 
 
 def verify_compact(session):
@@ -468,6 +472,9 @@ def verify_compact(session):
             or set(schema.get("required", [])) != {"requestId"}
             or not variants or any(variant.get("type") != "string" for variant in variants)):
         raise ControlError("Browser resume must declare only the string requestId, with no decision response field.")
+    if os.environ.get("EXECUTOR_MCP_ORIGIN") and any(
+            variant.get("pattern") in {"^apr_", "^elc_"} for variant in variants):
+        raise ControlError("Executor schema adapter did not normalize browser resume ID patterns.")
 
 
 def codex_app_source(url):
@@ -796,6 +803,7 @@ def start_control_plane(configuration):
         devsy_call(bridge, "start", value)
     else:
         devsy_call(bridge, "stop", configuration["x-operator"]["devsy_state"])
+    compose("up", "-d", "--no-deps", "--wait", "--wait-timeout", "60", "executor-schema-proxy", timeout=90)
     # Always rerun the completed job. Compose otherwise retains successful one-shot jobs.
     compose("up", "--force-recreate", "--no-deps", "--exit-code-from", "app-ready", "app-ready", timeout=210)
     compose("up", "-d", "--no-deps", "--wait", "--wait-timeout", "120", "tunnel-client", timeout=150)

@@ -90,9 +90,10 @@ def test_normal_up_revalidates_both_apps_before_single_tunnel(monkeypatch):
     module.start_control_plane({})
     assert order[0] == ('stop', '--timeout', '30', 'tunnel-client')
     assert order[2:4] == ['network-verified', 'host-bridge-ready']
-    assert order[4] == ('up', '--force-recreate', '--no-deps', '--exit-code-from', 'app-ready', 'app-ready')
-    assert order[5] == ('up', '-d', '--no-deps', '--wait', '--wait-timeout', '120', 'tunnel-client')
-    assert len(order) == 6
+    assert order[4] == ('up', '-d', '--no-deps', '--wait', '--wait-timeout', '60', 'executor-schema-proxy')
+    assert order[5] == ('up', '--force-recreate', '--no-deps', '--exit-code-from', 'app-ready', 'app-ready')
+    assert order[6] == ('up', '-d', '--no-deps', '--wait', '--wait-timeout', '120', 'tunnel-client')
+    assert len(order) == 7
 
 
 def test_bootstrap_failure_leaves_tunnel_stopped(monkeypatch):

@@ -7,3 +7,5 @@ services:
       dockerfile: Containerfile
   app-ready:
     image: codex-action-server-local:acceptance
+  executor-schema-proxy:
+    image: codex-action-server-local:acceptance
