@@ -27,8 +27,8 @@ PROJECT = "codex-control-plane"
 NETWORK = PROJECT + "_control-plane"
 COMPACT = {"execute", "resume", "skills"}
 PROTOCOL_VERSIONS = {"2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"}
-DEVSY_READS = {"provider_list", "workspace_list", "workspace_status", "workspace_diagnostics"}
-DEVSY_TOOLS = (DEVSY_READS - {"workspace_diagnostics"}) | {"workspace_create", "workspace_start", "workspace_stop",
+DEVSY_READS = {"provider_list", "workspace_list", "workspace_status", "workspace_diagnostics", "workspace_create_receipt", "workspace_status_scoped"}
+DEVSY_TOOLS = (DEVSY_READS - {"workspace_diagnostics", "workspace_create_receipt", "workspace_status_scoped"}) | {"workspace_create", "workspace_start", "workspace_stop",
                            "workspace_delete", "workspace_exec", "provider_add",
                            "provider_delete", "provider_use"}
 PRIVATE_NETWORKS = tuple(ipaddress.ip_network(value) for value in
@@ -515,7 +515,38 @@ def verify_codex_app_source(source, url):
 
 
 def verify_devsy_app_source(source, url):
-    verify_generated_source(source, devsy_app_source(url), "Devsy")
+    try:
+        verify_generated_source(source, devsy_app_source(url), "Devsy")
+    except ControlError:
+        verify_generated_source(source, owner_devsy_app_source(url), "Owner Devsy")
+
+
+def owner_devsy_app_source(url):
+    origin = urllib.parse.urlsplit(url)
+    host = origin.netloc
+    return '''import { defineApp, defineProvider, secrets, object, string, toolAnnotations, withApprovals } from "apps"
+import { mcpRouter } from "apps/mcp"
+import { always, never } from "apps/operations/approval"
+
+const bridge = defineProvider({
+  name: "Private owner Devsy capability",
+  hosts: HOST_PLACEHOLDER,
+  auth: { apiKey: secrets({ label: "Owner capability", fields: object({ token: string({ minLength: 32 }) }) }) },
+  async health({ account, fetch, signal }) {
+    const response = await fetch(HEALTH_PLACEHOLDER, { signal, headers: { Authorization: "Bearer " + account.fields.token } })
+    if (!response.ok) throw new Error("Owner Devsy capability is unavailable or expired")
+  },
+})
+const noBrowser = new Set(["workspace_create_scoped", "workspace_start_scoped"])
+export default defineApp({ accounts: { bridge } }, async ({ accounts, signal, cache }) => ({
+  tools: withApprovals(await mcpRouter({
+    url: URL_PLACEHOLDER,
+    accountId: accounts.bridge.id,
+    headers: { Authorization: "Bearer " + accounts.bridge.fields.token },
+    cache: cache.forAccount(accounts.bridge), signal,
+  }), (tool, name) => noBrowser.has(name) ? never() : (toolAnnotations(tool)?.destructiveHint === true ? always() : undefined)),
+}))
+'''.replace('URL_PLACEHOLDER', json.dumps(url)).replace('HOST_PLACEHOLDER', json.dumps([host])).replace('HEALTH_PLACEHOLDER', json.dumps(url.removesuffix('/mcp') + '/scope/health'))
 
 
 def execution(result):
@@ -603,7 +634,16 @@ def ensure_mcp_app(http, url, name, receipt=None):
             verify_codex_app_source(source, url)
     else:
         verify_devsy_app_source(source, url)
-    return {"organization": organization, "id": app["id"], "url": url}
+    result = {"organization": organization, "id": app["id"], "url": url}
+    if name == 'Devsy':
+        index = next(file['content'] for file in source['files'] if file.get('path') == 'index.ts')
+        if index.strip() == owner_devsy_app_source(url).strip():
+            profiles, _ = http.request('GET', app_path + '/profiles')
+            selected = [profile for profile in profiles if profile.get('name') == 'Owner Devsy scope']
+            if len(selected) != 1:
+                raise ControlError('The private owner Devsy profile is absent or ambiguous.')
+            result['profile'] = selected[0]['id']
+    return result
 
 
 def verify_devsy_catalog(tools):
@@ -627,14 +667,15 @@ def search_devsy(session):
                 or data.get("unavailableApps")):
             raise ControlError("Devsy discovery through Executor is unavailable.")
         paths.update(item["path"] for item in data["execution"]["value"].get("items", []))
-    if not {"tools.devsy." + name for name in DEVSY_TOOLS}.issubset(paths):
+    if not all(any(path.startswith('tools.devsy.') and path.endswith('.' + name) for path in paths) for name in DEVSY_TOOLS):
         raise ControlError("Executor Devsy discovery lacks required workspace/provider tools.")
 
 
-def read_devsy(session):
+def read_devsy(session, profile=None):
+    prefix = 'tools.devsy' if profile is None else 'tools.devsy.profiles[' + json.dumps(profile) + ']'
     for name in ("provider_list", "workspace_list"):
         data = execution(session.call("tools/call", {"name": "execute", "arguments": {
-            "code": "return await tools.devsy." + name + "({});"}}))
+            "code": "return await " + prefix + "." + name + "({});"}}))
         if (data.get("status") != "completed" or not data.get("execution", {}).get("ok")
                 or data["execution"]["value"].get("isError")):
             raise ControlError("Devsy read did not complete without approval; no mutation was attempted.")
@@ -673,7 +714,7 @@ def bootstrap():
         receipt = ensure_mcp_app(http, devsy_url, "Devsy", receipt)
         write_private(marker, json.dumps(receipt) + "\n")
         search_devsy(session)
-        read_devsy(session)
+        read_devsy(session, receipt.get('profile'))
         print("Codex and Devsy retained; browser MCP, discovery and harmless Devsy reads ready.")
     else:
         print("Codex import retained; authenticated browser MCP and Codex discovery ready. Devsy disabled.")

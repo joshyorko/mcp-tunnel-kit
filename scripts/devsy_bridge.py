@@ -6,7 +6,7 @@ from __future__ import annotations
 import ipaddress
 
 UPSTREAM_READS = frozenset({"provider_list", "workspace_list", "workspace_status"})
-READ_ONLY = UPSTREAM_READS | {"workspace_diagnostics"}
+READ_ONLY = UPSTREAM_READS | {"workspace_diagnostics", "workspace_create_receipt", "workspace_status_scoped"}
 KNOWN_TOOLS = UPSTREAM_READS | {"workspace_create", "workspace_start", "workspace_stop",
                          "workspace_delete", "workspace_exec", "provider_add",
                          "provider_delete", "provider_use"}
@@ -137,7 +137,7 @@ class Stdio:
 
 
 class Devsy:
-    def __init__(self, binary, cwd, env=None, timeout=120, targets_source=None):
+    def __init__(self, binary, cwd, env=None, timeout=120, targets_source=None, creation_state=None, scope_source=None):
         executable = Path(binary)
         directory = Path(cwd)
         if (not executable.is_absolute() or not executable.is_file() or not os.access(executable, os.X_OK)
@@ -147,6 +147,69 @@ class Devsy:
         # Follow the configured launcher on each call after package-manager upgrades.
         self.binary, self.cwd, self.env, self.timeout = str(executable), str(directory.resolve()), env, timeout
         self.targets_source = targets_source
+        self.creation_state = creation_state
+        self.scope = None
+        if scope_source:
+            import importlib.util
+            path = Path(__file__).with_name('worker_scope.py')
+            spec = importlib.util.spec_from_file_location('worker_scope', path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            self.scope_module = module
+            self.scope = module.WorkerScope(scope_source, Path(creation_state).parent / 'scoped-jobs',
+                self.creation_inventory, self.scoped_metadata, self.scoped_execute)
+
+    def scoped_metadata(self, name):
+        value = self.scope.load()
+        result = subprocess.run([self.binary, '--context', value['context'], '--result-format', 'json',
+                                 'workspace', 'list', '--skip-pro'], cwd=self.cwd, env=self.env,
+                                capture_output=True, text=True, timeout=10, check=True)
+        rows = [row for row in json.loads(result.stdout) if row.get('id') == name]
+        if len(rows) != 1:
+            raise BridgeError('Scoped workspace absent or ambiguous.')
+        return rows[0]
+
+    def scoped_execute(self, operation, name, scope):
+        if self.stopping.is_set():
+            raise BridgeError('Bridge is stopping; scoped job was not submitted.')
+        process = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), '--scoped-child',
+                                    str(self.scope.config), str(os.getpid()), operation, name],
+                                   cwd=self.cwd, env=self.env, stdin=subprocess.DEVNULL,
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        with _CHILD_LOCK:
+            _CHILDREN.add(process)
+        try:
+            if process.wait(timeout=scope['job_timeout_seconds'] + 5):
+                raise BridgeError('Scoped lifecycle outcome requires reconciliation.')
+        finally:
+            terminate(process)
+            with _CHILD_LOCK:
+                _CHILDREN.discard(process)
+
+    def receipts(self):
+        import importlib.util
+        path = Path(__file__).with_name('creation_receipts.py')
+        spec = importlib.util.spec_from_file_location('creation_receipts', path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        scope = json.dumps({'binary': self.binary, 'cwd': self.cwd,
+                            'home': (self.env or os.environ).get('DEVSY_HOME', '')}, sort_keys=True)
+        return module, module.Receipts(self.creation_state, scope)
+
+    def creation_inventory(self):
+        result = self.upstream_call('workspace_list', {})
+        if result.get('isError'):
+            raise BridgeError('Creation inventory unavailable; no create was submitted.')
+        value = result.get('structuredContent')
+        if value is None:
+            blocks = [item['text'] for item in result['content'] if item.get('type') == 'text']
+            if len(blocks) != 1:
+                raise BridgeError('Creation inventory cannot be reconciled; no create was submitted.')
+            value = json.loads(blocks[0])
+        rows = value.get('workspaces')
+        if not isinstance(rows, list) or any(not isinstance(item, dict) or not isinstance(item.get('name'), str) for item in rows):
+            raise BridgeError('Creation inventory invalid; no create was submitted.')
+        return {item['name'] for item in rows}
 
     @staticmethod
     def diagnostic_module():
@@ -216,9 +279,35 @@ class Devsy:
             tools = self.discover(session)
         if self.targets_source:
             tools.append(normalize_tool(self.diagnostic_module().TOOL))
+        if self.creation_state:
+            module, _ = self.receipts()
+            tools.append(normalize_tool(module.TOOL))
+        if self.scope:
+            tools.extend(self.scope_module.tools())
         return tools
 
-    def call(self, name, arguments):
+    def call(self, name, arguments, credential=None):
+        if self.scope:
+            try:
+                if name in self.scope_module.MUTATIONS | self.scope_module.READS:
+                    value = self.scope.call(name, arguments, credential)
+                    return {'content': [{'type': 'text', 'text': json.dumps(value)}],
+                            'structuredContent': value, 'isError': value.get('status') == 'outcome_unknown'}
+                if name not in READ_ONLY:
+                    self.scope.authenticate(credential)
+            except self.scope_module.ScopeError as error:
+                raise BridgeError(str(error)) from None
+        if self.creation_state and name in {'workspace_create', 'workspace_create_receipt'}:
+            module, receipts = self.receipts()
+            if not isinstance(arguments, dict):
+                raise BridgeError('Creation arguments must be an object.')
+            try:
+                if name == 'workspace_create_receipt':
+                    return receipts.poll(arguments)
+                return receipts.create(arguments, self.creation_inventory,
+                                       lambda: self.upstream_call(name, arguments))
+            except module.ReceiptError as error:
+                raise BridgeError(str(error)) from None
         if name == 'workspace_diagnostics' and self.targets_source:
             module = self.diagnostic_module()
             try:
@@ -231,6 +320,9 @@ class Devsy:
                     'structuredContent': result, 'isError': False}
         if name not in KNOWN_TOOLS or not isinstance(arguments, dict):
             raise BridgeError("Unknown Devsy tool or invalid arguments; call refused.")
+        return self.upstream_call(name, arguments)
+
+    def upstream_call(self, name, arguments):
         with self.session() as session:
             self.discover(session)
             result = session.call("tools/call", {"name": name, "arguments": arguments})
@@ -334,6 +426,13 @@ class BridgeHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if not self.allowed():
             return
+        if self.path == '/scope/health':
+            try:
+                self.server.devsy.scope.authenticate(self.headers.get('Authorization'))
+                self.reply(200, {'authorized': True})
+            except Exception:
+                self.reply(401, {'authorized': False})
+            return
         if self.path != "/health":
             self.reply(405 if self.path == "/mcp" else 404)
             return
@@ -388,7 +487,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                     raise BridgeError("Unknown catalog cursor.")
                 result = {"tools": self.server.devsy.catalog()}
             elif method == "tools/call":
-                result = self.server.devsy.call(params.get("name"), params.get("arguments", {}))
+                result = self.server.devsy.call(params.get("name"), params.get("arguments", {}), self.headers.get('Authorization'))
             else:
                 raise BridgeError("Unsupported MCP method.")
             self.reply(200, {"jsonrpc": "2.0", "id": identifier, "result": result})
@@ -417,7 +516,7 @@ def settings(configuration):
     result = {'subnet': network['subnet'], 'gateway': network['gateway'],
               'binary': operator.get('devsy_binary', ''), 'cwd': operator.get('devsy_cwd', ''),
               'state': str(Path(operator.get('devsy_state', './.state/devsy-bridge')).resolve()), 'home': operator.get('devsy_home', ''),
-              'targets_source': operator.get('targets_source')}
+              'targets_source': operator.get('targets_source'), 'scope_source': operator.get('devsy_scope_file') or None}
     validate_settings(result)
     return result
 
@@ -455,7 +554,12 @@ def owned_process(receipt):
 
 def fingerprint(value):
     # No credentials: configuration contains only selected paths and bridge addresses.
-    return hashlib.sha256(json.dumps(value, sort_keys=True).encode() + Path(__file__).read_bytes()).hexdigest()
+    payload = json.dumps(value, sort_keys=True).encode() + Path(__file__).read_bytes()
+    for name in ['worker_scope.py', 'creation_receipts.py']:
+        payload += Path(__file__).with_name(name).read_bytes()
+    if value.get('scope_source'):
+        payload += Path(value['scope_source']).read_bytes()
+    return hashlib.sha256(payload).hexdigest()
 
 
 def host_opener():
@@ -593,7 +697,8 @@ def serve(config):
         if value.get('home'):
             environment['DEVSY_HOME'] = value['home']
         devsy = Devsy(value['binary'], value['cwd'], environment,
-                      targets_source=value.get('targets_source'))
+                      targets_source=value.get('targets_source'), creation_state=state / 'creation-receipts',
+                      scope_source=value.get('scope_source'))
         devsy.catalog()
         instance = secrets.token_hex(16)
         server = BridgeServer((value['gateway'], 8089), devsy,
@@ -636,7 +741,57 @@ def child_guard(binary, parent, budget):
         die()
 
 
+def scoped_child(config, parent, operation, name):
+    """Only an owned bridge can launch one fixed, approved CLI job."""
+    import ctypes
+    import worker_scope
+    scope = worker_scope.WorkerScope(config, Path(config).parent / 'unused', lambda: set(), lambda n: {}, lambda *a: None).load()
+    if operation not in {'create', 'start'} or name not in scope['allowed_new_names'] or name in scope['protected_names']:
+        return 2
+    process = None
+    def die(_signal=None, _frame=None):
+        if process is not None:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        os._exit(128 + (_signal or signal.SIGTERM))
+    signal.signal(signal.SIGTERM, die)
+    signal.signal(signal.SIGINT, die)
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(1, signal.SIGTERM, 0, 0, 0) != 0 or os.getppid() != parent:
+        return 2
+    source = 'git:' + scope['repository'] + '@' + scope['revision'] if operation == 'create' else name
+    arguments = [scope['binary'], '--context', scope['context'], '--provider', scope['provider'],
+                 'workspace', 'up', source, '--id', name, '--ide', 'none', '--ide-launch', 'skip',
+                 '--provider-option', 'KUBERNETES_NAMESPACE=' + scope['namespace'],
+                 '--provider-option', 'KUBERNETES_CONTEXT=' + scope['kubernetes_context'],
+                 '--provider-option', 'CREATE_NAMESPACE=false', '--provider-option', 'CLUSTER_ROLE=',
+                 '--provider-option', 'SERVICE_ACCOUNT=default']
+    if operation == 'create':
+        arguments += ['--devcontainer', scope['recipe']]
+    def parent_death():
+        # This supervisor is single-threaded, unlike the HTTP bridge.
+        if libc.prctl(1, signal.SIGKILL, 0, 0, 0) != 0:
+            os._exit(2)
+    try:
+        process = subprocess.Popen(arguments, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.DEVNULL, start_new_session=True, preexec_fn=parent_death)
+        return process.wait(timeout=scope['job_timeout_seconds'])
+    except subprocess.TimeoutExpired:
+        die()
+    finally:
+        if process is not None:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait()
+
+
 def main():
+    if len(sys.argv) == 6 and sys.argv[1] == '--scoped-child':
+        return scoped_child(sys.argv[2], int(sys.argv[3]), sys.argv[4], sys.argv[5])
     if len(sys.argv) == 5 and sys.argv[1] == '--child':
         return child_guard(sys.argv[2], int(sys.argv[3]), float(sys.argv[4]))
     parser = argparse.ArgumentParser(description=__doc__)

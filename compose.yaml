@@ -6,6 +6,7 @@ x-operator:
   devsy_binary: ${DEVSY_MCP_BIN:-}
   devsy_cwd: ${DEVSY_MCP_CWD:-}
   devsy_home: ${DEVSY_MCP_HOME:-}
+  devsy_scope_file: ${DEVSY_SCOPE_FILE:-}
   devsy_state: ${CONTROL_PLANE_STATE_DIR:-./.state}/devsy-bridge
 
 services:

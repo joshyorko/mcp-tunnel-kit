@@ -33,3 +33,4 @@ jobs:
           python-version: '3.12'
       - run: python tests/executor_devsy_live.py
       - run: python tests/devsy_lifecycle_live.py
+      - run: python tests/executor_scope_live.py
