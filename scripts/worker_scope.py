@@ -54,7 +54,7 @@ def tools():
                 "description": (
                     "Submit one approved owner-scoped lifecycle job; poll workspace_status_scoped. Never replay an uncertain job."
                     if mutation
-                    else "Read the approved owner scope job and verified workspace identity."
+                    else "Read and reconcile the owner scope job without provisioning. Only new_request_allowed=true permits one fresh create request ID; never replay an old ID."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -73,10 +73,11 @@ def tools():
 
 
 class WorkerScope:
-    def __init__(self, config, state, inventory, metadata, invoke):
+    def __init__(self, config, state, inventory, metadata, invoke, absence=None):
         self.config = Path(config)
         self.state = Path(state)
         self.inventory, self.metadata, self.invoke = inventory, metadata, invoke
+        self.absence = absence
         self.threads = {}
         self.mutex = threading.Lock()
 
@@ -167,6 +168,70 @@ class WorkerScope:
             raise ScopeError("Workspace identity or provider scope changed.")
         return row["uid"]
 
+    def reconcile(self, record, scope):
+        """An absence proof permits a new intent, never replay of this operation."""
+        if record.get("operation") != "create":
+            return record
+        if self.absence is None and record.get("new_request_allowed") is not True:
+            return record
+        record.setdefault("unreconciled_receipt", dict(record))
+        record["new_request_allowed"] = False
+        record["retry_safe"] = False
+        try:
+            cutoffs = [record.get(key) for key in (
+                "accepted_at", "started_at", "grant_issued_at", "recovery_cutoff")]
+            cutoffs = [value for value in cutoffs if not isinstance(value, bool)
+                       and isinstance(value, (int, float)) and math.isfinite(value)
+                       and 0 < value <= time.time()]
+            # A later capability renewal must not hide this operation's remnants.
+            proof_scope = {**scope, "recovery_cutoff": min(cutoffs) if cutoffs else None}
+            evidence = self.absence(record["name"], proof_scope)
+            if (not isinstance(evidence, dict) or evidence.get("kind") != "absent"
+                    or any(evidence.get(key) is not True for key in (
+                        "workspace_absent", "provider_resources_absent", "lifecycle_processes_absent"))
+                    or evidence.get("namespace") != scope["namespace"]
+                    or evidence.get("kubernetes_context") != scope["kubernetes_context"]
+                    or not isinstance(evidence.get("namespace_uid"), str)
+                    or not evidence["namespace_uid"]):
+                raise ScopeError("Complete provider absence proof required.")
+            self.load()  # Revocation or configuration drift during checks denies recovery.
+            record["reconciliation"] = {key: evidence[key] for key in (
+                "kind", "observed_at", "namespace_uid", "namespace", "kubernetes_context",
+                "workspace_absent", "provider_resources_absent", "lifecycle_processes_absent")}
+            for key in ("preexisting_auxiliary_count", "recovery_cutoff"):
+                if key in evidence:
+                    record["reconciliation"][key] = evidence[key]
+            record["status"] = "failed"
+            record["error_code"] = "lifecycle_reconciled_absent"
+            record["new_request_allowed"] = True
+            record["next_action"] = "Submit workspace_create_scoped once with a fresh request_id. Old request IDs never replay."
+        except Exception as error:
+            record["status"] = "outcome_unknown"
+            record["error_code"] = "lifecycle_outcome_unknown"
+            phase = getattr(error, "phase", None)
+            if phase not in {"configuration", "processes", "tasks", "inventory", "namespace",
+                             "resources", "auxiliary_resources", "volumes", "recheck"}:
+                phase = "validation"
+            record["reconciliation"] = {"kind": "blocked", "error_code": "absence_not_proven", "phase": phase}
+            record.pop("next_action", None)
+        self.write(record["name"], record)
+        return record
+
+    def archived_request(self, name, request_id):
+        for path in self.state.glob("history-*.json"):
+            record = private_json(path)
+            if record.get("name") == name and record.get("request_id") == request_id:
+                return {**record, "new_request_allowed": False, "retry_safe": False, "replayed_receipt": True}
+        return None
+
+    def archive(self, record):
+        key = "history-" + hashlib.sha256(record["operation_id"].encode()).hexdigest()
+        prior = self.read(key)
+        if prior is None:
+            self.write(key, record)
+        elif (prior.get("operation_id"), prior.get("request_id")) != (record["operation_id"], record["request_id"]):
+            raise ScopeError("Conflicting lifecycle history; recovery refused.")
+
     def call(self, tool, arguments, credential):
         scope = self.authenticate(credential)
         mutation = tool in MUTATIONS
@@ -201,6 +266,10 @@ class WorkerScope:
                 fcntl.flock(fd, fcntl.LOCK_EX)
                 record = self.read(name)
                 active = self.threads.get(name)
+                if mutation:
+                    archived = self.archived_request(name, arguments["request_id"])
+                    if archived:
+                        return archived
                 if (
                     record
                     and record["status"] in {"accepted", "running"}
@@ -216,6 +285,9 @@ class WorkerScope:
                     }
                     self.write(name, record)
                 if not mutation:
+                    if (record and record["status"] in {"outcome_unknown", "failed"}
+                            and not (active and active.is_alive())):
+                        record = self.reconcile(record, scope)
                     result = record or {"name": name, "status": "not_submitted"}
                     if record and record.get("workspace_uid"):
                         result = {**record, "identity_verified": False}
@@ -226,8 +298,16 @@ class WorkerScope:
                             pass
                     return result
                 operation = "create" if tool == "workspace_create_scoped" else "start"
+                recovered = None
                 if operation == "create" and record:
-                    return record
+                    if (active and active.is_alive() or record.get("request_id") == arguments["request_id"]
+                            or record.get("new_request_allowed") is not True):
+                        return record
+                    record = self.reconcile(record, scope)
+                    if record.get("new_request_allowed") is not True:
+                        return record
+                    recovered = record
+                    record = None
                 if record and record["status"] == "outcome_unknown":
                     return record
                 if active and active.is_alive():
@@ -246,13 +326,18 @@ class WorkerScope:
                     expected_uid = self.verified(name, scope, record["workspace_uid"])
                     if record.get("request_id") == arguments["request_id"]:
                         return record
+                if recovered:
+                    self.archive(recovered)
                 record = {
                     "name": name,
                     "operation_id": str(uuid.uuid4()),
                     "operation": operation,
                     "request_id": arguments["request_id"],
+                    "accepted_at": time.time(),
+                    "grant_issued_at": scope.get("issued_at"),
                     "status": "accepted",
                     "retry_safe": False,
+                    "new_request_allowed": False,
                     "execution_context": {
                         key: scope[key]
                         for key in (

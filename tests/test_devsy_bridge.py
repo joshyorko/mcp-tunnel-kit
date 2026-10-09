@@ -472,3 +472,41 @@ time.sleep(60)
     while module.process_identity(pid) and time.monotonic() < deadline:
         time.sleep(0.02)
     assert module.process_identity(pid) is None
+
+
+def test_scoped_status_and_receipt_report_guarded_fresh_admission(tmp_path):
+    import time
+    devsy, _ = scoped_fixture(tmp_path, 'raise SystemExit(0)\n')
+    devsy.scope.root()
+    devsy.scope.write('cas-worker-01', {'name': 'cas-worker-01', 'operation_id': 'incident',
+        'request_id': 'request-1', 'operation': 'create', 'status': 'outcome_unknown', 'retry_safe': False})
+    assert devsy.scope.absence is not None, 'Live bridge must wire provider reconciliation'
+    devsy.scope.absence = lambda name, scope: {
+        'kind': 'absent', 'observed_at': time.time(), 'namespace_uid': 'fixture-namespace',
+        'namespace': 'devsy', 'kubernetes_context': 'ror', 'workspace_absent': True,
+        'provider_resources_absent': True, 'lifecycle_processes_absent': True}
+    for tool in ('workspace_status_scoped', 'workspace_create_receipt'):
+        result = devsy.call(tool, {'name': 'cas-worker-01'}, 'Bearer fixture-owner-secret')
+        value = result['structuredContent']
+        assert value['status'] == 'failed'
+        assert value['new_request_allowed'] is True
+        assert value['retry_safe'] is False
+        assert value['may_have_succeeded'] is False
+        assert value['operation_id'] == 'incident'
+
+
+def test_scoped_job_uses_private_scratch_and_removes_only_its_own_directory(tmp_path):
+    import json
+    devsy, scope = scoped_fixture(tmp_path, '''import json, os, stat, tempfile
+from pathlib import Path
+root = Path(tempfile.gettempdir())
+Path('scratch.json').write_text(json.dumps({'path': str(root), 'mode': stat.S_IMODE(root.stat().st_mode)}))
+with tempfile.TemporaryFile() as f:
+    f.write(b'fixture')
+''')
+    result = devsy.scoped_execute('create', 'cas-worker-01', scope)
+    observed = json.loads((tmp_path / 'scratch.json').read_text())
+    assert Path(observed['path']).parent == devsy.scope.state
+    assert observed['mode'] == 0o700
+    assert not Path(observed['path']).exists()
+    assert result['exit_code'] == 0

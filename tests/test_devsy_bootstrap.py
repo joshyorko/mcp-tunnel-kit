@@ -88,6 +88,8 @@ def test_normal_up_revalidates_both_apps_before_single_tunnel(monkeypatch):
     monkeypatch.setattr(module, 'network_preflight', lambda configuration: order.append('network-verified'))
     monkeypatch.setattr(module, 'compose', lambda *args, **kwargs: order.append(args))
     module.start_control_plane({})
+    assert order[0] == ('pull',)
+    order = order[1:]
     assert order[0] == ('stop', '--timeout', '30', 'tunnel-client')
     assert order[2:4] == ['network-verified', 'host-bridge-ready']
     assert order[4] == ('up', '-d', '--no-deps', '--wait', '--wait-timeout', '60', 'executor-schema-proxy')

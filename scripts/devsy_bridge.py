@@ -46,6 +46,7 @@ import re
 import selectors
 import signal
 import subprocess
+import tempfile
 import threading
 import time
 
@@ -157,7 +158,15 @@ class Devsy:
             spec.loader.exec_module(module)
             self.scope_module = module
             self.scope = module.WorkerScope(scope_source, Path(creation_state).parent / 'scoped-jobs',
-                self.creation_inventory, self.scoped_metadata, self.scoped_execute)
+                self.creation_inventory, self.scoped_metadata, self.scoped_execute, self.scoped_absence)
+
+    def scoped_absence(self, name, scope):
+        import importlib.util
+        path = Path(__file__).with_name('devsy_reconciliation.py')
+        spec = importlib.util.spec_from_file_location('devsy_reconciliation', path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.absence_proof(self.binary, self.cwd, self.env or os.environ, scope, name)
 
     def scoped_metadata(self, name):
         value = self.scope.load()
@@ -172,31 +181,34 @@ class Devsy:
     def scoped_execute(self, operation, name, scope):
         if self.stopping.is_set():
             return {'phase': 'bridge_stopping', 'exit_code': 2, 'devsy_invoked': False}
-        process = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), '--scoped-child',
-                                    str(self.scope.config), str(os.getpid()), operation, name],
-                                   cwd=self.cwd, env=self.env, stdin=subprocess.DEVNULL,
-                                   stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True)
-        with _CHILD_LOCK:
-            _CHILDREN.add(process)
-        try:
-            try:
-                output, _ = process.communicate(timeout=scope['job_timeout_seconds'] + 5)
-            except subprocess.TimeoutExpired:
-                return {'phase': 'supervisor_timeout', 'exit_code': 124}
-            if process.returncode or len(output) > 4096:
-                return {'phase': 'supervisor_lost', 'exit_code': process.returncode or 2}
-            try:
-                result = json.loads(output)
-                if (not isinstance(result, dict) or not isinstance(result.get('exit_code'), int)
-                        or ('devsy_invoked' in result and not isinstance(result['devsy_invoked'], bool))):
-                    raise ValueError()
-                return result
-            except (ValueError, UnicodeDecodeError):
-                return {'phase': 'supervisor_result_invalid', 'exit_code': 2}
-        finally:
-            terminate(process)
+        self.scope.root()
+        with tempfile.TemporaryDirectory(prefix='work-', dir=self.scope.state) as scratch:
+            process = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), '--scoped-child',
+                                        str(self.scope.config), str(os.getpid()), operation, name],
+                                       cwd=self.cwd, env={**(self.env or os.environ), "TMPDIR": scratch}, stdin=subprocess.DEVNULL,
+                                       stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True)
             with _CHILD_LOCK:
-                _CHILDREN.discard(process)
+                _CHILDREN.add(process)
+            try:
+                try:
+                    output, _ = process.communicate(timeout=scope['job_timeout_seconds'] + 5)
+                except subprocess.TimeoutExpired:
+                    return {'phase': 'supervisor_timeout', 'exit_code': 124}
+                if process.returncode or len(output) > 4096:
+                    return {'phase': 'supervisor_lost', 'exit_code': process.returncode or 2}
+                try:
+                    result = json.loads(output)
+                    if (not isinstance(result, dict) or not isinstance(result.get('exit_code'), int)
+                            or ('devsy_invoked' in result and not isinstance(result['devsy_invoked'], bool))):
+                        raise ValueError()
+                    return result
+                except (ValueError, UnicodeDecodeError):
+                    return {'phase': 'supervisor_result_invalid', 'exit_code': 2}
+            finally:
+                terminate(process)
+                with _CHILD_LOCK:
+                    _CHILDREN.discard(process)
+
 
     def receipts(self):
         import importlib.util
@@ -575,7 +587,7 @@ def owned_process(receipt):
 def fingerprint(value):
     # No credentials: configuration contains only selected paths and bridge addresses.
     payload = json.dumps(value, sort_keys=True).encode() + Path(__file__).read_bytes()
-    for name in ['worker_scope.py', 'creation_receipts.py']:
+    for name in ['worker_scope.py', 'creation_receipts.py', 'devsy_reconciliation.py']:
         payload += Path(__file__).with_name(name).read_bytes()
     if value.get('scope_source'):
         payload += Path(value['scope_source']).read_bytes()
