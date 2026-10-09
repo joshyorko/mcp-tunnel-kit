@@ -670,7 +670,7 @@ def owned_process(receipt):
 def fingerprint(value):
     # No credentials: configuration contains only selected paths and bridge addresses.
     payload = json.dumps(value, sort_keys=True).encode() + Path(__file__).read_bytes()
-    for name in ['worker_scope.py', 'creation_receipts.py', 'devsy_reconciliation.py', 'worker_diagnostics.py', 'worker_registry.py', 'headless_devsy.py']:
+    for name in ['worker_scope.py', 'creation_receipts.py', 'devsy_reconciliation.py', 'worker_diagnostics.py', 'worker_registry.py', 'headless_devsy.py', 'worker_source.py']:
         payload += Path(__file__).with_name(name).read_bytes()
     if value.get('scope_source'):
         payload += Path(value['scope_source']).read_bytes()
