@@ -57,6 +57,11 @@ existing Executor volume owner across upgrades. Do not regenerate the key or
 delete the volume to resolve permissions. If ownership needs migration, stop
 the stack, back up the volume, then perform a deliberate ownership migration.
 
+Executor tracking is disabled in Compose with `DO_NOT_TRACK=1` and
+`EXECUTOR_DISABLE_ANALYTICS=1`. These settings survive image upgrades and
+container recreation. Upstream honors `DO_NOT_TRACK` for crash reporting and
+integration catalog fetching as well as usage analytics.
+
 Normal `scripts/control-plane-up` refreshes configured images before starting
 services, including cached `:latest` tags. A failed pull stops startup and
 retains persistent data. `--check` validates configuration without pulling.

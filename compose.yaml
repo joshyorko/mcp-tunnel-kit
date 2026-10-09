@@ -16,6 +16,8 @@ services:
     user: "${EXECUTOR_UID:-1000}:${EXECUTOR_GID:-1000}"
     restart: unless-stopped
     environment:
+      DO_NOT_TRACK: "1"
+      EXECUTOR_DISABLE_ANALYTICS: "1"
       HOST: 0.0.0.0
       PORT: "4312"
       BETTER_AUTH_URL: http://127.0.0.1:4312
