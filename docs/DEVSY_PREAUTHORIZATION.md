@@ -80,6 +80,8 @@ When absence is proven, the original operation becomes `failed` with `error_code
 
 Only when `new_request_allowed=true`, submit one `workspace_create_scoped` call with a fresh request ID. The bridge repeats the absence checks under the admission lock before accepting it. It archives the prior receipt before recording the new operation. Every archived request ID continues to return its old receipt across restarts. Poll the new operation and verify runtime readiness separately. Recovery does not change CAS target mappings or resume parked approvals.
 
+If a completed workspace is later deleted, status performs the same full absence proof. Confirmed absence retires the old workspace and permits a fresh request; the completed receipt remains in `retired_receipt`. A metadata or provider outage alone never retires it. Retired identities lose dynamic CAS authorization immediately.
+
 Scoped jobs use a private temporary directory under their managed job-state directory. The supervisor removes only that directory when the job ends. They do not depend on space in the host's shared `/tmp` for Git inspection.
 
 Each scoped job copies its hash-bound Devsy config into that private directory and disables `SSH_TUNNEL_MODE` in the copy. The provider home and operator config are unchanged. Headless provisioning must exit after readiness, not stay alive serving an inherited interactive SSH tunnel.
@@ -89,6 +91,8 @@ Each scoped job copies its hash-bound Devsy config into that private directory a
 Scoped status verifies the admitted worker's source, pinned commit, recipe, cluster, and UID. The first observed UID is retained for that operation. Diagnostics accept this verified identity without changing the existing operator-pinned diagnostic target. A replacement UID, revoked scope, or changed binding is refused.
 
 The bridge publishes verified workers into a separate private `cas/dynamic-targets.json` registry. Static targets such as `local` and `devsy` are never overwritten. CAS reads the registry on each call and checks the bridge's private `/worker-authorized` endpoint for current scope authorization. Revocation or an unavailable authority blocks dynamic access while static routes remain available. Native Devsy metadata must still match every published cluster and source binding before CAS connects.
+
+Host-network CAS requests to the configured bridge gateway use a loopback source address. The bridge's peer restriction is unchanged; other private authorities use normal routing.
 
 New workers require no per-UID target-file edit or service restart. Enabling the registry reader requires one CAS rollout. An unknown legacy operation without a recorded UID requires evidence-based operator reconciliation before it can be registered; discovering a matching name alone never adopts it.
 

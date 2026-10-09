@@ -353,7 +353,7 @@ class Devsy:
                                             arguments, credential)
                     value = self.discover_owned(value, credential)
                     value = {**value, 'retry_safe': False,
-                             'may_have_succeeded': value['status'] not in {'not_submitted', 'failed'}}
+                             'may_have_succeeded': value['status'] not in {'not_submitted', 'failed', 'retired'}}
                     return {'content': [{'type': 'text', 'text': json.dumps(value)}],
                             'structuredContent': value, 'isError': value.get('status') in {'outcome_unknown', 'failed'}}
                 if name not in READ_ONLY:

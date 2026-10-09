@@ -176,3 +176,34 @@ def test_legacy_receipt_never_borrows_current_grant_as_cutoff(tmp_path):
     scope.absence = bounded
     status(scope)
     assert observed == [None]
+
+
+def test_completed_then_deleted_workspace_requires_live_absence_before_fresh_create(tmp_path):
+    _, scope, calls, _ = stuck(tmp_path)
+    record = scope.read(NAME)
+    record.update(status='completed', workspace_uid='deleted-uid')
+    scope.write(NAME, record)
+    scope.metadata = lambda name: (_ for _ in ()).throw(KeyError(name))
+    retired = status(scope)
+    assert retired['status'] == 'retired'
+    assert retired['new_request_allowed'] is True
+    assert retired['unreconciled_receipt']['status'] == 'completed'
+    assert calls == []
+    accepted = create(scope, 'fresh-after-deletion')
+    assert accepted['status'] == 'accepted'
+    scope.wait()
+    assert calls == [('create', NAME)]
+
+
+def test_completed_worker_is_not_retired_on_metadata_failure_alone(tmp_path):
+    _, scope, calls, _ = stuck(tmp_path)
+    record = scope.read(NAME)
+    record.update(status='completed', workspace_uid='unreachable-uid')
+    scope.write(NAME, record)
+    scope.metadata = lambda name: (_ for _ in ()).throw(KeyError(name))
+    scope.absence = lambda *args: (_ for _ in ()).throw(RuntimeError('provider unavailable'))
+    current = status(scope)
+    assert current['status'] == 'completed'
+    assert current['new_request_allowed'] is False
+    assert create(scope, 'unsafe-retry')['operation_id'] == current['operation_id']
+    assert calls == []

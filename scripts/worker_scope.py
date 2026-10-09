@@ -241,6 +241,10 @@ class WorkerScope:
             return record
         if self.absence is None and record.get("new_request_allowed") is not True:
             return record
+        retiring = record["status"] in {"completed", "retired"}
+        previous_status = record["status"]
+        if retiring:
+            record.setdefault("retired_receipt", dict(record))
         record.setdefault("unreconciled_receipt", dict(record))
         record["new_request_allowed"] = False
         record["retry_safe"] = False
@@ -268,13 +272,13 @@ class WorkerScope:
             for key in ("preexisting_auxiliary_count", "recovery_cutoff"):
                 if key in evidence:
                     record["reconciliation"][key] = evidence[key]
-            record["status"] = "failed"
-            record["error_code"] = "lifecycle_reconciled_absent"
+            record["status"] = "retired" if retiring else "failed"
+            record["error_code"] = "workspace_retired" if retiring else "lifecycle_reconciled_absent"
             record["new_request_allowed"] = True
             record["next_action"] = "Submit workspace_create_scoped once with a fresh request_id. Old request IDs never replay."
         except Exception as error:
-            record["status"] = "outcome_unknown"
-            record["error_code"] = "lifecycle_outcome_unknown"
+            record["status"] = previous_status if retiring else "outcome_unknown"
+            record["error_code"] = "retirement_not_verified" if retiring else "lifecycle_outcome_unknown"
             phase = getattr(error, "phase", None)
             if phase not in {"configuration", "processes", "tasks", "inventory", "namespace",
                              "resources", "auxiliary_resources", "volumes", "recheck"}:
@@ -352,7 +356,7 @@ class WorkerScope:
                     }
                     self.write(name, record)
                 if not mutation:
-                    if (record and record["status"] in {"outcome_unknown", "failed"}
+                    if (record and record["status"] in {"outcome_unknown", "failed", "retired"}
                             and not (active and active.is_alive())):
                         record = self.reconcile(record, scope)
                     result = record or {"name": name, "status": "not_submitted"}
@@ -362,7 +366,9 @@ class WorkerScope:
                             self.verified(name, scope, record["workspace_uid"])
                             result["identity_verified"] = True
                         except Exception:
-                            pass
+                            if record["status"] == "completed" and not (active and active.is_alive()):
+                                record = self.reconcile(record, scope)
+                                result = {**record, "identity_verified": False}
                     return result
                 operation = "create" if tool == "workspace_create_scoped" else "start"
                 recovered = None
