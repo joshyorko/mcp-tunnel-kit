@@ -11,7 +11,7 @@ x-operator:
 
 services:
   executor:
-    image: ghcr.io/usefulsoftwareco/executor-selfhost:latest
+    image: ghcr.io/usefulsoftwareco/executor-selfhost:2.0.0-beta.8@sha256:a7d4e9d7c40aa02e08224757a59679ae61b6bfb59a61b3d06308e29f4652305a
     restart: unless-stopped
     environment:
       HOST: 0.0.0.0
