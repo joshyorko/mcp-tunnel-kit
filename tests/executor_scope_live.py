@@ -40,11 +40,14 @@ def main():
 
         def invoke(operation, name, approved):
             calls.append(operation)
+            execution = approved["execution_context"]
             rows[name] = {
                 "id": name,
                 "uid": "fixture-uid",
                 "context": "default",
-                "source": {"gitRepository": approved["repository"]},
+                "source": {"gitRepository": execution["repository"],
+                           "gitCommit": execution["revision"]},
+                "devContainerPath": execution["recipe"],
                 "provider": {
                     "name": "kubernetes",
                     "options": {
@@ -54,8 +57,15 @@ def main():
                 },
             }
 
+        recipe = b"{}"
         scope = scope_module.WorkerScope(
-            config, root / "jobs", lambda: set(rows), lambda n: rows[n], invoke
+            config, root / "jobs", lambda: set(rows), lambda n: rows[n], invoke,
+            source_resolver=lambda approved: {
+                "repository": approved["repository"], "source_ref": approved["source_ref"],
+                "revision": "d" * 40, "recipe": approved["recipe"],
+                "recipe_sha256": hashlib.sha256(recipe).hexdigest(),
+                "recipe_snapshot": recipe,
+            },
         )
 
         class Synthetic:

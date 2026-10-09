@@ -396,16 +396,122 @@ if sys.argv[1:4] == ['--context', 'default', 'context']:
     return devsy, scope
 
 
+def scoped_job(devsy, scope, request_id='fixture-create'):
+    import hashlib
+    import uuid
+    recipe = b'{}'
+    execution = {key: scope[key] for key in (
+        'context', 'provider', 'kubernetes_context', 'namespace', 'repository', 'source_ref', 'recipe', 'binary')}
+    execution.update(revision='b' * 40, recipe_sha256=hashlib.sha256(recipe).hexdigest())
+    operation_id = str(uuid.uuid4())
+    devsy.scope.root()
+    devsy.scope.write('cas-worker-01', {
+        'name': 'cas-worker-01', 'operation_id': operation_id, 'operation': 'create',
+        'request_id': request_id, 'status': 'running', 'execution_context': execution,
+    })
+    return {**scope, 'execution_context': execution, 'recipe_snapshot': recipe,
+            'operation_id': operation_id}
+
+
 def test_scoped_supervisor_passes_commit_source_and_execution_context(tmp_path):
+    import hashlib
     import json
+    import uuid
     devsy, scope = scoped_fixture(tmp_path, '''import json, os, sys
 from pathlib import Path
 Path('invocation.json').write_text(json.dumps({'args': sys.argv[1:], 'home': os.environ['DEVSY_HOME']}))
 ''')
-    result = devsy.scoped_execute('create', 'cas-worker-01', scope)
+    recipe = b'{"name":"remote worker"}\n'
+    execution = {key: scope[key] for key in ('context', 'provider', 'kubernetes_context', 'namespace', 'repository', 'recipe', 'binary')}
+    execution.update(source_ref='refs/heads/main', revision='b' * 40,
+                     recipe_sha256=hashlib.sha256(recipe).hexdigest())
+    operation_id = str(uuid.uuid4())
+    devsy.scope.root()
+    devsy.scope.write('cas-worker-01', {'name': 'cas-worker-01', 'operation_id': operation_id,
+        'operation': 'create', 'request_id': 'pinned-main', 'status': 'running',
+        'execution_context': execution})
+    result = devsy.scoped_execute('create', 'cas-worker-01', {**scope, 'execution_context': execution,
+        'recipe_snapshot': recipe, 'operation_id': operation_id})
     invocation = json.loads((tmp_path / 'invocation.json').read_text())
-    assert 'git:https://github.com/joshyorko/codex-action-server.git@sha256:bf0b3823e033b9b5abd86904e0a565d6b3586206' in invocation['args']
+    assert 'git:https://github.com/joshyorko/codex-action-server.git@sha256:' + 'b' * 40 in invocation['args']
     assert invocation['home'] == str(tmp_path)
+    assert result['exit_code'] == 0
+    assert result['devsy_invoked'] is True
+
+
+def test_scoped_child_uses_the_persisted_source_snapshot(tmp_path):
+    import hashlib
+    import json
+    import uuid
+
+    capture = tmp_path / 'child-arguments.json'
+    devsy, approved = scoped_fixture(tmp_path, f'''import hashlib, json, os, stat, sys
+from pathlib import Path
+scratch = Path(os.environ['TMPDIR'])
+snapshot = scratch / 'recipe-snapshot.json'
+Path({str(capture)!r}).write_text(json.dumps({{
+    'args': sys.argv[1:], 'scratch_mode': stat.S_IMODE(scratch.stat().st_mode),
+    'snapshot_mode': stat.S_IMODE(snapshot.stat().st_mode),
+    'snapshot_hash': hashlib.sha256(snapshot.read_bytes()).hexdigest(),
+}}))
+''')
+    recipe = b'{"name":"worker from main"}\n'
+    execution = {
+        'context': approved['context'], 'provider': approved['provider'],
+        'kubernetes_context': approved['kubernetes_context'], 'namespace': approved['namespace'],
+        'repository': 'https://github.com/joshyorko/codex-action-server.git',
+        'source_ref': 'refs/heads/main', 'revision': 'a' * 40,
+        'recipe': '.devcontainer/remote-worker/devcontainer.json',
+        'recipe_sha256': hashlib.sha256(recipe).hexdigest(), 'binary': approved['binary'],
+    }
+    operation_id = str(uuid.uuid4())
+    devsy.scope.root()
+    devsy.scope.write('cas-worker-01', {
+        'name': 'cas-worker-01', 'operation_id': operation_id, 'operation': 'create',
+        'request_id': 'source-snapshot', 'status': 'running', 'execution_context': execution,
+    })
+    job_scope = {**approved, 'execution_context': execution,
+                 'recipe_snapshot': recipe, 'operation_id': operation_id}
+
+    result = devsy.scoped_execute('create', 'cas-worker-01', job_scope)
+
+    observed = json.loads(capture.read_text())
+    arguments = observed['args']
+    assert 'git:https://github.com/joshyorko/codex-action-server.git@sha256:' + 'a' * 40 in arguments
+    assert arguments[arguments.index('--devcontainer') + 1] == '.devcontainer/remote-worker/devcontainer.json'
+    assert observed['scratch_mode'] == 0o700
+    assert observed['snapshot_mode'] == 0o600
+    assert observed['snapshot_hash'] == hashlib.sha256(recipe).hexdigest()
+    assert result['exit_code'] == 0
+    assert result['devsy_invoked'] is True
+
+
+def test_scoped_start_uses_existing_workspace_without_main_or_recipe_flags(tmp_path):
+    import json
+    import uuid
+    capture = tmp_path / 'start-arguments.json'
+    devsy, approved = scoped_fixture(tmp_path, f'''import json, sys
+from pathlib import Path
+Path({str(capture)!r}).write_text(json.dumps(sys.argv[1:]))
+''')
+    execution = {key: approved[key] for key in (
+        'context', 'provider', 'kubernetes_context', 'namespace', 'repository', 'source_ref', 'recipe', 'binary')}
+    execution.update(revision='a' * 40, recipe_sha256='b' * 64)
+    operation_id = str(uuid.uuid4())
+    devsy.scope.root()
+    devsy.scope.write('cas-worker-01', {
+        'name': 'cas-worker-01', 'operation_id': operation_id, 'operation': 'start',
+        'request_id': 'start-pinned-main', 'status': 'running', 'workspace_uid': 'fixture-uid',
+        'execution_context': execution,
+    })
+
+    result = devsy.scoped_execute('start', 'cas-worker-01', {
+        **approved, 'execution_context': execution, 'operation_id': operation_id,
+    })
+
+    arguments = json.loads(capture.read_text())
+    assert arguments[arguments.index('up') + 1] == 'cas-worker-01'
+    assert '--devcontainer' not in arguments
     assert result['exit_code'] == 0
     assert result['devsy_invoked'] is True
 
@@ -416,7 +522,7 @@ def test_scoped_supervisor_retains_exit_without_leaking_stderr(tmp_path):
 sys.stderr.write('fatal: Remote branch missing not found in upstream origin\\nPRIVATE_TOKEN=do-not-retain\\n')
 sys.exit(17)
 ''')
-    result = devsy.scoped_execute('create', 'cas-worker-01', scope)
+    result = devsy.scoped_execute('create', 'cas-worker-01', scoped_job(devsy, scope))
     assert result['exit_code'] == 17
     assert result['devsy_invoked'] is True
     assert result['stderr_code'] == 'git_ref_not_found'
@@ -452,7 +558,8 @@ def test_scoped_outer_exception_never_claims_no_invocation(monkeypatch, capsys):
     def unexpected(*_args):
         raise OSError('post-launch cleanup failure with private details')
     monkeypatch.setattr(module, 'scoped_child', unexpected)
-    monkeypatch.setattr(sys, 'argv', ['bridge', '--scoped-child', '/unused', '1', 'create', 'cas-worker-01'])
+    monkeypatch.setattr(sys, 'argv', ['bridge', '--scoped-child', '/unused', '1', 'create',
+                                      'cas-worker-01', '/state', 'operation', ''])
     assert module.main() == 0
     result = json.loads(capsys.readouterr().out)
     assert result.get('devsy_invoked') is not False
@@ -463,7 +570,7 @@ def test_scoped_outer_exception_never_claims_no_invocation(monkeypatch, capsys):
 def test_scoped_large_output_is_drained_and_not_retained(tmp_path):
     import json
     devsy, scope = scoped_fixture(tmp_path, "import sys\nsys.stderr.write('sensitive' * 100000)\nsys.exit(9)\n")
-    result = devsy.scoped_execute('create', 'cas-worker-01', scope)
+    result = devsy.scoped_execute('create', 'cas-worker-01', scoped_job(devsy, scope))
     assert result['exit_code'] == 9
     assert result['devsy_invoked'] is True
     assert len(json.dumps(result)) < 500
@@ -479,7 +586,8 @@ Path('devsy-pid').write_text(str(os.getpid()))
 time.sleep(60)
 ''')
     # Shorten only the parent's test deadline; child still loads the approved scope.
-    result = devsy.scoped_execute('create', 'cas-worker-01', {**scope, 'job_timeout_seconds': 0.01})
+    result = devsy.scoped_execute('create', 'cas-worker-01',
+                                  {**scoped_job(devsy, scope), 'job_timeout_seconds': 0.01})
     assert result['phase'] == 'supervisor_timeout'
     assert result.get('devsy_invoked') is not False
     pid = int((tmp_path / 'devsy-pid').read_text())
@@ -520,7 +628,7 @@ Path('scratch.json').write_text(json.dumps({'path': str(root), 'mode': stat.S_IM
 with tempfile.TemporaryFile() as f:
     f.write(b'fixture')
 ''')
-    result = devsy.scoped_execute('create', 'cas-worker-01', scope)
+    result = devsy.scoped_execute('create', 'cas-worker-01', scoped_job(devsy, scope))
     observed = json.loads((tmp_path / 'scratch.json').read_text())
     assert Path(observed['path']).parent == devsy.scope.state
     assert observed['mode'] == 0o700

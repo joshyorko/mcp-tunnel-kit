@@ -42,6 +42,7 @@ def manager(tmp_path, invoke=None):
         result = None
         if invoke:
             result = invoke(operation, name, approved)
+        execution = approved.get("execution_context", {})
         rows[name] = {
             "id": name,
             "uid": "fixture-uid",
@@ -53,14 +54,155 @@ def manager(tmp_path, invoke=None):
                     "KUBERNETES_NAMESPACE": {"value": "devsy"},
                 },
             },
-            "source": {"gitRepository": approved["repository"]},
+            "source": {"gitRepository": approved["repository"],
+                       "gitCommit": execution.get("revision")},
+            "devContainerPath": execution.get("recipe", approved["recipe"]),
         }
         return result
 
+    def resolve(approved):
+        recipe = b'{"name":"remote worker"}\n'
+        return {**snapshot("b" * 40), "recipe_snapshot": recipe}
+
     instance = module.WorkerScope(
-        config, tmp_path / "jobs", lambda: set(rows), lambda n: rows[n], execute
+        config, tmp_path / "jobs", lambda: set(rows), lambda n: rows[n], execute,
+        source_resolver=resolve,
     )
     return module, instance, calls
+
+
+def snapshot(revision):
+    import hashlib
+
+    recipe = b'{"name":"remote worker"}\n'
+    return {
+        "repository": "https://github.com/joshyorko/codex-action-server.git",
+        "source_ref": "refs/heads/main",
+        "revision": revision,
+        "recipe": ".devcontainer/remote-worker/devcontainer.json",
+        "recipe_sha256": hashlib.sha256(recipe).hexdigest(),
+        "recipe_snapshot": recipe,
+    }
+
+
+def test_pending_duplicate_reuses_the_first_resolved_main_snapshot(tmp_path):
+    entered, release = threading.Event(), threading.Event()
+    resolutions = []
+
+    def resolve(_scope):
+        resolutions.append("a" * 40)
+        return snapshot("a" * 40)
+
+    def block(*_args):
+        entered.set()
+        assert release.wait(3)
+
+    module = load()
+    scope_data = json.loads((ROOT / "docs/devsy-worker-scope.proposed.json").read_text())
+    import hashlib
+    scope_data.update(enabled=True, expires_at=time.time() + 3600,
+                      capability_sha256=hashlib.sha256(b"fixture-owner-secret").hexdigest(),
+                      bindings={})
+    config = tmp_path / "scope.json"
+    config.write_text(json.dumps(scope_data))
+    config.chmod(0o600)
+    jobs = tmp_path / "jobs"
+    scope = module.WorkerScope(config, jobs, lambda: set(), lambda _name: {}, block,
+                               source_resolver=resolve)
+
+    first = scope.call("workspace_create_scoped", {"name": NAME, "request_id": "pending"},
+                       "Bearer fixture-owner-secret")
+    assert entered.wait(3)
+    duplicate = scope.call("workspace_create_scoped", {"name": NAME, "request_id": "pending"},
+                           "Bearer fixture-owner-secret")
+    release.set()
+    scope.wait()
+
+    assert first["execution_context"]["revision"] == "a" * 40
+    assert duplicate["execution_context"] == first["execution_context"]
+    assert resolutions == ["a" * 40]
+
+
+def test_main_advance_does_not_re_resolve_existing_start_or_ownership(tmp_path):
+    current = ["a" * 40]
+    resolutions = []
+    rows = {}
+
+    def resolve(_scope):
+        resolutions.append(current[0])
+        return snapshot(current[0])
+
+    def invoke(_operation, name, job_scope):
+        execution = job_scope["execution_context"]
+        rows[name] = {
+            "id": name, "uid": "fixture-uid", "context": "default",
+            "provider": {"name": "kubernetes", "options": {
+                "KUBERNETES_CONTEXT": {"value": "ror"},
+                "KUBERNETES_NAMESPACE": {"value": "devsy"},
+                "KUBERNETES_CONFIG": {"value": str(kubeconfig)},
+            }},
+            "source": {"gitRepository": execution["repository"],
+                       "gitCommit": execution["revision"]},
+            "devContainerPath": execution["recipe"],
+        }
+
+    module = load()
+    import hashlib
+    kubeconfig = tmp_path / "kubeconfig"
+    kubeconfig.write_bytes(b"kube")
+    kubeconfig.chmod(0o600)
+    scope_data = json.loads((ROOT / "docs/devsy-worker-scope.proposed.json").read_text())
+    scope_data.update(enabled=True, expires_at=time.time() + 3600,
+                      capability_sha256=hashlib.sha256(b"fixture-owner-secret").hexdigest(),
+                      bindings={str(kubeconfig): hashlib.sha256(b"kube").hexdigest()})
+    config = tmp_path / "scope.json"
+    config.write_text(json.dumps(scope_data))
+    config.chmod(0o600)
+    scope = module.WorkerScope(config, tmp_path / "jobs", lambda: set(rows),
+                               lambda name: rows[name], invoke, source_resolver=resolve)
+    credential = "Bearer fixture-owner-secret"
+    scope.call("workspace_create_scoped", {"name": NAME, "request_id": "create-a"}, credential)
+    scope.wait()
+    current[0] = "b" * 40
+
+    selection = scope.owned_workspace(NAME, "fixture-uid", credential)
+    status = scope.call("workspace_status_scoped", {"name": NAME}, credential)
+    started = scope.call("workspace_start_scoped", {"name": NAME, "request_id": "start-a"}, credential)
+    scope.wait()
+
+    assert selection["revision"] == "a" * 40
+    assert status["execution_context"]["revision"] == "a" * 40
+    assert started["execution_context"]["revision"] == "a" * 40
+    assert resolutions == ["a" * 40]
+
+
+def test_failed_main_resolution_does_not_persist_or_invoke_a_job(tmp_path):
+    module = load()
+    import hashlib
+    scope_data = json.loads((ROOT / "docs/devsy-worker-scope.proposed.json").read_text())
+    scope_data.update(enabled=True, expires_at=time.time() + 3600,
+                      capability_sha256=hashlib.sha256(b"fixture-owner-secret").hexdigest(),
+                      bindings={})
+    config = tmp_path / "scope.json"
+    config.write_text(json.dumps(scope_data))
+    config.chmod(0o600)
+    calls = []
+
+    def fail(_scope):
+        raise RuntimeError("private network detail")
+
+    scope = module.WorkerScope(config, tmp_path / "jobs", lambda: set(), lambda _name: {},
+                               lambda *args: calls.append(args), source_resolver=fail)
+
+    with pytest.raises(module.ScopeError):
+        scope.call("workspace_create_scoped", {"name": NAME, "request_id": "fetch-failed"},
+                   "Bearer fixture-owner-secret")
+
+    assert scope.read(NAME) is None
+    assert calls == []
+
+
+NAME = "cas-worker-01"
 
 
 def test_anonymous_wrong_credential_and_offscope_inputs_never_submit(tmp_path):
@@ -251,16 +393,17 @@ def test_approved_execution_context_is_durable_before_invocation(tmp_path):
     )
     scope.wait()
     expected = {
-        key: approved[key]
-        for key in (
-            "context", "provider", "kubernetes_context", "namespace",
-            "repository", "revision", "recipe", "binary",
-        )
+        "context": approved["context"], "provider": approved["provider"],
+        "kubernetes_context": approved["kubernetes_context"],
+        "namespace": approved["namespace"], "binary": approved["binary"],
+        "repository": approved["repository"], "source_ref": "refs/heads/main",
+        "revision": "b" * 40, "recipe": approved["recipe"],
+        "recipe_sha256": snapshot("b" * 40)["recipe_sha256"],
     }
     assert observed[0]["execution_context"] == expected
     record = scope.read("cas-worker-01")
     assert record["execution_context"] == expected
-    assert expected["revision"] == "bf0b3823e033b9b5abd86904e0a565d6b3586206"
+    assert expected["revision"] == "b" * 40
     assert expected["context"] == "default"
     serialized = json.dumps(record)
     for forbidden in ("capability_sha256", "bindings", "fixture-secret", "extra_secret"):

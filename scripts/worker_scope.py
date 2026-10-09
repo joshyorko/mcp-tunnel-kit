@@ -73,11 +73,13 @@ def tools():
 
 
 class WorkerScope:
-    def __init__(self, config, state, inventory, metadata, invoke, absence=None):
+    def __init__(self, config, state, inventory, metadata, invoke, absence=None,
+                 source_resolver=None):
         self.config = Path(config)
         self.state = Path(state)
         self.inventory, self.metadata, self.invoke = inventory, metadata, invoke
         self.absence = absence
+        self.source_resolver = source_resolver
         self.threads = {}
         self.mutex = threading.Lock()
 
@@ -171,6 +173,19 @@ class WorkerScope:
     def verified(self, name, scope, expected_uid=None):
         return self.verified_row(name, scope, expected_uid)["uid"]
 
+    def execution_context(self, record, scope):
+        """Validate a job's pinned source against policy, retaining legacy pins."""
+        context = record.get("execution_context")
+        if (not isinstance(context, dict)
+                or context.get("repository") != scope["repository"]
+                or context.get("recipe") != scope["recipe"]
+                or not re.fullmatch(r"[a-f0-9]{40}", context.get("revision", ""))
+                or ("source_ref" in context and context["source_ref"] != scope["source_ref"])
+                or ("recipe_sha256" in context
+                    and not re.fullmatch(r"[a-f0-9]{64}", context.get("recipe_sha256", "")))):
+            raise ScopeError("Recorded worker source snapshot is invalid.")
+        return dict(context)
+
     def pin_identity(self, record, uid):
         """An operation may observe one UID, including while provisioning runs."""
         key = "identity-" + hashlib.sha256(record["operation_id"].encode()).hexdigest()
@@ -206,8 +221,9 @@ class WorkerScope:
             raise ScopeError("Unknown operation has no recorded workspace identity; operator reconciliation required.")
         row = self.verified_row(name, scope, uid)
         kubeconfig = row["provider"]["options"].get("KUBERNETES_CONFIG", {}).get("value")
-        if (row.get("source", {}).get("gitCommit") != scope["revision"]
-                or row.get("devContainerPath") != scope["recipe"]
+        execution = self.execution_context(record, scope)
+        if (row.get("source", {}).get("gitCommit") != execution["revision"]
+                or row.get("devContainerPath") != execution["recipe"]
                 or kubeconfig not in scope.get("bindings", {})):
             raise ScopeError("Workspace source, recipe, or cluster identity changed.")
         self.pin_identity(record, row["uid"])
@@ -217,7 +233,8 @@ class WorkerScope:
         return {"context": scope["context"], "provider": scope["provider"], "workspace": name,
                 "workspace_uid": row["uid"], "kubernetes_context": scope["kubernetes_context"],
                 "namespace": scope["namespace"], "kubeconfig": kubeconfig,
-                "repository": scope["repository"], "revision": scope["revision"], "recipe": scope["recipe"],
+                "repository": execution["repository"], "revision": execution["revision"],
+                "recipe": execution["recipe"],
                 "operation_id": record["operation_id"]}
 
     def worker_authorized(self, name, uid, operation_id):
@@ -391,6 +408,24 @@ class WorkerScope:
                             "Existing workspace is not owned by this creation receipt; no adoption or recreation."
                         )
                     expected_uid = None
+                    if self.source_resolver is None:
+                        raise ScopeError("Approved main source resolver is unavailable; no job submitted.")
+                    try:
+                        snapshot = self.source_resolver(scope)
+                    except Exception:
+                        raise ScopeError("Approved main source could not be resolved; no job submitted.") from None
+                    if (not isinstance(snapshot, dict)
+                            or snapshot.get("repository") != scope["repository"]
+                            or snapshot.get("source_ref") != scope["source_ref"]
+                            or snapshot.get("recipe") != scope["recipe"]
+                            or not re.fullmatch(r"[a-f0-9]{40}", snapshot.get("revision", ""))
+                            or not re.fullmatch(r"[a-f0-9]{64}", snapshot.get("recipe_sha256", ""))
+                            or not isinstance(snapshot.get("recipe_snapshot"), bytes)
+                            or len(snapshot["recipe_snapshot"]) > 1024 * 1024
+                            or hashlib.sha256(snapshot["recipe_snapshot"]).hexdigest() != snapshot["recipe_sha256"]):
+                        raise ScopeError("Approved main source snapshot is invalid; no job submitted.")
+                    job_source = {key: snapshot[key] for key in (
+                        "repository", "source_ref", "revision", "recipe", "recipe_sha256")}
                 else:
                     if not record or not record.get("workspace_uid"):
                         raise ScopeError(
@@ -399,6 +434,7 @@ class WorkerScope:
                     expected_uid = self.verified(name, scope, record["workspace_uid"])
                     if record.get("request_id") == arguments["request_id"]:
                         return record
+                    job_source = self.execution_context(record, scope)
                 if recovered:
                     self.archive(recovered)
                 record = {
@@ -414,18 +450,20 @@ class WorkerScope:
                     "execution_context": {
                         key: scope[key]
                         for key in (
-                            "context", "provider", "kubernetes_context", "namespace",
-                            "repository", "revision", "recipe", "binary",
+                            "context", "provider", "kubernetes_context", "namespace", "binary",
                         )
                         if key in scope
-                    },
+                    } | job_source,
                 }
                 if expected_uid:
                     record["workspace_uid"] = expected_uid
                 self.write(name, record)
                 accepted = dict(record)
                 thread = threading.Thread(
-                    target=self.run, args=(record, scope, expected_uid), daemon=True
+                    target=self.run,
+                    args=(record, scope, expected_uid,
+                          snapshot.get("recipe_snapshot") if operation == "create" else None),
+                    daemon=True,
                 )
                 self.threads[name] = thread
                 thread.start()
@@ -433,7 +471,7 @@ class WorkerScope:
             finally:
                 os.close(fd)
 
-    def run(self, record, scope, expected_uid):
+    def run(self, record, scope, expected_uid, recipe_snapshot=None):
         name = record["name"]
         record["started_at"] = time.time()
         record["diagnostics"] = {"phase": "preflight", "devsy_invoked": False}
@@ -443,7 +481,11 @@ class WorkerScope:
             self.load()
             record["diagnostics"] = {"phase": "invoke", "devsy_invoked": None}
             self.write(name, record)
-            result = self.invoke(record["operation"], name, scope)
+            job_scope = {**scope, "execution_context": record["execution_context"],
+                         "operation_id": record["operation_id"]}
+            if recipe_snapshot is not None:
+                job_scope["recipe_snapshot"] = recipe_snapshot
+            result = self.invoke(record["operation"], name, job_scope)
             if result is not None:
                 record["diagnostics"].update(
                     {

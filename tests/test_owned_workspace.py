@@ -17,15 +17,20 @@ def owned(tmp_path):
     kube.write_text('fixture')
     config['bindings'] = {str(kube): hashlib.sha256(kube.read_bytes()).hexdigest()}
     scope.config.write_text(json.dumps(config))
+    execution = {'context': config['context'], 'provider': config['provider'],
+                 'kubernetes_context': config['kubernetes_context'], 'namespace': config['namespace'],
+                 'repository': config['repository'], 'revision': 'c' * 40,
+                 'recipe': config['recipe']}
     row = {'id': NAME, 'uid': UID, 'context': 'default',
-           'source': {'gitRepository': config['repository'], 'gitCommit': config['revision']},
+           'source': {'gitRepository': config['repository'], 'gitCommit': execution['revision']},
            'devContainerPath': config['recipe'],
            'provider': {'name': 'kubernetes', 'options': {
                'KUBERNETES_CONTEXT': {'value': 'ror'}, 'KUBERNETES_NAMESPACE': {'value': 'devsy'},
                'KUBERNETES_CONFIG': {'value': str(kube)}}}}
     scope.root()
     scope.write(NAME, {'name': NAME, 'operation_id': 'owned-operation', 'operation': 'create',
-                       'status': 'running', 'request_id': 'original'})
+                       'status': 'running', 'request_id': 'original',
+                       'execution_context': execution})
     scope.metadata = lambda name: row
     return module, scope, row
 

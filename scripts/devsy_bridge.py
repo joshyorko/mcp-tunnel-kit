@@ -46,6 +46,7 @@ import re
 import selectors
 import signal
 import subprocess
+import stat
 import tempfile
 import threading
 import time
@@ -157,9 +158,14 @@ class Devsy:
             spec = importlib.util.spec_from_file_location('worker_scope', path)
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
+            source_path = Path(__file__).with_name('worker_source.py')
+            source_spec = importlib.util.spec_from_file_location('worker_source', source_path)
+            source_module = importlib.util.module_from_spec(source_spec)
+            source_spec.loader.exec_module(source_module)
             self.scope_module = module
             self.scope = module.WorkerScope(scope_source, Path(creation_state).parent / 'scoped-jobs',
-                self.creation_inventory, self.scoped_metadata, self.scoped_execute, self.scoped_absence)
+                self.creation_inventory, self.scoped_metadata, self.scoped_execute, self.scoped_absence,
+                source_resolver=source_module.resolve)
 
     def scoped_absence(self, name, scope):
         import importlib.util
@@ -216,8 +222,29 @@ class Devsy:
             return {'phase': 'bridge_stopping', 'exit_code': 2, 'devsy_invoked': False}
         self.scope.root()
         with tempfile.TemporaryDirectory(prefix='work-', dir=self.scope.state) as scratch:
+            execution = scope.get('execution_context')
+            operation_id = scope.get('operation_id')
+            record = self.scope.read(name)
+            if (not isinstance(execution, dict) or not record
+                    or record.get('operation_id') != operation_id
+                    or record.get('operation') != operation
+                    or record.get('execution_context') != execution):
+                return {'phase': 'source_snapshot_refused', 'exit_code': 2, 'devsy_invoked': False}
+            snapshot_path = ''
+            if operation == 'create':
+                snapshot = scope.get('recipe_snapshot')
+                if (not isinstance(snapshot, bytes) or len(snapshot) > 1024 * 1024
+                        or hashlib.sha256(snapshot).hexdigest() != execution.get('recipe_sha256')):
+                    return {'phase': 'source_snapshot_refused', 'exit_code': 2, 'devsy_invoked': False}
+                snapshot_path = str(Path(scratch) / 'recipe-snapshot.json')
+                fd = os.open(snapshot_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+                with os.fdopen(fd, 'wb') as handle:
+                    handle.write(snapshot)
+                    handle.flush()
+                    os.fsync(handle.fileno())
             process = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), '--scoped-child',
-                                        str(self.scope.config), str(os.getpid()), operation, name],
+                                        str(self.scope.config), str(os.getpid()), operation, name,
+                                        str(self.scope.state), operation_id, snapshot_path],
                                        cwd=self.cwd, env={**(self.env or os.environ), "TMPDIR": scratch}, stdin=subprocess.DEVNULL,
                                        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True)
             with _CHILD_LOCK:
@@ -829,12 +856,52 @@ def child_guard(binary, parent, budget):
         die()
 
 
-def scoped_child(config, parent, operation, name):
+def scoped_child(config, parent, operation, name, state_dir, operation_id, snapshot_path):
     """Only an owned bridge can launch one fixed, approved CLI job."""
     import ctypes
     import worker_scope
-    scope = worker_scope.WorkerScope(config, Path(config).parent / 'unused', lambda: set(), lambda n: {}, lambda *a: None).load()
+    manager = worker_scope.WorkerScope(
+        config, state_dir, lambda: set(), lambda n: {}, lambda *a: None
+    )
+    try:
+        state_info = manager.state.lstat()
+        if (not stat.S_ISDIR(state_info.st_mode) or state_info.st_uid != os.getuid()
+                or stat.S_IMODE(state_info.st_mode) != 0o700):
+            return 2
+    except OSError:
+        return 2
+    scope = manager.load()
     if operation not in {'create', 'start'} or name not in scope['allowed_new_names'] or name in scope['protected_names']:
+        return 2
+    record = manager.read(name)
+    if (not record or record.get('operation_id') != operation_id
+            or record.get('operation') != operation or record.get('status') != 'running'):
+        return 2
+    try:
+        execution = manager.execution_context(record, scope)
+        if operation == 'create':
+            if not snapshot_path:
+                return 2
+            scratch = Path(os.environ['TMPDIR'])
+            scratch_info = scratch.lstat()
+            if (Path(snapshot_path).parent != scratch.resolve()
+                    or not stat.S_ISDIR(scratch_info.st_mode) or scratch_info.st_uid != os.getuid()
+                    or stat.S_IMODE(scratch_info.st_mode) != 0o700):
+                return 2
+            fd = os.open(snapshot_path, os.O_RDONLY | os.O_NOFOLLOW)
+            with os.fdopen(fd, 'rb') as handle:
+                info = os.fstat(handle.fileno())
+                if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                        or stat.S_IMODE(info.st_mode) != 0o600):
+                    return 2
+                recipe_snapshot = handle.read(1024 * 1024 + 1)
+            if (not recipe_snapshot or len(recipe_snapshot) > 1024 * 1024
+                    or hashlib.sha256(recipe_snapshot).hexdigest() != execution.get('recipe_sha256')
+                    or not isinstance(json.loads(recipe_snapshot), dict)):
+                return 2
+        elif snapshot_path:
+            return 2
+    except Exception:
         return 2
     process = None
     def die(_signal=None, _frame=None):
@@ -850,19 +917,21 @@ def scoped_child(config, parent, operation, name):
     if libc.prctl(1, signal.SIGTERM, 0, 0, 0) != 0 or os.getppid() != parent:
         return 2
     import headless_devsy
+    job_scope = {**scope, 'repository': execution['repository'],
+                 'revision': execution['revision'], 'recipe': execution['recipe']}
     try:
-        job_environment = headless_devsy.prepare(scope['binary'], os.getcwd(), dict(os.environ), scope, os.environ['TMPDIR'])
+        job_environment = headless_devsy.prepare(job_scope['binary'], os.getcwd(), dict(os.environ), scope, os.environ['TMPDIR'])
     except headless_devsy.HeadlessDevsyError:
         return {'phase': 'headless_context_failed', 'exit_code': 2, 'devsy_invoked': False}
-    source = 'git:' + scope['repository'] + '@sha256:' + scope['revision'] if operation == 'create' else name
-    arguments = [scope['binary'], '--context', scope['context'], '--provider', scope['provider'],
+    source = 'git:' + execution['repository'] + '@sha256:' + execution['revision'] if operation == 'create' else name
+    arguments = [job_scope['binary'], '--context', job_scope['context'], '--provider', job_scope['provider'],
                  'workspace', 'up', source, '--id', name, '--ide', 'none', '--ide-launch', 'skip',
-                 '--provider-option', 'KUBERNETES_NAMESPACE=' + scope['namespace'],
-                 '--provider-option', 'KUBERNETES_CONTEXT=' + scope['kubernetes_context'],
+                 '--provider-option', 'KUBERNETES_NAMESPACE=' + job_scope['namespace'],
+                 '--provider-option', 'KUBERNETES_CONTEXT=' + job_scope['kubernetes_context'],
                  '--provider-option', 'CREATE_NAMESPACE=false', '--provider-option', 'CLUSTER_ROLE=',
                  '--provider-option', 'SERVICE_ACCOUNT=default']
     if operation == 'create':
-        arguments += ['--devcontainer', scope['recipe']]
+        arguments += ['--devcontainer', execution['recipe']]
     def parent_death():
         # This supervisor is single-threaded, unlike the HTTP bridge.
         if libc.prctl(1, signal.SIGKILL, 0, 0, 0) != 0:
@@ -912,9 +981,10 @@ def scoped_child(config, parent, operation, name):
 
 
 def main():
-    if len(sys.argv) == 6 and sys.argv[1] == '--scoped-child':
+    if len(sys.argv) == 9 and sys.argv[1] == '--scoped-child':
         try:
-            result = scoped_child(sys.argv[2], int(sys.argv[3]), sys.argv[4], sys.argv[5])
+            result = scoped_child(sys.argv[2], int(sys.argv[3]), sys.argv[4], sys.argv[5],
+                                  sys.argv[6], sys.argv[7], sys.argv[8])
             if not isinstance(result, dict):
                 result = {'phase': 'supervisor_refused', 'exit_code': 2, 'devsy_invoked': False}
         except Exception:
