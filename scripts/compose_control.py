@@ -798,6 +798,11 @@ def devsy_call(bridge, operation, *arguments):
 def start_control_plane(configuration):
     bridge = host_bridge()
     value = devsy_call(bridge, "settings", configuration)
+    print("Refreshing configured images before startup; persistent data retained.", flush=True)
+    try:
+        compose("pull", timeout=600)
+    except (ControlError, subprocess.TimeoutExpired):
+        raise ControlError("Image refresh failed; no services were started. Verify configured image tags exist and registry access is available, then rerun control-plane-up. For CAS latest, its main publication workflow must have succeeded. Raw registry output omitted.") from None
     # Close external access before revalidating either app on every up, including restarts.
     compose("stop", "--timeout", "30", "tunnel-client", timeout=45)
     compose("up", "-d", "--wait", "--wait-timeout", "300", "executor", "codex-action-server", timeout=330)

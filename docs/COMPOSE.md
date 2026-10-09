@@ -47,11 +47,9 @@ before you can add its PAT.
 accepts immutable digests and full SHA tags. The tunnel-client image remains
 pinned by exact release and immutable digest in `compose.yaml`.
 
-To refresh CAS and Executor images while preserving storage, run
-`scripts/control-plane-down`, pull both images with `docker pull
-ghcr.io/usefulsoftwareco/executor-selfhost:latest` and `docker pull
-ghcr.io/joshyorko/codex-action-server:latest`, then run
-`scripts/control-plane-up`.
+Normal `scripts/control-plane-up` refreshes configured images before starting
+services, including cached `:latest` tags. A failed pull stops startup and
+retains persistent data. `--check` validates configuration without pulling.
 
 
 Set `CAS_TARGETS_SOURCE` to your existing operator target JSON. Its `local`

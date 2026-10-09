@@ -50,6 +50,28 @@ export default defineApp({ accounts: {} }, async ({ signal, cache }) => ({
 
 
 class ComposeBoundaryTests(unittest.TestCase):
+    def test_start_pulls_images_before_starting_services(self):
+        helper = self.helper()
+        bridge = helper.host_bridge()
+        with patch.object(helper, 'host_bridge', return_value=bridge), \
+             patch.object(helper, 'devsy_call', return_value=None), \
+             patch.object(helper, 'network_preflight'), \
+             patch.object(helper, 'compose') as compose:
+            helper.start_control_plane({'x-operator': {'devsy_state': '/fixture'}})
+        calls = compose.call_args_list
+        pull = next(i for i, call in enumerate(calls) if call.args[0] == 'pull')
+        first_up = next(i for i, call in enumerate(calls) if call.args[0] == 'up')
+        self.assertLess(pull, first_up)
+        self.assertEqual(calls[pull].args, ('pull',))
+
+    def test_pull_failure_prevents_service_start_and_has_safe_diagnostic(self):
+        helper = self.helper()
+        with patch.object(helper, 'devsy_call', return_value=None), \
+             patch.object(helper, 'compose', side_effect=helper.ControlError('private output')) as compose:
+            with self.assertRaisesRegex(helper.ControlError, 'Image refresh failed'):
+                helper.start_control_plane({})
+        self.assertFalse(any(call.args[0] == 'up' for call in compose.call_args_list))
+
     def helper(self):
         path = ROOT / "scripts/compose_control.py"
         self.assertTrue(path.is_file(), "Compose boundary helper is missing")
