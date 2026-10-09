@@ -43,10 +43,16 @@ Keep existing `.env` settings when updating a prepared checkout. Do not replace
 your selected `CAS_IMAGE`, `CAS_TARGETS_SOURCE`, socket, runtime, receipts, or
 state paths with example values. A fresh Executor needs the browser setup below
 before you can add its PAT.
-`CAS_IMAGE` defaults to the product image published from commit
-`92b569bcaa953c2914a90bbd1ca42c2880832e8a`, pinned by its immutable digest. The
-production file never builds from a neighboring checkout. Executor and tunnel
-images are pinned by exact release and immutable digest in `compose.yaml`.
+`CAS_IMAGE` and Executor default to their published `:latest` tags. CAS also
+accepts immutable digests and full SHA tags. The tunnel-client image remains
+pinned by exact release and immutable digest in `compose.yaml`.
+
+To refresh CAS and Executor images while preserving storage, run
+`scripts/control-plane-down`, pull both images with `docker pull
+ghcr.io/usefulsoftwareco/executor-selfhost:latest` and `docker pull
+ghcr.io/joshyorko/codex-action-server:latest`, then run
+`scripts/control-plane-up`.
+
 
 Set `CAS_TARGETS_SOURCE` to your existing operator target JSON. Its `local`
 target must have an explicit `socket_path`. Set `NATIVE_CODEX_SOCKET_DIR` to the

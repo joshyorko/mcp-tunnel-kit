@@ -185,6 +185,16 @@ class ComposeBoundaryTests(unittest.TestCase):
             finally:
                 server.close()
 
+    def test_missing_native_socket_has_actionable_safe_diagnostic(self):
+        helper = self.helper()
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            source = base / "operator.json"
+            source.write_text(json.dumps({"targets": {"local": {
+                "transport": "local", "socket_path": str(base / "missing.sock")}}}))
+            with self.assertRaisesRegex(helper.ControlError, "native Codex socket is unavailable"):
+                helper.prepare_targets(source, base, os.getuid())
+
     def test_secret_file_permissions_and_symlinks_fail_closed(self):
         helper = self.helper()
         with tempfile.TemporaryDirectory() as temporary:

@@ -180,8 +180,11 @@ def prepare_targets(source: Path, socket_directory: Path, uid: int):
     local = data.get("targets", {}).get("local", {})
     if local.get("transport") != "local" or not local.get("socket_path"):
         raise ControlError("Configure local.socket_path explicitly in the operator target file before deployment.")
-    socket_path = Path(local["socket_path"]).resolve(strict=True)
-    info = socket_path.stat()
+    try:
+        socket_path = Path(local["socket_path"]).resolve(strict=True)
+        info = socket_path.stat()
+    except FileNotFoundError:
+        raise ControlError("The configured native Codex socket is unavailable. Start the native Codex app/daemon, verify local.socket_path in CAS_TARGETS_SOURCE, then rerun control-plane-up.") from None
     if (not stat.S_ISSOCK(info.st_mode) or info.st_uid != uid
             or socket_path.parent != socket_directory.resolve(strict=True)):
         raise ControlError("The resolved native socket must match the narrow mount directory and CAS UID.")
@@ -875,15 +878,15 @@ def main():
                 return 0
             image = configuration["services"]["codex-action-server"]["image"]
             local_build = "build" in configuration["services"]["codex-action-server"]
-            if not local_build and not re.fullmatch(r"ghcr\.io/joshyorko/codex-action-server(?:@sha256:[0-9a-f]{64}|:sha-[0-9a-f]{40})", image):
-                raise ControlError("Production CAS_IMAGE must be the published immutable digest or full SHA tag.")
+            if not local_build and not re.fullmatch(r"ghcr\.io/joshyorko/codex-action-server(?:@sha256:[0-9a-f]{64}|:sha-[0-9a-f]{40}|:latest)", image):
+                raise ControlError("CAS_IMAGE must be the published latest tag, immutable digest or full SHA tag.")
             devsy_call(host_bridge(), "settings", configuration)
             materialize_secrets(configuration, dotenv=dotenv)
             prepare(configuration)
             validate_secrets(configuration)
             refuse_external_tunnel()
             if args.mode == "check":
-                print("Compose paths, socket ownership, private files, immutable image and bridge collision checks passed; no service started.")
+                print("Compose paths, socket ownership, private files, supported image and bridge collision checks passed; no service started.")
             else:
                 start_control_plane(configuration)
                 status()

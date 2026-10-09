@@ -1,6 +1,6 @@
 # MCP tunnel kit
 
-The normal path uses Docker Compose and pinned, stock upstream Executor v2:
+The normal path uses Docker Compose and stock upstream Executor v2 using the latest image:
 
 ```text
 ChatGPT / Jarvis → OpenAI Secure MCP Tunnel → Executor browser MCP

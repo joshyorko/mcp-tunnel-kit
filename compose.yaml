@@ -11,7 +11,7 @@ x-operator:
 
 services:
   executor:
-    image: ghcr.io/usefulsoftwareco/executor-selfhost:2.0.0-beta.8@sha256:a7d4e9d7c40aa02e08224757a59679ae61b6bfb59a61b3d06308e29f4652305a
+    image: ghcr.io/usefulsoftwareco/executor-selfhost:latest
     restart: unless-stopped
     environment:
       HOST: 0.0.0.0
@@ -35,7 +35,7 @@ services:
 
   executor-schema-proxy:
     # Reuse the pinned CAS Python/aiohttp runtime; Executor stays stock and running.
-    image: ${CAS_IMAGE:-ghcr.io/joshyorko/codex-action-server@sha256:942f8f69a40ce729e5e66cfc244fedf6c8ddae6812955e10626bc762485f8bc2}
+    image: ${CAS_IMAGE:-ghcr.io/joshyorko/codex-action-server:latest}
     platform: linux/amd64
     restart: unless-stopped
     user: "${CAS_UID:-1000}:${CAS_GID:-1000}"
@@ -58,7 +58,7 @@ services:
       driver: none
 
   codex-action-server:
-    image: ${CAS_IMAGE:-ghcr.io/joshyorko/codex-action-server@sha256:942f8f69a40ce729e5e66cfc244fedf6c8ddae6812955e10626bc762485f8bc2}
+    image: ${CAS_IMAGE:-ghcr.io/joshyorko/codex-action-server:latest}
     platform: linux/amd64
     restart: unless-stopped
     # Browser UI: http://${CONTROL_PLANE_GATEWAY:-172.30.86.1}:8088/
@@ -116,7 +116,7 @@ services:
       retries: 18
 
   app-ready:
-    image: ${CAS_IMAGE:-ghcr.io/joshyorko/codex-action-server@sha256:942f8f69a40ce729e5e66cfc244fedf6c8ddae6812955e10626bc762485f8bc2}
+    image: ${CAS_IMAGE:-ghcr.io/joshyorko/codex-action-server:latest}
     platform: linux/amd64
     restart: "no"
     user: "${CAS_UID:-1000}:${CAS_GID:-1000}"
