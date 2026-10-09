@@ -37,17 +37,21 @@ def main():
         config.chmod(0o600)
         rows = {}
         calls = []
+        invoked_sources = []
+        image_ref = value["image_repository"]
+        image_digest = "sha256:" + "e" * 64
 
         def invoke(operation, name, approved):
             calls.append(operation)
             execution = approved["execution_context"]
+            live.require(execution.get("source_kind") == "image", "Scoped invocation lost image source kind")
+            invoked_sources.append("image:" + execution["image_ref"] + "@" + execution["image_digest"])
             rows[name] = {
                 "id": name,
                 "uid": "fixture-uid",
                 "context": "default",
-                "source": {"gitRepository": execution["repository"],
-                           "gitCommit": execution["revision"]},
-                "devContainerPath": execution["recipe"],
+                "source": {"image": execution["image_ref"] + "@" + execution["image_digest"]},
+                "devContainerPath": "",
                 "provider": {
                     "name": "kubernetes",
                     "options": {
@@ -65,6 +69,7 @@ def main():
                 "revision": "d" * 40, "recipe": approved["recipe"],
                 "recipe_sha256": hashlib.sha256(recipe).hexdigest(),
                 "recipe_snapshot": recipe,
+                "source_kind": "image", "image_ref": image_ref, "image_digest": image_digest,
             },
         )
 
@@ -155,6 +160,10 @@ def main():
                     "First create did not immediately return an accepted receipt",
                 )
                 scope.wait()
+                live.require(invoked_sources == ["image:" + image_ref + "@" + image_digest],
+                             "Scoped invocation did not use the approved immutable image source")
+                live.require(scope.read("cas-worker-01")["status"] == "completed",
+                             "Image workspace identity did not reach a known completed outcome")
                 replay = live.successful(
                     control,
                     session,
