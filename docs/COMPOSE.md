@@ -51,6 +51,12 @@ to v1.6.10, which is incompatible with this v2 stack and retained storage.
 Override `EXECUTOR_IMAGE` with a release tag or digest when a fixed version is
 needed. The tunnel-client image remains pinned.
 
+Executor runs as the explicit `EXECUTOR_UID:EXECUTOR_GID` (default `1000:1000`),
+independent of the image's default user. Keep these values matched to the
+existing Executor volume owner across upgrades. Do not regenerate the key or
+delete the volume to resolve permissions. If ownership needs migration, stop
+the stack, back up the volume, then perform a deliberate ownership migration.
+
 Normal `scripts/control-plane-up` refreshes configured images before starting
 services, including cached `:latest` tags. A failed pull stops startup and
 retains persistent data. `--check` validates configuration without pulling.
