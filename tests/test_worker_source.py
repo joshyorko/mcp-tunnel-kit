@@ -75,3 +75,44 @@ def test_source_resolution_rejects_non_exact_or_ambiguous_main_ref():
         pass
     else:
         raise AssertionError("Malformed ls-remote output was accepted.")
+
+
+def test_image_snapshot_checks_manifest_digest_and_revision():
+    import hashlib
+    import json
+    import pytest
+    module = source_module()
+    sha = '1' * 40
+    config = json.dumps({'config': {'Labels': {'org.opencontainers.image.revision': sha}}, 'architecture': 'amd64', 'os': 'linux'}).encode()
+    config_digest = 'sha256:' + hashlib.sha256(config).hexdigest()
+    manifest = json.dumps({'schemaVersion': 2, 'config': {'digest': config_digest}}).encode()
+    def registry(url, headers):
+        if '/token?' in url:
+            return b'{"token":"fixture"}'
+        return config if '/blobs/' in url else manifest
+    scope = {'repository': module.APPROVED_REPOSITORY, 'source_ref': module.APPROVED_SOURCE_REF,
+             'recipe': 'Containerfile.worker', 'source_kind': 'image', 'image_repository': 'ghcr.io/joshyorko/codex-action-server'}
+    result = module.resolve(scope, run=lambda *a, **k: subprocess.CompletedProcess([], 0, sha+'\trefs/heads/main\n', ''),
+                            fetch=lambda *a, **k: b'FROM fixture\n', registry_fetch=registry)
+    assert result['image_ref'] == scope['image_repository']
+    assert result['image_digest'] == 'sha256:' + hashlib.sha256(manifest).hexdigest()
+    config = b'{"config":{"Labels":{"org.opencontainers.image.revision":"wrong"}}}'
+    with pytest.raises(module.SourceResolutionError):
+        module.resolve(scope, run=lambda *a, **k: subprocess.CompletedProcess([], 0, sha+'\trefs/heads/main\n', ''),
+                       fetch=lambda *a, **k: b'FROM fixture\n', registry_fetch=registry)
+
+
+def test_unpublished_image_fails_closed_without_fallback():
+    import pytest
+    module = source_module()
+    calls = []
+    def missing(url, headers):
+        calls.append(url)
+        raise OSError('publication not found')
+    with pytest.raises(module.SourceResolutionError):
+        module.resolve({'repository': module.APPROVED_REPOSITORY, 'source_ref': module.APPROVED_SOURCE_REF,
+                        'recipe': 'Containerfile.worker', 'source_kind': 'image',
+                        'image_repository': 'ghcr.io/joshyorko/codex-action-server'},
+                       run=lambda *a, **k: subprocess.CompletedProcess([],0,'a'*40+'\trefs/heads/main\n',''),
+                       fetch=lambda *a, **k: b'FROM fixture\n', registry_fetch=missing)
+    assert len(calls) == 1

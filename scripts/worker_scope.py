@@ -52,7 +52,7 @@ def tools():
             {
                 "name": tool,
                 "description": (
-                    "Submit one approved owner-scoped lifecycle job using the Codex Action Server bootstrap recipe from main. Clone engineering repositories into separate workspaces after readiness. Poll workspace_status_scoped; never replay an uncertain job."
+                    "Submit one approved owner-scoped lifecycle job using the verified Codex worker image built from main, with a blank /workspaces directory and no CAS checkout. Clone engineering repositories into separate workspaces after readiness. Poll workspace_status_scoped; never replay an uncertain job."
                     if mutation
                     else "Read and reconcile the owner scope job without provisioning. Only new_request_allowed=true permits one fresh create request ID; never replay an old ID."
                 ),
@@ -151,6 +151,17 @@ class WorkerScope:
             finally:
                 path.unlink(missing_ok=True)
 
+    @staticmethod
+    def source_matches(row, execution):
+        source = row.get("source", {})
+        if execution.get("source_kind") == "image":
+            return (source.get("image") == execution["image_ref"] + "@" + execution["image_digest"]
+                    and not source.get("gitRepository")
+                    and not row.get("devContainerPath"))
+        return (source.get("gitRepository") == execution["repository"]
+                and source.get("gitCommit") == execution["revision"]
+                and row.get("devContainerPath") == execution["recipe"])
+
     def verified_row(self, name, scope, expected_uid=None):
         row = self.metadata(name)
         provider = row.get("provider", {})
@@ -163,7 +174,7 @@ class WorkerScope:
             != scope["kubernetes_context"]
             or options.get("KUBERNETES_NAMESPACE", {}).get("value")
             != scope["namespace"]
-            or row.get("source", {}).get("gitRepository") != scope["repository"]
+            or not self.source_matches(row, self.execution_context(self.read(name), scope))
             or not isinstance(row.get("uid"), str)
             or (expected_uid is not None and row["uid"] != expected_uid)
         ):
@@ -175,15 +186,23 @@ class WorkerScope:
 
     def execution_context(self, record, scope):
         """Validate a job's pinned source against policy, retaining legacy pins."""
-        context = record.get("execution_context")
+        context = record.get("execution_context") if isinstance(record, dict) else None
         if (not isinstance(context, dict)
                 or context.get("repository") != scope["repository"]
-                or context.get("recipe") != scope["recipe"]
+                or context.get("recipe") != ("Containerfile.worker" if context.get("source_kind") == "image"
+                                             else ".devcontainer/remote-worker/devcontainer.json")
                 or not re.fullmatch(r"[a-f0-9]{40}", context.get("revision", ""))
                 or ("source_ref" in context and context["source_ref"] != scope["source_ref"])
                 or ("recipe_sha256" in context
                     and not re.fullmatch(r"[a-f0-9]{64}", context.get("recipe_sha256", "")))):
             raise ScopeError("Recorded worker source snapshot is invalid.")
+        if context.get("source_kind") == "image":
+            digest = context.get("image_digest", "")
+            if (not re.fullmatch(r"sha256:[a-f0-9]{64}", digest)
+                    or context.get("image_ref") != "ghcr.io/joshyorko/codex-action-server"):
+                raise ScopeError("Recorded worker image snapshot is invalid.")
+        elif context.get("source_kind") not in {None, "git"}:
+            raise ScopeError("Recorded worker source kind is invalid.")
         return dict(context)
 
     def pin_identity(self, record, uid):
@@ -222,8 +241,7 @@ class WorkerScope:
         row = self.verified_row(name, scope, uid)
         kubeconfig = row["provider"]["options"].get("KUBERNETES_CONFIG", {}).get("value")
         execution = self.execution_context(record, scope)
-        if (row.get("source", {}).get("gitCommit") != execution["revision"]
-                or row.get("devContainerPath") != execution["recipe"]
+        if (not self.source_matches(row, execution)
                 or kubeconfig not in scope.get("bindings", {})):
             raise ScopeError("Workspace source, recipe, or cluster identity changed.")
         self.pin_identity(record, row["uid"])
@@ -235,7 +253,8 @@ class WorkerScope:
                 "namespace": scope["namespace"], "kubeconfig": kubeconfig,
                 "repository": execution["repository"], "revision": execution["revision"],
                 "recipe": execution["recipe"],
-                "operation_id": record["operation_id"]}
+                "operation_id": record["operation_id"],
+                **{key: execution[key] for key in ("source_kind", "image_ref", "image_digest") if key in execution}}
 
     def worker_authorized(self, name, uid, operation_id):
         """Private-network policy probe; no credentials, provider calls, or writes."""
@@ -283,8 +302,7 @@ class WorkerScope:
                 sibling_uid = sibling_record.get("workspace_uid")
                 row = self.verified_row(sibling, scope, sibling_uid)
                 execution = self.execution_context(sibling_record, scope)
-                if (row.get("source", {}).get("gitCommit") != execution["revision"]
-                        or row.get("devContainerPath") != execution["recipe"]
+                if (not self.source_matches(row, execution)
                         or row["provider"]["options"].get("KUBERNETES_CONFIG", {}).get("value") not in scope.get("bindings", {})):
                     raise ScopeError("Sibling source or provider binding changed.")
                 siblings[sibling] = sibling_uid
@@ -514,7 +532,11 @@ class WorkerScope:
                             or hashlib.sha256(snapshot["recipe_snapshot"]).hexdigest() != snapshot["recipe_sha256"]):
                         raise ScopeError("Approved main source snapshot is invalid; no job submitted.")
                     job_source = {key: snapshot[key] for key in (
-                        "repository", "source_ref", "revision", "recipe", "recipe_sha256")}
+                        "repository", "source_ref", "revision", "recipe", "recipe_sha256",
+                        "source_kind", "image_ref", "image_digest") if key in snapshot}
+                    if snapshot.get("source_kind") != scope.get("source_kind"):
+                        raise ScopeError("New creation source kind differs from approved policy.")
+                    self.execution_context({"execution_context": job_source}, scope)
                 else:
                     if not record or not record.get("workspace_uid"):
                         raise ScopeError(

@@ -69,14 +69,61 @@ def _run_ls_remote(argv, timeout):
         process.stdout.close()
 
 
-def resolve(scope, run=None, fetch=_fetch):
+def _registry_fetch(url, headers):
+    request = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(request, timeout=MAX_RESOLUTION_SECONDS) as response:
+        value = response.read(8 * 1024 * 1024 + 1)
+    if len(value) > 8 * 1024 * 1024:
+        raise SourceResolutionError
+    return value
+
+
+def _image_snapshot(revision, fetch):
+    repository = "ghcr.io/joshyorko/codex-action-server"
+    token = json.loads(fetch("https://ghcr.io/token?service=ghcr.io&scope=repository:joshyorko/codex-action-server:pull", {})).get("token")
+    if not isinstance(token, str) or not token:
+        raise SourceResolutionError
+    headers = {"Authorization": "Bearer " + token, "Accept": ", ".join([
+        "application/vnd.oci.image.index.v1+json", "application/vnd.oci.image.manifest.v1+json",
+        "application/vnd.docker.distribution.manifest.list.v2+json", "application/vnd.docker.distribution.manifest.v2+json"])}
+    base = "https://ghcr.io/v2/joshyorko/codex-action-server/"
+    raw = fetch(base + "manifests/worker-sha-" + revision, headers)
+    manifest = json.loads(raw)
+    if "manifests" in manifest:
+        candidates = [entry for entry in manifest["manifests"]
+                      if entry.get("platform", {}).get("os") == "linux"
+                      and entry.get("platform", {}).get("architecture") == "amd64"]
+        if len(candidates) != 1:
+            raise SourceResolutionError
+        digest = candidates[0]["digest"]
+        if not re.fullmatch(r"sha256:[a-f0-9]{64}", digest):
+            raise SourceResolutionError
+        raw = fetch(base + "manifests/" + digest, headers)
+        if "sha256:" + hashlib.sha256(raw).hexdigest() != digest:
+            raise SourceResolutionError
+        manifest = json.loads(raw)
+    digest = "sha256:" + hashlib.sha256(raw).hexdigest()
+    config_digest = manifest["config"]["digest"]
+    if not re.fullmatch(r"sha256:[a-f0-9]{64}", config_digest):
+        raise SourceResolutionError
+    config_raw = fetch(base + "blobs/" + config_digest, headers)
+    if "sha256:" + hashlib.sha256(config_raw).hexdigest() != config_digest:
+        raise SourceResolutionError
+    config = json.loads(config_raw)
+    if (config.get("architecture") != "amd64" or config.get("os") != "linux"
+            or config.get("config", {}).get("Labels", {}).get("org.opencontainers.image.revision") != revision):
+        raise SourceResolutionError
+    return {"source_kind": "image", "image_ref": repository, "image_digest": digest}
+
+
+def resolve(scope, run=None, fetch=_fetch, registry_fetch=_registry_fetch):
     """Resolve the fixed public main ref and its fixed devcontainer document."""
     if not isinstance(scope, dict) or any(
         scope.get(key) != expected
         for key, expected in (
             ("repository", APPROVED_REPOSITORY),
             ("source_ref", APPROVED_SOURCE_REF),
-            ("recipe", APPROVED_RECIPE),
+            ("recipe", "Containerfile.worker" if scope.get("source_kind") == "image" else APPROVED_RECIPE),
         )
     ):
         raise SourceResolutionError("Approved worker source policy refused.")
@@ -90,23 +137,28 @@ def resolve(scope, run=None, fetch=_fetch):
         if result.returncode != 0 or not match:
             raise SourceResolutionError
         revision = match.group(1)
+        image_mode = scope.get("source_kind") == "image"
+        if image_mode and scope.get("image_repository") != "ghcr.io/joshyorko/codex-action-server":
+            raise SourceResolutionError
+        recipe_path = "Containerfile.worker" if image_mode else APPROVED_RECIPE
         url = (
             "https://raw.githubusercontent.com/joshyorko/codex-action-server/"
-            f"{revision}/{APPROVED_RECIPE}"
+            f"{revision}/{recipe_path}"
         )
         recipe = fetch(url, timeout=MAX_RESOLUTION_SECONDS, max_bytes=MAX_RECIPE_BYTES)
         if not isinstance(recipe, bytes) or not recipe or len(recipe) > MAX_RECIPE_BYTES:
             raise SourceResolutionError
-        document = json.loads(recipe)
-        if not isinstance(document, dict):
+        if not image_mode and not isinstance(json.loads(recipe), dict):
             raise SourceResolutionError
+        image = _image_snapshot(revision, registry_fetch) if image_mode else {}
         return {
             "repository": APPROVED_REPOSITORY,
             "source_ref": APPROVED_SOURCE_REF,
             "revision": revision,
-            "recipe": APPROVED_RECIPE,
+            "recipe": recipe_path,
             "recipe_sha256": hashlib.sha256(recipe).hexdigest(),
             "recipe_snapshot": recipe,
+            **image,
         }
     except SourceResolutionError:
         raise SourceResolutionError("Approved worker source could not be resolved.") from None

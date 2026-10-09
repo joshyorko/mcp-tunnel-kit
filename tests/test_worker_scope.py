@@ -54,9 +54,10 @@ def manager(tmp_path, invoke=None):
                     "KUBERNETES_NAMESPACE": {"value": "devsy"},
                 },
             },
-            "source": {"gitRepository": approved["repository"],
-                       "gitCommit": execution.get("revision")},
-            "devContainerPath": execution.get("recipe", approved["recipe"]),
+            "source": ({"image": execution["image_ref"] + "@" + execution["image_digest"]}
+                       if execution.get("source_kind") == "image" else
+                       {"gitRepository": approved["repository"], "gitCommit": execution.get("revision")}),
+            "devContainerPath": "" if execution.get("source_kind") == "image" else execution.get("recipe", approved["recipe"]),
         }
         return result
 
@@ -79,7 +80,9 @@ def snapshot(revision):
         "repository": "https://github.com/joshyorko/codex-action-server.git",
         "source_ref": "refs/heads/main",
         "revision": revision,
-        "recipe": ".devcontainer/remote-worker/devcontainer.json",
+        "recipe": "Containerfile.worker",
+        "source_kind": "image", "image_ref": "ghcr.io/joshyorko/codex-action-server",
+        "image_digest": "sha256:" + "d" * 64,
         "recipe_sha256": hashlib.sha256(recipe).hexdigest(),
         "recipe_snapshot": recipe,
     }
@@ -141,9 +144,8 @@ def test_main_advance_does_not_re_resolve_existing_start_or_ownership(tmp_path):
                 "KUBERNETES_NAMESPACE": {"value": "devsy"},
                 "KUBERNETES_CONFIG": {"value": str(kubeconfig)},
             }},
-            "source": {"gitRepository": execution["repository"],
-                       "gitCommit": execution["revision"]},
-            "devContainerPath": execution["recipe"],
+            "source": {"image": execution["image_ref"] + "@" + execution["image_digest"]},
+            "devContainerPath": "",
         }
 
     module = load()
@@ -399,6 +401,8 @@ def test_approved_execution_context_is_durable_before_invocation(tmp_path):
         "repository": approved["repository"], "source_ref": "refs/heads/main",
         "revision": "b" * 40, "recipe": approved["recipe"],
         "recipe_sha256": snapshot("b" * 40)["recipe_sha256"],
+        "source_kind": "image", "image_ref": "ghcr.io/joshyorko/codex-action-server",
+        "image_digest": "sha256:" + "d" * 64,
     }
     assert observed[0]["execution_context"] == expected
     record = scope.read("cas-worker-01")
@@ -560,3 +564,28 @@ def test_second_worker_waits_for_first_pending_creation(tmp_path, status):
     with pytest.raises(module.ScopeError, match='pending creation limit'):
         instance.call('workspace_create_scoped', {'name': 'rcc-worker-01', 'request_id': 'fresh'}, 'Bearer fixture-owner-secret')
     assert instance.read('rcc-worker-01') is None
+
+
+def test_legacy_git_snapshot_survives_image_default_policy(tmp_path):
+    module, instance, _ = manager(tmp_path)
+    instance.root()
+    legacy = {k: v for k, v in snapshot('a'*40).items() if k not in {'source_kind', 'image_ref', 'image_digest', 'recipe_snapshot'}}
+    legacy['recipe'] = '.devcontainer/remote-worker/devcontainer.json'
+    instance.write(NAME, {'name': NAME, 'execution_context': legacy})
+    row = {'id': NAME, 'uid': 'legacy-uid', 'context': 'default',
+           'provider': {'name': 'kubernetes', 'options': {'KUBERNETES_CONTEXT': {'value': 'ror'}, 'KUBERNETES_NAMESPACE': {'value': 'devsy'}}},
+           'source': {'gitRepository': legacy['repository'], 'gitCommit': legacy['revision']},
+           'devContainerPath': legacy['recipe']}
+    instance.metadata = lambda name: row
+    assert instance.verified(NAME, instance.load(), 'legacy-uid') == 'legacy-uid'
+    row['source']['gitCommit'] = 'b'*40
+    with pytest.raises(module.ScopeError):
+        instance.verified(NAME, instance.load(), 'legacy-uid')
+
+
+def test_image_source_rejects_wrong_digest_and_git_substitution(tmp_path):
+    _, instance, _ = manager(tmp_path)
+    image = snapshot('a'*40)
+    assert instance.source_matches({'source': {'image': image['image_ref']+'@'+image['image_digest']}}, image)
+    assert not instance.source_matches({'source': {'image': image['image_ref']+':latest'}}, image)
+    assert not instance.source_matches({'source': {'gitRepository': image['repository'], 'gitCommit': image['revision']}}, image)

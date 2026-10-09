@@ -273,3 +273,14 @@ def test_replacement_history_is_bounded(registry):
     result = json.loads(registry[1].read_text())
     assert len(result["history"]) == 32
     assert result["history"][-1]["owner"]["operation_id"] == "op-38"
+
+
+def test_image_registry_preserves_exact_digest_provenance(registry):
+    module, path, static = registry
+    value = {**selection(), 'recipe': 'Containerfile.worker', 'source_kind': 'image',
+             'image_ref': 'ghcr.io/joshyorko/codex-action-server', 'image_digest': 'sha256:'+'a'*64}
+    module.publish(path, static, 'cas-worker-01', value, 'image-operation')
+    target = json.loads(path.read_text())['targets']['cas-worker-01']
+    assert target['image_ref'] == value['image_ref'] and target['image_digest'] == value['image_digest']
+    with pytest.raises(module.RegistryError):
+        module.publish(path, static, 'cas-worker-01', {**value, 'image_digest': 'latest'}, 'image-operation')

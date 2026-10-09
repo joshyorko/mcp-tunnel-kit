@@ -103,8 +103,9 @@ The pinned disposable Executor test proves API-only private profile setup, zero 
 ### RCC worker migration and provisioning
 
 The owner scope admits `cas-worker-01` and `rcc-worker-01`, with at most two
-inventory workspaces and one unresolved creation at a time. Both use the CAS
-remote-worker recipe from main. The engineering repository is a separate checkout;
+inventory workspaces and one unresolved creation at a time. New workers use the
+public CAS worker image built from main, with bootstrap scripts in `/opt/codex-worker`
+and a blank `/workspaces` directory. The engineering repository is a separate checkout;
 creating directly from the RCC repository does not install a native Codex daemon.
 
 An existing generic creation receipt prevents scoped admission until explicitly
@@ -124,3 +125,19 @@ source/provider-verified sibling workspaces and their exact labeled Pod/PVC plus
 UID-bound PV claim. Unrecognized resources still block recovery. After restarting
 the managed bridge, verify scoped status and creation receipt agree before any
 fresh create. Never replay the old generic request or delete its history.
+
+### Immutable image source snapshots
+
+New creations resolve CAS `refs/heads/main`, fetch its `Containerfile.worker`,
+and resolve `ghcr.io/joshyorko/codex-action-server:worker-sha-<commit>`. The resolver
+requires a Linux amd64 manifest, verifies its configuration content digest and
+OCI revision label, and records an immutable image digest. Missing publications,
+wrong revisions, ambiguous platforms, or invalid digests refuse admission; there
+is no fallback to `latest` or a Git checkout. Devsy receives `image:<ref>@<digest>`
+without a `--devcontainer` override so baked lifecycle metadata remains active.
+
+The execution context and CAS registry retain `source_kind=image`, repository-only
+`image_ref`, `image_digest`, and repository/revision/Containerfile hash provenance.
+Devsy's actual `source.image` must match the joined immutable reference. Existing
+Git-created workers remain verified against their recorded Git commit and original
+remote-worker recipe; changing the default never recreates or pulls those workers.

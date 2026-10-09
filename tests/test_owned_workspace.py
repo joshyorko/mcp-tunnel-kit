@@ -20,10 +20,10 @@ def owned(tmp_path):
     execution = {'context': config['context'], 'provider': config['provider'],
                  'kubernetes_context': config['kubernetes_context'], 'namespace': config['namespace'],
                  'repository': config['repository'], 'revision': 'c' * 40,
-                 'recipe': config['recipe']}
+                 'recipe': '.devcontainer/remote-worker/devcontainer.json'}
     row = {'id': NAME, 'uid': UID, 'context': 'default',
            'source': {'gitRepository': config['repository'], 'gitCommit': execution['revision']},
-           'devContainerPath': config['recipe'],
+           'devContainerPath': execution['recipe'],
            'provider': {'name': 'kubernetes', 'options': {
                'KUBERNETES_CONTEXT': {'value': 'ror'}, 'KUBERNETES_NAMESPACE': {'value': 'devsy'},
                'KUBERNETES_CONFIG': {'value': str(kube)}}}}

@@ -402,7 +402,7 @@ def scoped_job(devsy, scope, request_id='fixture-create'):
     recipe = b'{}'
     execution = {key: scope[key] for key in (
         'context', 'provider', 'kubernetes_context', 'namespace', 'repository', 'source_ref', 'recipe', 'binary')}
-    execution.update(revision='b' * 40, recipe_sha256=hashlib.sha256(recipe).hexdigest())
+    execution.update(recipe='.devcontainer/remote-worker/devcontainer.json', revision='b' * 40, recipe_sha256=hashlib.sha256(recipe).hexdigest())
     operation_id = str(uuid.uuid4())
     devsy.scope.root()
     devsy.scope.write('cas-worker-01', {
@@ -423,7 +423,7 @@ Path('invocation.json').write_text(json.dumps({'args': sys.argv[1:], 'home': os.
 ''')
     recipe = b'{"name":"remote worker"}\n'
     execution = {key: scope[key] for key in ('context', 'provider', 'kubernetes_context', 'namespace', 'repository', 'recipe', 'binary')}
-    execution.update(source_ref='refs/heads/main', revision='b' * 40,
+    execution.update(recipe='.devcontainer/remote-worker/devcontainer.json', source_ref='refs/heads/main', revision='b' * 40,
                      recipe_sha256=hashlib.sha256(recipe).hexdigest())
     operation_id = str(uuid.uuid4())
     devsy.scope.root()
@@ -496,7 +496,7 @@ Path({str(capture)!r}).write_text(json.dumps(sys.argv[1:]))
 ''')
     execution = {key: approved[key] for key in (
         'context', 'provider', 'kubernetes_context', 'namespace', 'repository', 'source_ref', 'recipe', 'binary')}
-    execution.update(revision='a' * 40, recipe_sha256='b' * 64)
+    execution.update(recipe='.devcontainer/remote-worker/devcontainer.json', revision='a' * 40, recipe_sha256='b' * 64)
     operation_id = str(uuid.uuid4())
     devsy.scope.root()
     devsy.scope.write('cas-worker-01', {
@@ -672,3 +672,22 @@ def test_expanded_scope_cannot_hide_generic_unknown_receipt(tmp_path):
         with pytest.raises(Exception, match='requires operator migration'):
             devsy.call(tool, args, 'Bearer fixture-owner-secret')
     assert devsy.scope.read('rcc-worker-01') is None
+
+
+def test_image_create_uses_digest_without_git_or_devcontainer_override(tmp_path):
+    import hashlib
+    import json
+    devsy, scope = scoped_fixture(tmp_path, "import json, sys\nfrom pathlib import Path\nPath('image-args.json').write_text(json.dumps(sys.argv[1:]))\n")
+    job = scoped_job(devsy, scope)
+    recipe = b'FROM fixture\n'
+    execution = {**job['execution_context'], 'source_kind': 'image', 'recipe': 'Containerfile.worker',
+                 'image_ref': 'ghcr.io/joshyorko/codex-action-server', 'image_digest': 'sha256:'+'d'*64,
+                 'recipe_sha256': hashlib.sha256(recipe).hexdigest()}
+    record = devsy.scope.read('cas-worker-01')
+    record['execution_context'] = execution
+    devsy.scope.write('cas-worker-01', record)
+    result = devsy.scoped_execute('create', 'cas-worker-01', {**job, 'execution_context': execution, 'recipe_snapshot': recipe})
+    args = json.loads((tmp_path/'image-args.json').read_text())
+    assert args[args.index('up')+1] == 'image:ghcr.io/joshyorko/codex-action-server@sha256:'+'d'*64
+    assert '--devcontainer' not in args
+    assert result['exit_code'] == 0

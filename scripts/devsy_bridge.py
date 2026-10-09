@@ -904,7 +904,7 @@ def scoped_child(config, parent, operation, name, state_dir, operation_id, snaps
                 recipe_snapshot = handle.read(1024 * 1024 + 1)
             if (not recipe_snapshot or len(recipe_snapshot) > 1024 * 1024
                     or hashlib.sha256(recipe_snapshot).hexdigest() != execution.get('recipe_sha256')
-                    or not isinstance(json.loads(recipe_snapshot), dict)):
+                    or (execution.get('source_kind') != 'image' and not isinstance(json.loads(recipe_snapshot), dict))):
                 return 2
         elif snapshot_path:
             return 2
@@ -930,14 +930,17 @@ def scoped_child(config, parent, operation, name, state_dir, operation_id, snaps
         job_environment = headless_devsy.prepare(job_scope['binary'], os.getcwd(), dict(os.environ), scope, os.environ['TMPDIR'])
     except headless_devsy.HeadlessDevsyError:
         return {'phase': 'headless_context_failed', 'exit_code': 2, 'devsy_invoked': False}
-    source = 'git:' + execution['repository'] + '@sha256:' + execution['revision'] if operation == 'create' else name
+    source = name
+    if operation == 'create':
+        source = ('image:' + execution['image_ref'] + '@' + execution['image_digest'] if execution.get('source_kind') == 'image'
+                  else 'git:' + execution['repository'] + '@sha256:' + execution['revision'])
     arguments = [job_scope['binary'], '--context', job_scope['context'], '--provider', job_scope['provider'],
                  'workspace', 'up', source, '--id', name, '--ide', 'none', '--ide-launch', 'skip',
                  '--provider-option', 'KUBERNETES_NAMESPACE=' + job_scope['namespace'],
                  '--provider-option', 'KUBERNETES_CONTEXT=' + job_scope['kubernetes_context'],
                  '--provider-option', 'CREATE_NAMESPACE=false', '--provider-option', 'CLUSTER_ROLE=',
                  '--provider-option', 'SERVICE_ACCOUNT=default']
-    if operation == 'create':
+    if operation == 'create' and execution.get('source_kind') != 'image':
         arguments += ['--devcontainer', execution['recipe']]
     def parent_death():
         # This supervisor is single-threaded, unlike the HTTP bridge.

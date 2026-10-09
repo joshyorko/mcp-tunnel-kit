@@ -37,7 +37,8 @@ def _target_name(value):
 
 
 def _target(selection):
-    if not isinstance(selection, dict) or selection.get("provider") != "kubernetes":
+    if (not isinstance(selection, dict) or selection.get("provider") != "kubernetes"
+            or selection.get("source_kind") not in {None, "git", "image"}):
         _refuse()
     if not isinstance(selection.get("namespace"), str) or not re.fullmatch(
             r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", selection["namespace"]):
@@ -47,10 +48,17 @@ def _target(selection):
             or ".." in Path(kubeconfig).parts or any(ord(character) < 32 or ord(character) == 127 for character in kubeconfig)):
         _refuse()
     if (selection.get("repository") != "https://github.com/joshyorko/codex-action-server.git"
-            or selection.get("recipe") != ".devcontainer/remote-worker/devcontainer.json"
+            or selection.get("recipe") != ("Containerfile.worker" if selection.get("source_kind") == "image"
+                                           else ".devcontainer/remote-worker/devcontainer.json")
             or not isinstance(selection.get("revision"), str) or not re.fullmatch(r"[a-f0-9]{40}", selection["revision"])):
         _refuse()
+    if selection.get("source_kind") == "image":
+        if (not re.fullmatch(r"sha256:[a-f0-9]{64}", selection.get("image_digest", ""))
+                or selection.get("image_ref") != "ghcr.io/joshyorko/codex-action-server"):
+            _refuse()
     return {"transport": "devsy-kubernetes",
+            **({key: selection[key] for key in ("source_kind", "image_ref", "image_digest")}
+               if selection.get("source_kind") == "image" else {}),
             **{key: _identity(selection[key]) for key in ("context", "provider", "workspace", "workspace_uid", "kubernetes_context")},
             **{key: selection[key] for key in ("namespace", "kubeconfig", "repository", "revision", "recipe")},
             "user": "vscode", "codex_bin": "/home/vscode/.local/bin/codex"}
