@@ -82,4 +82,14 @@ Only when `new_request_allowed=true`, submit one `workspace_create_scoped` call 
 
 Scoped jobs use a private temporary directory under their managed job-state directory. The supervisor removes only that directory when the job ends. They do not depend on space in the host's shared `/tmp` for Git inspection.
 
+Each scoped job copies its hash-bound Devsy config into that private directory and disables `SSH_TUNNEL_MODE` in the copy. The provider home and operator config are unchanged. Headless provisioning must exit after readiness, not stay alive serving an inherited interactive SSH tunnel.
+
+## Dynamic worker access
+
+Scoped status verifies the admitted worker's source, pinned commit, recipe, cluster, and UID. The first observed UID is retained for that operation. Diagnostics accept this verified identity without changing the existing operator-pinned diagnostic target. A replacement UID, revoked scope, or changed binding is refused.
+
+The bridge publishes verified workers into a separate private `cas/dynamic-targets.json` registry. Static targets such as `local` and `devsy` are never overwritten. CAS reads the registry on each call and checks the bridge's private `/worker-authorized` endpoint for current scope authorization. Revocation or an unavailable authority blocks dynamic access while static routes remain available. Native Devsy metadata must still match every published cluster and source binding before CAS connects.
+
+New workers require no per-UID target-file edit or service restart. Enabling the registry reader requires one CAS rollout. An unknown legacy operation without a recorded UID requires evidence-based operator reconciliation before it can be registered; discovering a matching name alone never adopts it.
+
 The pinned disposable Executor test proves API-only private profile setup, zero browser approval on first scoped creation, duplicate suppression, protected-name refusal and ordinary deletion approval. Live discovery/status verifies the activated profile without creating a worker. Real cluster provisioning and starting a stopped worker were not exercised destructively during activation.

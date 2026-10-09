@@ -14,7 +14,7 @@ class DiagnosticError(Exception):
 TOOL = {
     'name': 'workspace_diagnostics',
     'description': 'Read startup/process and native Codex daemon metadata for the exact '
-                   'operator-pinned Kubernetes workspace. No caller-supplied commands, '
+                   'operator-pinned or verified scope-owned Kubernetes workspace. No caller-supplied commands, '
                    'credentials, lifecycle operations, or daemon restart.',
     'inputSchema': {'type': 'object', 'additionalProperties': False,
                     'properties': {'name': {'type': 'string'},
@@ -89,10 +89,10 @@ def _run(arguments, environment):
     return result.stdout
 
 
-def diagnose(source, arguments, call, environment):
+def diagnose(source, arguments, call, environment, *, selection=None):
     if not isinstance(arguments, dict) or set(arguments) != {'name', 'workspace_uid'}:
         raise DiagnosticError('Diagnostics accept only name and workspace_uid, never a command.')
-    selected = _private_json(source)['targets']['devsy']
+    selected = selection if selection is not None else _private_json(source)['targets']['devsy']
     expected = {key: _identity(selected[key])
                 for key in ['context', 'provider', 'workspace', 'workspace_uid']}
     if (expected['provider'] != 'kubernetes' or arguments['name'] != expected['workspace']
@@ -114,6 +114,9 @@ def diagnose(source, arguments, call, environment):
     kubeconfig = options['KUBERNETES_CONFIG']['value']
     if not isinstance(kubeconfig, str) or not Path(kubeconfig).is_absolute():
         raise DiagnosticError('Workspace kubeconfig must be an absolute operator path.')
+    if selection is not None and (context != selection['kubernetes_context']
+            or namespace != selection['namespace'] or kubeconfig != selection['kubeconfig']):
+        raise DiagnosticError('Workspace cluster identity changed; no remote command ran.')
     prefix = ['kubectl', '--kubeconfig', kubeconfig, '--context', context, '-n', namespace]
     pods = json.loads(_run(prefix + ['get', 'pods', '-l',
         'devsy.sh/workspace-uid=' + expected['workspace_uid'], '-o', 'json'], environment))['items']

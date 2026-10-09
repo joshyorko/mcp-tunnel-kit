@@ -658,3 +658,16 @@ class ComposeBoundaryTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_cas_only_restart_does_not_restart_executor_or_tunnel(monkeypatch):
+    spec = importlib.util.spec_from_file_location('cas_restart_test', ROOT / 'scripts/compose_control.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    calls = []
+    configuration = {'services': {'codex-action-server': {'image': 'ghcr.io/joshyorko/codex-action-server:sha-' + 'a' * 40}}}
+    monkeypatch.setattr(module, 'network_preflight', lambda config: calls.append('network'))
+    monkeypatch.setattr(module, 'compose', lambda *args, **kwargs: calls.append(args))
+    module.restart_cas(configuration)
+    assert calls == ['network', ('pull', 'codex-action-server'),
+                     ('up', '-d', '--no-deps', '--wait', '--wait-timeout', '120', 'codex-action-server')]

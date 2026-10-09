@@ -838,9 +838,18 @@ def status():
     print("Browser and ChatGPT acceptance require their separate live gates.")
 
 
+def restart_cas(configuration):
+    image = configuration['services']['codex-action-server']['image']
+    if not re.fullmatch(r'ghcr\.io/joshyorko/codex-action-server(?::sha-[0-9a-f]{40}|@sha256:[0-9a-f]{64})', image):
+        raise ControlError('Pin the verified immutable CAS image before a CAS-only rollout.')
+    network_preflight(configuration)
+    compose('pull', 'codex-action-server', timeout=600)
+    compose('up', '-d', '--no-deps', '--wait', '--wait-timeout', '120', 'codex-action-server', timeout=150)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("first-run", "secrets", "check", "up", "down", "status", "bootstrap", "probe", "resume", "restart-devsy"))
+    parser.add_argument("mode", choices=("first-run", "secrets", "check", "up", "down", "status", "bootstrap", "probe", "resume", "restart-devsy", "restart-cas"))
     args = parser.parse_args()
     try:
         if args.mode in {"bootstrap", "probe", "resume"}:
@@ -854,6 +863,9 @@ def main():
             return probe(args.mode == "resume")
         elif args.mode == "status":
             status()
+        elif args.mode == "restart-cas":
+            restart_cas(config())
+            print('CAS API restarted and healthy; Executor, tunnel, and native worker daemons unchanged.')
         elif args.mode == "restart-devsy":
             configuration = config()
             bridge = host_bridge()

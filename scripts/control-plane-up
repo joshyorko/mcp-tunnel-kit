@@ -9,7 +9,8 @@ case "${1:-}" in
   --secrets) mode=secrets ;;
   --check) mode=check ;;
   --restart-devsy) mode=restart-devsy ;;
-  *) printf '%s\n' 'usage: scripts/control-plane-up [--first-run|--secrets|--check|--restart-devsy]' >&2; exit 2 ;;
+  --restart-cas) mode=restart-cas ;;
+  *) printf '%s\n' 'usage: scripts/control-plane-up [--first-run|--secrets|--check|--restart-devsy|--restart-cas]' >&2; exit 2 ;;
 esac
 [[ $# -le 1 ]] || { printf '%s\n' 'Use one mode only.' >&2; exit 2; }
 exec "${CONTROL_PLANE_PYTHON:-python3}" scripts/compose_control.py "$mode"

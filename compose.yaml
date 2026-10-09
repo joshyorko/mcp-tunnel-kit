@@ -7,6 +7,7 @@ x-operator:
   devsy_cwd: ${DEVSY_MCP_CWD:-}
   devsy_home: ${DEVSY_MCP_HOME:-}
   devsy_scope_file: ${DEVSY_SCOPE_FILE:-}
+  devsy_registry_file: ${CONTROL_PLANE_STATE_DIR:-./.state}/cas/dynamic-targets.json
   devsy_state: ${CONTROL_PLANE_STATE_DIR:-./.state}/devsy-bridge
 
 services:
@@ -80,6 +81,8 @@ services:
       CODEX_ACTION_BRIDGE_GATEWAY: ${CONTROL_PLANE_GATEWAY:-172.30.86.1}
       CODEX_ACTION_PORT: "8088"
       CODEX_ACTION_TARGETS: /run/codex-action-server/targets.json
+      CODEX_ACTION_DYNAMIC_TARGETS: /var/lib/codex-action-server/dynamic-targets.json
+      CODEX_ACTION_WORKER_AUTHORITY: http://${CONTROL_PLANE_GATEWAY:-172.30.86.1}:8089/worker-authorized
       CODEX_ACTION_DATA: /var/lib/codex-action-server/runtime
       CODEX_ACTION_RECEIPTS: /var/lib/codex-action-server/receipts
       ACTIONS_HOME: /var/lib/codex-action-server/actions

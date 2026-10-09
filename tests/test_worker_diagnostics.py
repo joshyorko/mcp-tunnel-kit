@@ -94,3 +94,28 @@ def test_nonzero_transport_is_not_a_successful_daemon_probe(tmp_path, monkeypatc
                         lambda args, **kwargs: subprocess.CompletedProcess(args, 1, '', 'PRIVATE'))
     with pytest.raises(module.DiagnosticError, match='transport failed'):
         module._run(['kubectl'], None)
+
+
+def test_scope_owned_selection_uses_approved_cluster_and_no_static_rebind(tmp_path, monkeypatch):
+    module = helper()
+    source = selected(tmp_path)
+    before = source.read_bytes()
+    approved = {'context': 'default', 'provider': 'kubernetes', 'workspace': 'cas-worker-01',
+                'workspace_uid': 'default-ca-11111', 'kubernetes_context': 'ror',
+                'namespace': 'devsy', 'kubeconfig': '/fixture/kubeconfig'}
+    row = {'id': approved['workspace'], 'uid': approved['workspace_uid'], 'context': 'default',
+           'provider': {'name': 'kubernetes', 'options': {
+               'KUBERNETES_CONTEXT': {'value': 'ror'}, 'KUBERNETES_NAMESPACE': {'value': 'devsy'},
+               'KUBERNETES_CONFIG': {'value': '/fixture/kubeconfig'}}}}
+    pod = {'metadata': {'name': 'worker-pod', 'namespace': 'devsy', 'uid': 'pod-1',
+                       'labels': {'devsy.sh/workspace-uid': approved['workspace_uid']}},
+           'spec': {'containers': [{'name': 'devsy'}]}, 'status': {'phase': 'Pending'}}
+    monkeypatch.setattr(module, '_run', lambda *args: json.dumps({'items': [pod]}))
+    arguments = {'name': approved['workspace'], 'workspace_uid': approved['workspace_uid']}
+    report = module.diagnose(source, arguments, lambda *args: {'structuredContent': row}, None, selection=approved)
+    assert report['pod_phase'] == 'Pending'
+    assert source.read_bytes() == before
+    row['provider']['options']['KUBERNETES_CONTEXT']['value'] = 'different'
+    monkeypatch.setattr(module, '_run', lambda *args: pytest.fail('Changed cluster must not be queried'))
+    with pytest.raises(module.DiagnosticError):
+        module.diagnose(source, arguments, lambda *args: {'structuredContent': row}, None, selection=approved)

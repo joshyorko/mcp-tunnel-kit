@@ -149,7 +149,7 @@ class WorkerScope:
             finally:
                 path.unlink(missing_ok=True)
 
-    def verified(self, name, scope, expected_uid=None):
+    def verified_row(self, name, scope, expected_uid=None):
         row = self.metadata(name)
         provider = row.get("provider", {})
         options = provider.get("options", {})
@@ -166,7 +166,74 @@ class WorkerScope:
             or (expected_uid is not None and row["uid"] != expected_uid)
         ):
             raise ScopeError("Workspace identity or provider scope changed.")
-        return row["uid"]
+        return row
+
+    def verified(self, name, scope, expected_uid=None):
+        return self.verified_row(name, scope, expected_uid)["uid"]
+
+    def pin_identity(self, record, uid):
+        """An operation may observe one UID, including while provisioning runs."""
+        key = "identity-" + hashlib.sha256(record["operation_id"].encode()).hexdigest()
+        wanted = {"name": record["name"], "operation_id": record["operation_id"], "workspace_uid": uid}
+        fd = os.open(self.state / "identity.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        try:
+            info = os.fstat(fd)
+            if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o600:
+                raise ScopeError("Unsafe workspace identity lock.")
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            prior = self.read(key)
+            if prior is not None and prior != wanted:
+                raise ScopeError("Scoped workspace identity changed; no adoption or rebind.")
+            if prior is None:
+                self.write(key, wanted)
+        finally:
+            os.close(fd)
+
+    def owned_workspace(self, name, uid, credential):
+        scope = self.authenticate(credential)
+        if name not in scope["allowed_new_names"] or name in scope["protected_names"]:
+            raise ScopeError("Workspace is outside the approved diagnostic scope.")
+        self.root()
+        record = self.read(name)
+        if (not record or record.get("operation") not in {"create", "start"}
+                or record.get("status") not in {"running", "completed", "outcome_unknown"}
+                or not isinstance(record.get("operation_id"), str)):
+            raise ScopeError("Diagnostics require an admitted scoped workspace operation.")
+        if record.get("workspace_uid") and record["workspace_uid"] != uid:
+            raise ScopeError("Scoped workspace identity changed; no remote command ran.")
+        pin = self.read("identity-" + hashlib.sha256(record["operation_id"].encode()).hexdigest())
+        if record["status"] == "outcome_unknown" and not pin and not record.get("workspace_uid"):
+            raise ScopeError("Unknown operation has no recorded workspace identity; operator reconciliation required.")
+        row = self.verified_row(name, scope, uid)
+        kubeconfig = row["provider"]["options"].get("KUBERNETES_CONFIG", {}).get("value")
+        if (row.get("source", {}).get("gitCommit") != scope["revision"]
+                or row.get("devContainerPath") != scope["recipe"]
+                or kubeconfig not in scope.get("bindings", {})):
+            raise ScopeError("Workspace source, recipe, or cluster identity changed.")
+        self.pin_identity(record, row["uid"])
+        current = self.read(name)
+        if not current or current.get("operation_id") != record["operation_id"]:
+            raise ScopeError("Workspace operation changed during identity verification.")
+        return {"context": scope["context"], "provider": scope["provider"], "workspace": name,
+                "workspace_uid": row["uid"], "kubernetes_context": scope["kubernetes_context"],
+                "namespace": scope["namespace"], "kubeconfig": kubeconfig,
+                "repository": scope["repository"], "revision": scope["revision"], "recipe": scope["recipe"],
+                "operation_id": record["operation_id"]}
+
+    def worker_authorized(self, name, uid, operation_id):
+        """Private-network policy probe; no credentials, provider calls, or writes."""
+        try:
+            scope = self.load()
+            if name not in scope["allowed_new_names"] or name in scope["protected_names"]:
+                return False
+            record = self.read(name)
+            if (not record or record.get("operation_id") != operation_id
+                    or record.get("status") not in {"running", "completed", "outcome_unknown"}):
+                return False
+            pin = self.read("identity-" + hashlib.sha256(operation_id.encode()).hexdigest())
+            return pin == {"name": name, "operation_id": operation_id, "workspace_uid": uid}
+        except Exception:
+            return False
 
     def reconcile(self, record, scope):
         """An absence proof permits a new intent, never replay of this operation."""
@@ -389,7 +456,9 @@ class WorkerScope:
             else:
                 record["diagnostics"]["phase"] = "verify_workspace"
                 self.write(name, record)
-                record["workspace_uid"] = self.verified(name, scope, expected_uid)
+                uid = self.verified(name, scope, expected_uid)
+                self.pin_identity(record, uid)
+                record["workspace_uid"] = uid
                 record["status"] = "completed"
         except Exception as exc:
             record["status"] = (

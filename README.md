@@ -29,6 +29,10 @@ reconciles only the managed host bridge and verifies its health. It preserves
 Executor, CAS, the tunnel, native Codex, and workspace state. The bridge follows
 the configured executable symlink on each call, including after package upgrades.
 
+After a verified immutable CAS image is pinned, `./scripts/control-plane-up --restart-cas`
+updates only the CAS API. Executor, the tunnel, and native worker daemons stay running.
+This mode can interrupt in-flight CAS API calls; use it only in an authorized rollout window.
+
 For a fresh Executor, first run `./scripts/control-plane-up --first-run` without
 credentials. Finish the browser owner/organization setup, create the organization
 PAT, add it to `.env`, and run normal up. See [Compose setup and

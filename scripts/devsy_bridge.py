@@ -138,7 +138,7 @@ class Stdio:
 
 
 class Devsy:
-    def __init__(self, binary, cwd, env=None, timeout=120, targets_source=None, creation_state=None, scope_source=None):
+    def __init__(self, binary, cwd, env=None, timeout=120, targets_source=None, creation_state=None, scope_source=None, registry_source=None):
         executable = Path(binary)
         directory = Path(cwd)
         if (not executable.is_absolute() or not executable.is_file() or not os.access(executable, os.X_OK)
@@ -148,6 +148,7 @@ class Devsy:
         # Follow the configured launcher on each call after package-manager upgrades.
         self.binary, self.cwd, self.env, self.timeout = str(executable), str(directory.resolve()), env, timeout
         self.targets_source = targets_source
+        self.registry_source = registry_source
         self.creation_state = creation_state
         self.scope = None
         if scope_source:
@@ -177,6 +178,38 @@ class Devsy:
         if len(rows) != 1:
             raise BridgeError('Scoped workspace absent or ambiguous.')
         return rows[0]
+
+    def publish_owned(self, selection):
+        if not self.registry_source:
+            return None
+        import importlib.util
+        path = Path(__file__).with_name('worker_registry.py')
+        spec = importlib.util.spec_from_file_location('worker_registry', path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.publish(self.registry_source, self.targets_source, selection['workspace'],
+                              selection, selection['operation_id'])
+
+    def discover_owned(self, value, credential):
+        if value.get('status') not in {'running', 'completed', 'outcome_unknown'}:
+            return value
+        value = dict(value)
+        try:
+            row = self.scoped_metadata(value['name'])
+            selection = self.scope.owned_workspace(value['name'], row['uid'], credential)
+            value.update(workspace_uid=selection['workspace_uid'], identity_verified=True,
+                         diagnostics_allowed=True)
+        except Exception:
+            value.update(identity_verified=False, diagnostics_allowed=False,
+                         discovery_error_code='owned_workspace_not_verified')
+            return value
+        try:
+            published = self.publish_owned(selection)
+            if published:
+                value['cas_target'] = published['target']
+        except Exception:
+            value['discovery_error_code'] = 'worker_registry_refused'
+        return value
 
     def scoped_execute(self, operation, name, scope):
         if self.stopping.is_set():
@@ -318,6 +351,7 @@ class Devsy:
                 if name in self.scope_module.MUTATIONS | self.scope_module.READS or scope_receipt:
                     value = self.scope.call('workspace_status_scoped' if scope_receipt else name,
                                             arguments, credential)
+                    value = self.discover_owned(value, credential)
                     value = {**value, 'retry_safe': False,
                              'may_have_succeeded': value['status'] not in {'not_submitted', 'failed'}}
                     return {'content': [{'type': 'text', 'text': json.dumps(value)}],
@@ -343,8 +377,15 @@ class Devsy:
         if name == 'workspace_diagnostics' and self.targets_source:
             module = self.diagnostic_module()
             try:
-                result = module.diagnose(self.targets_source, arguments, self.call, self.env)
-            except module.DiagnosticError as error:
+                selection = None
+                static_name = module._private_json(self.targets_source).get('targets', {}).get('devsy', {}).get('workspace')
+                if (self.scope and isinstance(arguments, dict)
+                        and arguments.get('name') != static_name):
+                    if set(arguments) != {'name', 'workspace_uid'}:
+                        raise module.DiagnosticError('Diagnostics accept only name and workspace_uid.')
+                    selection = self.scope.owned_workspace(arguments['name'], arguments['workspace_uid'], credential)
+                result = module.diagnose(self.targets_source, arguments, self.call, self.env, selection=selection)
+            except (module.DiagnosticError, self.scope_module.ScopeError if self.scope else module.DiagnosticError) as error:
                 result = {'error': {'code': 'worker_diagnostics_refused', 'message': str(error)}}
                 return {'content': [{'type': 'text', 'text': json.dumps(result)}],
                         'structuredContent': result, 'isError': True}
@@ -458,6 +499,20 @@ class BridgeHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if not self.allowed():
             return
+        parsed = urllib.parse.urlsplit(self.path)
+        if parsed.path == '/worker-authorized' and not parsed.scheme and not parsed.netloc:
+            try:
+                values = urllib.parse.parse_qs(parsed.query, keep_blank_values=True, strict_parsing=True)
+                if (set(values) != {'name', 'uid', 'operation_id'} or parsed.fragment
+                        or any(len(items) != 1 or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}', items[0])
+                               for items in values.values())):
+                    raise ValueError()
+                scope = self.server.devsy.scope
+                authorized = bool(scope and scope.worker_authorized(values['name'][0], values['uid'][0], values['operation_id'][0]))
+                self.reply(200, {'authorized': authorized})
+            except Exception:
+                self.reply(400, {'authorized': False})
+            return
         if self.path == '/scope/health':
             try:
                 self.server.devsy.scope.authenticate(self.headers.get('Authorization'))
@@ -548,7 +603,8 @@ def settings(configuration):
     result = {'subnet': network['subnet'], 'gateway': network['gateway'],
               'binary': operator.get('devsy_binary', ''), 'cwd': operator.get('devsy_cwd', ''),
               'state': str(Path(operator.get('devsy_state', './.state/devsy-bridge')).resolve()), 'home': operator.get('devsy_home', ''),
-              'targets_source': operator.get('targets_source'), 'scope_source': operator.get('devsy_scope_file') or None}
+              'targets_source': operator.get('targets_source'), 'scope_source': operator.get('devsy_scope_file') or None,
+              'registry_source': str(Path(operator['devsy_registry_file']).resolve()) if operator.get('devsy_registry_file') else None}
     validate_settings(result)
     return result
 
@@ -587,7 +643,7 @@ def owned_process(receipt):
 def fingerprint(value):
     # No credentials: configuration contains only selected paths and bridge addresses.
     payload = json.dumps(value, sort_keys=True).encode() + Path(__file__).read_bytes()
-    for name in ['worker_scope.py', 'creation_receipts.py', 'devsy_reconciliation.py']:
+    for name in ['worker_scope.py', 'creation_receipts.py', 'devsy_reconciliation.py', 'worker_diagnostics.py', 'worker_registry.py', 'headless_devsy.py']:
         payload += Path(__file__).with_name(name).read_bytes()
     if value.get('scope_source'):
         payload += Path(value['scope_source']).read_bytes()
@@ -730,7 +786,7 @@ def serve(config):
             environment['DEVSY_HOME'] = value['home']
         devsy = Devsy(value['binary'], value['cwd'], environment,
                       targets_source=value.get('targets_source'), creation_state=state / 'creation-receipts',
-                      scope_source=value.get('scope_source'))
+                      scope_source=value.get('scope_source'), registry_source=value.get('registry_source'))
         devsy.catalog()
         instance = secrets.token_hex(16)
         server = BridgeServer((value['gateway'], 8089), devsy,
@@ -793,6 +849,11 @@ def scoped_child(config, parent, operation, name):
     libc = ctypes.CDLL(None, use_errno=True)
     if libc.prctl(1, signal.SIGTERM, 0, 0, 0) != 0 or os.getppid() != parent:
         return 2
+    import headless_devsy
+    try:
+        job_environment = headless_devsy.prepare(scope['binary'], os.getcwd(), dict(os.environ), scope, os.environ['TMPDIR'])
+    except headless_devsy.HeadlessDevsyError:
+        return {'phase': 'headless_context_failed', 'exit_code': 2, 'devsy_invoked': False}
     source = 'git:' + scope['repository'] + '@sha256:' + scope['revision'] if operation == 'create' else name
     arguments = [scope['binary'], '--context', scope['context'], '--provider', scope['provider'],
                  'workspace', 'up', source, '--id', name, '--ide', 'none', '--ide-launch', 'skip',
@@ -817,7 +878,7 @@ def scoped_child(config, parent, operation, name):
     result = {'phase': 'devsy_launch', 'exit_code': 2, 'devsy_invoked': False}
     try:
         process = subprocess.Popen(arguments, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                   stderr=subprocess.STDOUT, start_new_session=True, preexec_fn=parent_death)
+                                   stderr=subprocess.STDOUT, env=job_environment, start_new_session=True, preexec_fn=parent_death)
         result['devsy_invoked'] = True
         reader = threading.Thread(target=drain, daemon=True)
         reader.start()

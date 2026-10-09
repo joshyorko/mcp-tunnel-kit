@@ -367,10 +367,26 @@ def scoped_fixture(tmp_path, body):
     import sys
     module = bridge()
     binary = tmp_path / 'fake-devsy'
-    binary.write_text('#!' + sys.executable + '\n' + body)
+    prefix = '''import sys, json, os
+from pathlib import Path
+if sys.argv[1:4] == ['--context', 'default', 'context']:
+    copy = Path(os.environ['DEVSY_CONFIG'])
+    if sys.argv[4] == 'set':
+        copy.write_text(json.dumps({'SSH_TUNNEL_MODE': {'value': 'false'}}))
+    elif sys.argv[4] == 'get':
+        print(copy.read_text())
+    else:
+        raise SystemExit(7)
+    raise SystemExit(0)
+'''
+    binary.write_text('#!' + sys.executable + '\n' + prefix + body)
     binary.chmod(0o700)
+    native_config = tmp_path / 'config.yaml'
+    native_config.write_text(json.dumps({'SSH_TUNNEL_MODE': {'value': 'true'}}))
+    native_config.chmod(0o600)
     scope = json.loads((ROOT / 'docs/devsy-worker-scope.proposed.json').read_text())
-    scope.update(enabled=True, expires_at=None, bindings={}, binary=str(binary),
+    scope.update(enabled=True, expires_at=None,
+                 bindings={str(native_config.resolve()): hashlib.sha256(native_config.read_bytes()).hexdigest()}, binary=str(binary),
                  capability_sha256=hashlib.sha256(b'fixture-owner-secret').hexdigest())
     config = tmp_path / 'scope.json'
     config.write_text(json.dumps(scope))
@@ -510,3 +526,24 @@ with tempfile.TemporaryFile() as f:
     assert observed['mode'] == 0o700
     assert not Path(observed['path']).exists()
     assert result['exit_code'] == 0
+
+
+def test_revoked_worker_scope_does_not_disable_static_worker_diagnostics(tmp_path):
+    import json
+    from types import SimpleNamespace
+    devsy, scope = scoped_fixture(tmp_path, 'raise SystemExit(0)\n')
+    source = tmp_path / 'static-targets.json'
+    source.write_text(json.dumps({'targets': {'devsy': {'workspace': 'existing-worker'}}}))
+    source.chmod(0o600)
+    devsy.targets_source = str(source)
+    scope['enabled'] = False
+    devsy.scope.config.write_text(json.dumps(scope))
+    real = devsy.diagnostic_module()
+    def diagnose(source, arguments, call, environment, *, selection=None):
+        assert selection is None
+        return {'static_worker': True}
+    devsy.diagnostic_module = lambda: SimpleNamespace(_private_json=real._private_json,
+        DiagnosticError=real.DiagnosticError, diagnose=diagnose)
+    result = devsy.call('workspace_diagnostics', {'name': 'existing-worker', 'workspace_uid': 'existing-uid'})
+    assert result['structuredContent']['static_worker'] is True
+    assert result['isError'] is False
