@@ -171,16 +171,28 @@ class Devsy:
 
     def scoped_execute(self, operation, name, scope):
         if self.stopping.is_set():
-            raise BridgeError('Bridge is stopping; scoped job was not submitted.')
+            return {'phase': 'bridge_stopping', 'exit_code': 2, 'devsy_invoked': False}
         process = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), '--scoped-child',
                                     str(self.scope.config), str(os.getpid()), operation, name],
                                    cwd=self.cwd, env=self.env, stdin=subprocess.DEVNULL,
-                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+                                   stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True)
         with _CHILD_LOCK:
             _CHILDREN.add(process)
         try:
-            if process.wait(timeout=scope['job_timeout_seconds'] + 5):
-                raise BridgeError('Scoped lifecycle outcome requires reconciliation.')
+            try:
+                output, _ = process.communicate(timeout=scope['job_timeout_seconds'] + 5)
+            except subprocess.TimeoutExpired:
+                return {'phase': 'supervisor_timeout', 'exit_code': 124}
+            if process.returncode or len(output) > 4096:
+                return {'phase': 'supervisor_lost', 'exit_code': process.returncode or 2}
+            try:
+                result = json.loads(output)
+                if (not isinstance(result, dict) or not isinstance(result.get('exit_code'), int)
+                        or ('devsy_invoked' in result and not isinstance(result['devsy_invoked'], bool))):
+                    raise ValueError()
+                return result
+            except (ValueError, UnicodeDecodeError):
+                return {'phase': 'supervisor_result_invalid', 'exit_code': 2}
         finally:
             terminate(process)
             with _CHILD_LOCK:
@@ -289,12 +301,20 @@ class Devsy:
     def call(self, name, arguments, credential=None):
         if self.scope:
             try:
-                if name in self.scope_module.MUTATIONS | self.scope_module.READS:
-                    value = self.scope.call(name, arguments, credential)
+                scope_receipt = (name == 'workspace_create_receipt' and isinstance(arguments, dict)
+                                 and arguments.get('name') in self.scope.load()['allowed_new_names'])
+                if name in self.scope_module.MUTATIONS | self.scope_module.READS or scope_receipt:
+                    value = self.scope.call('workspace_status_scoped' if scope_receipt else name,
+                                            arguments, credential)
+                    value = {**value, 'retry_safe': False,
+                             'may_have_succeeded': value['status'] not in {'not_submitted', 'failed'}}
                     return {'content': [{'type': 'text', 'text': json.dumps(value)}],
-                            'structuredContent': value, 'isError': value.get('status') == 'outcome_unknown'}
+                            'structuredContent': value, 'isError': value.get('status') in {'outcome_unknown', 'failed'}}
                 if name not in READ_ONLY:
-                    self.scope.authenticate(credential)
+                    approved = self.scope.authenticate(credential)
+                    if (name == 'workspace_create' and isinstance(arguments, dict)
+                            and arguments.get('name') in approved['allowed_new_names']):
+                        raise BridgeError('Reserved workspace requires the scoped creation tool; raw create refused.')
             except self.scope_module.ScopeError as error:
                 raise BridgeError(str(error)) from None
         if self.creation_state and name in {'workspace_create', 'workspace_create_receipt'}:
@@ -761,7 +781,7 @@ def scoped_child(config, parent, operation, name):
     libc = ctypes.CDLL(None, use_errno=True)
     if libc.prctl(1, signal.SIGTERM, 0, 0, 0) != 0 or os.getppid() != parent:
         return 2
-    source = 'git:' + scope['repository'] + '@' + scope['revision'] if operation == 'create' else name
+    source = 'git:' + scope['repository'] + '@sha256:' + scope['revision'] if operation == 'create' else name
     arguments = [scope['binary'], '--context', scope['context'], '--provider', scope['provider'],
                  'workspace', 'up', source, '--id', name, '--ide', 'none', '--ide-launch', 'skip',
                  '--provider-option', 'KUBERNETES_NAMESPACE=' + scope['namespace'],
@@ -774,12 +794,26 @@ def scoped_child(config, parent, operation, name):
         # This supervisor is single-threaded, unlike the HTTP bridge.
         if libc.prctl(1, signal.SIGKILL, 0, 0, 0) != 0:
             os._exit(2)
+    # Keep only a bounded diagnostic sample in memory. Persist fixed classifications,
+    # never arbitrary provider output, credentials, or encoded workspace payloads.
+    sample = bytearray()
+    reader = None
+    def drain():
+        while chunk := process.stdout.read(8192):
+            if len(sample) < 65536:
+                sample.extend(chunk[:65536 - len(sample)])
+    result = {'phase': 'devsy_launch', 'exit_code': 2, 'devsy_invoked': False}
     try:
-        process = subprocess.Popen(arguments, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                   stderr=subprocess.DEVNULL, start_new_session=True, preexec_fn=parent_death)
-        return process.wait(timeout=scope['job_timeout_seconds'])
+        process = subprocess.Popen(arguments, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                   stderr=subprocess.STDOUT, start_new_session=True, preexec_fn=parent_death)
+        result['devsy_invoked'] = True
+        reader = threading.Thread(target=drain, daemon=True)
+        reader.start()
+        result.update(phase='devsy_exited', exit_code=process.wait(timeout=scope['job_timeout_seconds']))
     except subprocess.TimeoutExpired:
-        die()
+        result.update(phase='devsy_timeout', exit_code=124)
+    except Exception:
+        result['phase'] = 'devsy_supervision_failed' if process is not None else 'devsy_launch_failed'
     finally:
         if process is not None:
             try:
@@ -787,11 +821,34 @@ def scoped_child(config, parent, operation, name):
             except ProcessLookupError:
                 pass
             process.wait()
+            if reader is not None:
+                reader.join(2)
+            process.stdout.close()
+    patterns = {
+        'git_ref_not_found': (b'Remote branch', b'not found in upstream'),
+        'git_revision_not_found': (b'not our ref',),
+        'workspace_source_missing': (b'workspace source is missing',),
+        'provider_not_initialized': (b'is not initialized',),
+        'permission_denied': (b'permission denied',),
+        'connection_refused': (b'connection refused',),
+    }
+    result['stderr_code'] = next((code for code, parts in patterns.items()
+                                 if all(part.lower() in sample.lower() for part in parts)),
+                                'output_omitted' if sample else 'no_output')
+    return result
 
 
 def main():
     if len(sys.argv) == 6 and sys.argv[1] == '--scoped-child':
-        return scoped_child(sys.argv[2], int(sys.argv[3]), sys.argv[4], sys.argv[5])
+        try:
+            result = scoped_child(sys.argv[2], int(sys.argv[3]), sys.argv[4], sys.argv[5])
+            if not isinstance(result, dict):
+                result = {'phase': 'supervisor_refused', 'exit_code': 2, 'devsy_invoked': False}
+        except Exception:
+            # An unexpected error can occur after launch, including during cleanup.
+            result = {'phase': 'supervisor_failed', 'exit_code': 2}
+        print(json.dumps(result))
+        return 0
     if len(sys.argv) == 5 and sys.argv[1] == '--child':
         return child_guard(sys.argv[2], int(sys.argv[3]), float(sys.argv[4]))
     parser = argparse.ArgumentParser(description=__doc__)

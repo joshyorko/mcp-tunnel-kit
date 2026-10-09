@@ -39,8 +39,9 @@ def manager(tmp_path, invoke=None):
 
     def execute(operation, name, approved):
         calls.append((operation, name))
+        result = None
         if invoke:
-            invoke(operation, name, approved)
+            result = invoke(operation, name, approved)
         rows[name] = {
             "id": name,
             "uid": "fixture-uid",
@@ -54,6 +55,7 @@ def manager(tmp_path, invoke=None):
             },
             "source": {"gitRepository": approved["repository"]},
         }
+        return result
 
     instance = module.WorkerScope(
         config, tmp_path / "jobs", lambda: set(rows), lambda n: rows[n], execute
@@ -99,6 +101,10 @@ def test_short_submission_and_duplicate_return_one_durable_job(tmp_path):
     )
     assert first["status"] == "accepted"
     assert entered.wait(3)
+    running = scope.read("cas-worker-01")
+    assert running["status"] == "running"
+    assert isinstance(running["started_at"], (int, float))
+    assert "finished_at" not in running
     second = scope.call(
         "workspace_create_scoped",
         {"name": "cas-worker-01", "request_id": "retry-with-new-id"},
@@ -114,6 +120,7 @@ def test_short_submission_and_duplicate_return_one_durable_job(tmp_path):
     )
     assert status["status"] == "completed"
     assert status["workspace_uid"] == "fixture-uid"
+    assert status["finished_at"] >= status["started_at"]
     assert calls == [("create", "cas-worker-01")]
 
 
@@ -137,6 +144,174 @@ def test_recovered_unfinished_job_is_unknown_never_restarted(tmp_path):
         "Bearer fixture-owner-secret",
     )
     assert result["status"] == "outcome_unknown"
+    assert result["retry_safe"] is False
+    assert result["error_code"] == "lifecycle_outcome_unknown"
+    assert result["diagnostics"]["phase"] == "worker_lost"
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "invoked,expected",
+    [(True, "outcome_unknown"), (None, "outcome_unknown"), (False, "failed")],
+)
+def test_nonzero_invocation_retains_safe_diagnostics_without_replay(
+    tmp_path, invoked, expected
+):
+    diagnostics = {
+        "phase": "devsy_exit",
+        "exit_code": 1,
+        "devsy_invoked": invoked,
+        "stderr_code": "devsy_command_failed",
+        "stderr": "fixture-secret-raw-stderr",
+    }
+    _, scope, calls = manager(tmp_path, lambda *args: diagnostics)
+    scope.metadata = lambda name: pytest.fail(
+        "Nonzero invocation must not verify metadata"
+    )
+    accepted = scope.call(
+        "workspace_create_scoped",
+        {"name": "cas-worker-01", "request_id": "request-1"},
+        "Bearer fixture-owner-secret",
+    )
+    scope.wait()
+    record = scope.read("cas-worker-01")
+    assert record["status"] == expected
+    assert record["diagnostics"] == {
+        k: v for k, v in diagnostics.items() if k != "stderr"
+    }
+    assert record["retry_safe"] is False
+    assert record["finished_at"] >= record["started_at"]
+    assert "fixture-secret" not in json.dumps(record)
+    repeated = scope.call(
+        "workspace_create_scoped",
+        {"name": "cas-worker-01", "request_id": "request-2"},
+        "Bearer fixture-owner-secret",
+    )
+    assert repeated["operation_id"] == accepted["operation_id"]
+    assert calls == [("create", "cas-worker-01")]
+
+
+def test_invocation_exception_records_only_class_without_secret(tmp_path):
+    def fail(*args):
+        raise RuntimeError("fixture-secret-exception")
+
+    _, scope, _ = manager(tmp_path, fail)
+    scope.call(
+        "workspace_create_scoped",
+        {"name": "cas-worker-01", "request_id": "request-1"},
+        "Bearer fixture-owner-secret",
+    )
+    scope.wait()
+    record = scope.read("cas-worker-01")
+    assert record["status"] == "outcome_unknown"
+    assert record["exception_type"] == "RuntimeError"
+    assert record["diagnostics"]["phase"] == "invoke"
+    assert record["diagnostics"]["devsy_invoked"] is None
+    assert record["finished_at"] >= record["started_at"]
+    assert "fixture-secret" not in json.dumps(record)
+
+
+def test_start_cannot_bypass_unreconciled_outcome_with_known_uid(tmp_path):
+    _, scope, calls = manager(tmp_path)
+    scope.call(
+        "workspace_create_scoped",
+        {"name": "cas-worker-01", "request_id": "create-1"},
+        "Bearer fixture-owner-secret",
+    )
+    scope.wait()
+    record = scope.read("cas-worker-01")
+    record.update(status="outcome_unknown", operation="start", request_id="start-1")
+    scope.write("cas-worker-01", record)
+    repeated = scope.call(
+        "workspace_start_scoped",
+        {"name": "cas-worker-01", "request_id": "start-2"},
+        "Bearer fixture-owner-secret",
+    )
+    scope.wait()
+    assert repeated["operation_id"] == record["operation_id"]
+    assert repeated["status"] == "outcome_unknown"
+    assert calls == [("create", "cas-worker-01")]
+
+
+def test_approved_execution_context_is_durable_before_invocation(tmp_path):
+    observed = []
+
+    def capture(*args):
+        observed.append(scope.read("cas-worker-01"))
+
+    _, scope, _ = manager(tmp_path, capture)
+    approved = json.loads(scope.config.read_text())
+    approved["binary"] = "/fixture/bin/devsy"
+    approved["extra_secret"] = "fixture-secret-not-for-receipts"
+    scope.config.write_text(json.dumps(approved))
+    scope.call(
+        "workspace_create_scoped",
+        {"name": "cas-worker-01", "request_id": "request-1"},
+        "Bearer fixture-owner-secret",
+    )
+    scope.wait()
+    expected = {
+        key: approved[key]
+        for key in (
+            "context", "provider", "kubernetes_context", "namespace",
+            "repository", "revision", "recipe", "binary",
+        )
+    }
+    assert observed[0]["execution_context"] == expected
+    record = scope.read("cas-worker-01")
+    assert record["execution_context"] == expected
+    assert expected["revision"] == "bf0b3823e033b9b5abd86904e0a565d6b3586206"
+    assert expected["context"] == "default"
+    serialized = json.dumps(record)
+    for forbidden in ("capability_sha256", "bindings", "fixture-secret", "extra_secret"):
+        assert forbidden not in serialized
+
+
+def test_failed_verification_keeps_successful_exit_diagnostics(tmp_path):
+    diagnostics = {"phase": "devsy_exit", "exit_code": 0, "devsy_invoked": True}
+    _, scope, _ = manager(tmp_path, lambda *args: diagnostics)
+
+    def fail(name):
+        raise KeyError("fixture-secret-metadata")
+
+    scope.metadata = fail
+    scope.call(
+        "workspace_create_scoped",
+        {"name": "cas-worker-01", "request_id": "request-1"},
+        "Bearer fixture-owner-secret",
+    )
+    scope.wait()
+    record = scope.read("cas-worker-01")
+    assert record["status"] == "outcome_unknown"
+    assert record["diagnostics"]["exit_code"] == 0
+    assert record["diagnostics"]["devsy_invoked"] is True
+    assert record["exception_type"] == "KeyError"
+    assert "fixture-secret" not in json.dumps(record)
+
+
+def test_revalidation_failure_before_invocation_is_known_failed(tmp_path):
+    module, scope, calls = manager(tmp_path)
+    load_scope = scope.load
+
+    def revoked_after_admission():
+        if threading.current_thread() is not threading.main_thread():
+            raise module.ScopeError("fixture-secret-revoked")
+        return load_scope()
+
+    scope.load = revoked_after_admission
+    scope.call(
+        "workspace_create_scoped",
+        {"name": "cas-worker-01", "request_id": "request-1"},
+        "Bearer fixture-owner-secret",
+    )
+    scope.wait()
+    record = scope.read("cas-worker-01")
+    assert record["status"] == "failed"
+    assert record["error_code"] == "lifecycle_failed"
+    assert record["diagnostics"]["devsy_invoked"] is False
+    assert record["exception_type"] == "ScopeError"
+    assert record["finished_at"] >= record["started_at"]
+    assert record["retry_safe"] is False
     assert calls == []
 
 

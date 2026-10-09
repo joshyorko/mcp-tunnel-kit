@@ -358,3 +358,117 @@ def test_saturated_http_returns_503_without_dispatch(tmp_path):
         thread.join()
         for _ in range(8):
             server.slots.release()
+
+
+def scoped_fixture(tmp_path, body):
+    import hashlib
+    import json
+    import os
+    import sys
+    module = bridge()
+    binary = tmp_path / 'fake-devsy'
+    binary.write_text('#!' + sys.executable + '\n' + body)
+    binary.chmod(0o700)
+    scope = json.loads((ROOT / 'docs/devsy-worker-scope.proposed.json').read_text())
+    scope.update(enabled=True, expires_at=None, bindings={}, binary=str(binary),
+                 capability_sha256=hashlib.sha256(b'fixture-owner-secret').hexdigest())
+    config = tmp_path / 'scope.json'
+    config.write_text(json.dumps(scope))
+    config.chmod(0o600)
+    devsy = module.Devsy(str(binary), str(tmp_path), dict(os.environ, DEVSY_HOME=str(tmp_path)),
+                        creation_state=tmp_path / 'receipts', scope_source=config)
+    return devsy, scope
+
+
+def test_scoped_supervisor_passes_commit_source_and_execution_context(tmp_path):
+    import json
+    devsy, scope = scoped_fixture(tmp_path, '''import json, os, sys
+from pathlib import Path
+Path('invocation.json').write_text(json.dumps({'args': sys.argv[1:], 'home': os.environ['DEVSY_HOME']}))
+''')
+    result = devsy.scoped_execute('create', 'cas-worker-01', scope)
+    invocation = json.loads((tmp_path / 'invocation.json').read_text())
+    assert 'git:https://github.com/joshyorko/codex-action-server.git@sha256:bf0b3823e033b9b5abd86904e0a565d6b3586206' in invocation['args']
+    assert invocation['home'] == str(tmp_path)
+    assert result['exit_code'] == 0
+    assert result['devsy_invoked'] is True
+
+
+def test_scoped_supervisor_retains_exit_without_leaking_stderr(tmp_path):
+    import json
+    devsy, scope = scoped_fixture(tmp_path, '''import sys
+sys.stderr.write('fatal: Remote branch missing not found in upstream origin\\nPRIVATE_TOKEN=do-not-retain\\n')
+sys.exit(17)
+''')
+    result = devsy.scoped_execute('create', 'cas-worker-01', scope)
+    assert result['exit_code'] == 17
+    assert result['devsy_invoked'] is True
+    assert result['stderr_code'] == 'git_ref_not_found'
+    assert 'do-not-retain' not in json.dumps(result)
+
+
+def test_scoped_receipt_exposes_same_operation_and_nested_error(tmp_path):
+    devsy, _ = scoped_fixture(tmp_path, 'raise SystemExit(0)\n')
+    devsy.scope.root()
+    devsy.scope.write('cas-worker-01', {'name': 'cas-worker-01', 'operation_id': 'incident',
+        'request_id': 'request-1', 'operation': 'create', 'status': 'outcome_unknown', 'retry_safe': False})
+    credential = 'Bearer fixture-owner-secret'
+    status = devsy.call('workspace_status_scoped', {'name': 'cas-worker-01'}, credential)
+    receipt = devsy.call('workspace_create_receipt', {'name': 'cas-worker-01'}, credential)
+    assert receipt['structuredContent']['operation_id'] == status['structuredContent']['operation_id']
+    assert receipt['structuredContent']['status'] == 'outcome_unknown'
+    assert receipt['isError'] is True
+    assert receipt['structuredContent']['retry_safe'] is False
+
+
+def test_raw_create_cannot_bypass_scoped_duplicate_protection(tmp_path):
+    import pytest
+    devsy, _ = scoped_fixture(tmp_path, 'raise SystemExit(0)\n')
+    with pytest.raises(Exception, match='scoped'):
+        devsy.call('workspace_create', {'name': 'cas-worker-01', 'source': 'git:https://example.invalid/repo'},
+                   'Bearer fixture-owner-secret')
+
+
+def test_scoped_outer_exception_never_claims_no_invocation(monkeypatch, capsys):
+    import json
+    import sys
+    module = bridge()
+    def unexpected(*_args):
+        raise OSError('post-launch cleanup failure with private details')
+    monkeypatch.setattr(module, 'scoped_child', unexpected)
+    monkeypatch.setattr(sys, 'argv', ['bridge', '--scoped-child', '/unused', '1', 'create', 'cas-worker-01'])
+    assert module.main() == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result.get('devsy_invoked') is not False
+    assert result['exit_code'] != 0
+    assert 'private details' not in json.dumps(result)
+
+
+def test_scoped_large_output_is_drained_and_not_retained(tmp_path):
+    import json
+    devsy, scope = scoped_fixture(tmp_path, "import sys\nsys.stderr.write('sensitive' * 100000)\nsys.exit(9)\n")
+    result = devsy.scoped_execute('create', 'cas-worker-01', scope)
+    assert result['exit_code'] == 9
+    assert result['devsy_invoked'] is True
+    assert len(json.dumps(result)) < 500
+    assert 'sensitive' not in json.dumps(result)
+
+
+def test_scoped_supervisor_timeout_stays_unknown_and_reaps_child(tmp_path):
+    import json
+    import time
+    devsy, scope = scoped_fixture(tmp_path, '''import os, time
+from pathlib import Path
+Path('devsy-pid').write_text(str(os.getpid()))
+time.sleep(60)
+''')
+    # Shorten only the parent's test deadline; child still loads the approved scope.
+    result = devsy.scoped_execute('create', 'cas-worker-01', {**scope, 'job_timeout_seconds': 0.01})
+    assert result['phase'] == 'supervisor_timeout'
+    assert result.get('devsy_invoked') is not False
+    pid = int((tmp_path / 'devsy-pid').read_text())
+    module = bridge()
+    deadline = time.monotonic() + 2
+    while module.process_identity(pid) and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert module.process_identity(pid) is None

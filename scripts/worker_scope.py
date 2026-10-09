@@ -207,6 +207,13 @@ class WorkerScope:
                     and not (active and active.is_alive())
                 ):
                     record["status"] = "outcome_unknown"
+                    record["retry_safe"] = False
+                    record["error_code"] = "lifecycle_outcome_unknown"
+                    record["finished_at"] = time.time()
+                    record["diagnostics"] = {
+                        **record.get("diagnostics", {}),
+                        "phase": "worker_lost",
+                    }
                     self.write(name, record)
                 if not mutation:
                     result = record or {"name": name, "status": "not_submitted"}
@@ -220,6 +227,8 @@ class WorkerScope:
                     return result
                 operation = "create" if tool == "workspace_create_scoped" else "start"
                 if operation == "create" and record:
+                    return record
+                if record and record["status"] == "outcome_unknown":
                     return record
                 if active and active.is_alive():
                     return record
@@ -244,6 +253,14 @@ class WorkerScope:
                     "request_id": arguments["request_id"],
                     "status": "accepted",
                     "retry_safe": False,
+                    "execution_context": {
+                        key: scope[key]
+                        for key in (
+                            "context", "provider", "kubernetes_context", "namespace",
+                            "repository", "revision", "recipe", "binary",
+                        )
+                        if key in scope
+                    },
                 }
                 if expected_uid:
                     record["workspace_uid"] = expected_uid
@@ -260,16 +277,49 @@ class WorkerScope:
 
     def run(self, record, scope, expected_uid):
         name = record["name"]
+        record["started_at"] = time.time()
+        record["diagnostics"] = {"phase": "preflight", "devsy_invoked": False}
         try:
-            self.load()
             record["status"] = "running"
             self.write(name, record)
-            self.invoke(record["operation"], name, scope)
-            record["workspace_uid"] = self.verified(name, scope, expected_uid)
-            record["status"] = "completed"
-        except Exception:
-            record["status"] = "outcome_unknown"
-            record["error_code"] = "lifecycle_outcome_unknown"
+            self.load()
+            record["diagnostics"] = {"phase": "invoke", "devsy_invoked": None}
+            self.write(name, record)
+            result = self.invoke(record["operation"], name, scope)
+            if result is not None:
+                record["diagnostics"].update(
+                    {
+                        key: result[key]
+                        for key in ("phase", "exit_code", "devsy_invoked", "stderr_code")
+                        if key in result
+                    }
+                )
+            self.write(name, record)
+            if result is not None and result.get("exit_code", 0) != 0:
+                record["status"] = (
+                    "failed"
+                    if result.get("devsy_invoked") is False
+                    else "outcome_unknown"
+                )
+            else:
+                record["diagnostics"]["phase"] = "verify_workspace"
+                self.write(name, record)
+                record["workspace_uid"] = self.verified(name, scope, expected_uid)
+                record["status"] = "completed"
+        except Exception as exc:
+            record["status"] = (
+                "failed"
+                if record["diagnostics"].get("devsy_invoked") is False
+                else "outcome_unknown"
+            )
+            record["exception_type"] = type(exc).__name__
+        if record["status"] != "completed":
+            record["error_code"] = (
+                "lifecycle_failed"
+                if record["status"] == "failed"
+                else "lifecycle_outcome_unknown"
+            )
+        record["finished_at"] = time.time()
         self.write(name, record)
 
     def wait(self):
