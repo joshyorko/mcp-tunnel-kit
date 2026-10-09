@@ -655,3 +655,20 @@ def test_revoked_worker_scope_does_not_disable_static_worker_diagnostics(tmp_pat
     result = devsy.call('workspace_diagnostics', {'name': 'existing-worker', 'workspace_uid': 'existing-uid'})
     assert result['structuredContent']['static_worker'] is True
     assert result['isError'] is False
+
+
+def test_expanded_scope_cannot_hide_generic_unknown_receipt(tmp_path):
+    import pytest
+    devsy, _ = scoped_fixture(tmp_path, 'raise SystemExit(0)\n')
+    _, receipts = devsy.receipts()
+    receipts.private_root()
+    key, fingerprint = receipts.key({'name': 'rcc-worker-01'})
+    receipts.write(receipts.state / (key + '.json'), {'name': 'rcc-worker-01', 'operation_id': 'legacy',
+                   'fingerprint': fingerprint, 'status': 'outcome_unknown'})
+    for tool in ('workspace_status_scoped', 'workspace_create_receipt', 'workspace_create_scoped'):
+        args = {'name': 'rcc-worker-01'}
+        if tool == 'workspace_create_scoped':
+            args['request_id'] = 'fresh'
+        with pytest.raises(Exception, match='requires operator migration'):
+            devsy.call(tool, args, 'Bearer fixture-owner-secret')
+    assert devsy.scope.read('rcc-worker-01') is None

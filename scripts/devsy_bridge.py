@@ -376,6 +376,13 @@ class Devsy:
                 scope_receipt = (name == 'workspace_create_receipt' and isinstance(arguments, dict)
                                  and arguments.get('name') in self.scope.load()['allowed_new_names'])
                 if name in self.scope_module.MUTATIONS | self.scope_module.READS or scope_receipt:
+                    if (self.creation_state and isinstance(arguments, dict)
+                            and arguments.get('name') in self.scope.load()['allowed_new_names']
+                            and self.scope.read(arguments['name']) is None):
+                        _, legacy_receipts = self.receipts()
+                        legacy = legacy_receipts.poll({'name': arguments['name']})['structuredContent']
+                        if legacy['status'] != 'not_submitted':
+                            raise BridgeError('Legacy creation receipt requires operator migration before scoped admission.')
                     value = self.scope.call('workspace_status_scoped' if scope_receipt else name,
                                             arguments, credential)
                     value = self.discover_owned(value, credential)

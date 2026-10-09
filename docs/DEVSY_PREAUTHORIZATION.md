@@ -99,3 +99,28 @@ Host-network CAS requests to the configured bridge gateway use a loopback source
 New workers require no per-UID target-file edit or service restart. Enabling the registry reader requires one CAS rollout. An unknown legacy operation without a recorded UID requires evidence-based operator reconciliation before it can be registered; discovering a matching name alone never adopts it.
 
 The pinned disposable Executor test proves API-only private profile setup, zero browser approval on first scoped creation, duplicate suppression, protected-name refusal and ordinary deletion approval. Live discovery/status verifies the activated profile without creating a worker. Real cluster provisioning and starting a stopped worker were not exercised destructively during activation.
+
+### RCC worker migration and provisioning
+
+The owner scope admits `cas-worker-01` and `rcc-worker-01`, with at most two
+inventory workspaces and one unresolved creation at a time. Both use the CAS
+remote-worker recipe from main. The engineering repository is a separate checkout;
+creating directly from the RCC repository does not install a native Codex daemon.
+
+An existing generic creation receipt prevents scoped admission until explicitly
+migrated. Stop the managed Devsy bridge before changing the approved scope and
+running `scripts/migrate_legacy_worker.py`. The helper also takes the daemon lock;
+it cannot run alongside the bridge. It accepts the bridge config path, private
+capability-file path, exact original operation ID and fingerprint, observed RCC
+workspace UID, and original creation timestamp (Unix seconds). It binds those
+values to the preserved receipt, holds generic and scoped admission locks, and
+runs fresh provider/process/inventory absence checks. Only a complete proof
+records a terminal failure and permits a fresh scoped request ID. A failed proof
+retains an unknown outcome. The historical source/UID are operator evidence and
+are never treated as an adopted workspace identity.
+
+Preserve the existing CAS scoped record during rollout. Recovery tolerates only
+source/provider-verified sibling workspaces and their exact labeled Pod/PVC plus
+UID-bound PV claim. Unrecognized resources still block recovery. After restarting
+the managed bridge, verify scoped status and creation receipt agree before any
+fresh create. Never replay the old generic request or delete its history.

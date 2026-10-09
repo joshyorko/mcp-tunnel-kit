@@ -518,3 +518,45 @@ def test_persistent_capability_has_no_expiry_but_can_be_revoked(tmp_path):
             "Bearer fixture-owner-secret",
         )
     assert calls == []
+
+
+def test_legacy_migration_preserves_unknown_and_requires_proof(tmp_path):
+    import importlib.util
+    import hashlib
+    module, instance, _ = manager(tmp_path)
+    spec = importlib.util.spec_from_file_location('receipt_migration_test', ROOT / 'scripts/creation_receipts.py')
+    receipts_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(receipts_module)
+    receipts = receipts_module.Receipts(tmp_path / 'receipts', 'fixture')
+    receipts.private_root()
+    key, fingerprint = receipts.key({'name': 'rcc-worker-01', 'source': 'git:https://github.com/joshyorko/rcc.git'})
+    original = {'name': 'rcc-worker-01', 'operation_id': '31a1221b-12d4-4693-aa12-461084cf42b7', 'fingerprint': fingerprint, 'status': 'outcome_unknown'}
+    receipts.write(receipts.state / (key + '.json'), original)
+    kwargs = dict(receipts=receipts, name='rcc-worker-01', operation_id=original['operation_id'], fingerprint=fingerprint,
+                  source='git:https://github.com/joshyorko/rcc.git', workspace_uid='default-rc-a74cc',
+                  created_at=time.time()-60, credential='Bearer fixture-owner-secret')
+    with pytest.raises(module.ScopeError):
+        instance.migrate_legacy_creation(**{**kwargs, 'fingerprint': '0'*64})
+    assert instance.read('rcc-worker-01') is None
+    instance.absence = lambda *args: {'kind': 'blocked'}
+    failed = instance.migrate_legacy_creation(**kwargs)
+    assert failed['status'] == 'outcome_unknown' and not failed['new_request_allowed']
+    assert failed['legacy_receipt'] == original
+    instance.absence = lambda *args: {'kind': 'absent', 'namespace_uid': 'ns-id', 'namespace': 'devsy',
+        'kubernetes_context': 'ror', 'observed_at': time.time(), 'workspace_absent': True,
+        'provider_resources_absent': True, 'lifecycle_processes_absent': True}
+    result = instance.migrate_legacy_creation(**kwargs)
+    assert result['status'] == 'failed' and result['new_request_allowed']
+    migrated = receipts.read(receipts.state / (key + '.json'))
+    assert migrated['original_receipt'] == original and migrated['status'] == 'reconciled_scoped'
+    assert not instance.archived_request('rcc-worker-01', result['request_id'])['new_request_allowed']
+
+
+@pytest.mark.parametrize("status", ["running", "accepted", "outcome_unknown"])
+def test_second_worker_waits_for_first_pending_creation(tmp_path, status):
+    module, instance, _ = manager(tmp_path)
+    instance.root()
+    instance.write('cas-worker-01', {'status': status})
+    with pytest.raises(module.ScopeError, match='pending creation limit'):
+        instance.call('workspace_create_scoped', {'name': 'rcc-worker-01', 'request_id': 'fresh'}, 'Bearer fixture-owner-secret')
+    assert instance.read('rcc-worker-01') is None

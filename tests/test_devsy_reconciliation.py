@@ -268,3 +268,29 @@ def test_unrelated_tasks_and_other_namespace_volumes_do_not_block(proof):
     proof.outputs["volumes"] = {"items": [{"metadata": {"name": "dakota-pv", "labels": {"devsy.sh/workspace": "dakota"}},
                                               "spec": {"claimRef": {"namespace": "dakota"}}}]}
     assert proof.check()["kind"] == "absent"
+
+
+def test_recovery_preserves_exact_verified_sibling(proof):
+    proof.scope['allowed_new_names'].append('rcc-worker-01')
+    proof.scope['verified_siblings'] = {'rcc-worker-01': 'default-rc-test'}
+    labels = {'devsy.sh/workspace-uid': 'default-rc-test', 'devsy.sh/managed': 'true', 'devsy.sh/created': 'true'}
+    proof.outputs['resources'] = {'items': [
+        {'kind': 'Pod', 'metadata': {'name': 'devsy-default-rc-test', 'uid': 'pod-id', 'labels': labels}},
+        {'kind': 'PersistentVolumeClaim', 'metadata': {'name': 'devsy-default-rc-test', 'uid': 'claim-id', 'labels': labels}, 'spec': {'volumeName': 'volume-id'}},
+    ]}
+    proof.outputs['volumes'] = {'items': [{'metadata': {'name': 'volume-id'}, 'spec': {'claimRef': {'name': 'devsy-default-rc-test', 'namespace': 'devsy', 'uid': 'claim-id'}}}]}
+    assert proof.check()['kind'] == 'absent'
+    proof.outputs['volumes']['items'][0]['spec']['claimRef']['uid'] = 'wrong-claim'
+    with pytest.raises(proof.module.ReconciliationError):
+        proof.check()
+    proof.outputs['volumes']['items'][0]['spec']['claimRef']['uid'] = 'claim-id'
+    proof.outputs['resources']['items'][0]['metadata']['labels'] = {}
+    with pytest.raises(proof.module.ReconciliationError):
+        proof.check()
+
+
+def test_rcc_name_is_admitted_only_by_scope(proof):
+    with pytest.raises(proof.module.ReconciliationError):
+        proof.module.absence_proof('/fixture/devsy', str(proof.root), proof.env, proof.scope, 'rcc-worker-01')
+    proof.scope['allowed_new_names'].append('rcc-worker-01')
+    assert proof.module.absence_proof('/fixture/devsy', str(proof.root), proof.env, proof.scope, 'rcc-worker-01')['kind'] == 'absent'

@@ -37,7 +37,7 @@ def _refuse():
 
 
 def _configuration(env, scope, name):
-    if (name != "cas-worker-01" or name not in scope["allowed_new_names"]
+    if (name not in scope["allowed_new_names"]
             or name in scope.get("protected_names", []) or scope["provider"] != "kubernetes"):
         _refuse()
     kube = env.get("KUBECONFIG") or str(Path(env["HOME"]) / ".kube/config")
@@ -170,8 +170,29 @@ def absence_proof(binary, cwd, env, scope, name):
             _refuse()
         phase = "resources"
         resources = _query(command + ["--namespace", scope["namespace"], "get", RESOURCES, "-o", "json"], cwd, env)
-        if _items(resources):
+        siblings = scope.get("verified_siblings", {})
+        if (not isinstance(siblings, dict) or name in siblings
+                or any(n not in scope["allowed_new_names"] or n in scope.get("protected_names", [])
+                       or not isinstance(u, str) or not re.fullmatch(r"[a-z0-9-]+", u)
+                       for n, u in siblings.items())):
             _refuse()
+        claims = {}
+        for resource in _items(resources):
+            meta = resource.get("metadata", {})
+            labels = meta.get("labels", {})
+            sibling_uid = labels.get("devsy.sh/workspace-uid")
+            if (resource.get("kind") not in {"Pod", "PersistentVolumeClaim"}
+                    or sibling_uid not in siblings.values()
+                    or labels.get("devsy.sh/created") != "true"
+                    or (resource.get("kind") == "PersistentVolumeClaim" and labels.get("devsy.sh/managed") != "true")
+                    or meta.get("name") != "devsy-" + sibling_uid
+                    or not meta.get("uid") or meta.get("deletionTimestamp")):
+                _refuse()
+            if resource["kind"] == "PersistentVolumeClaim":
+                volume_name = resource.get("spec", {}).get("volumeName")
+                if not isinstance(volume_name, str) or not volume_name:
+                    _refuse()
+                claims[meta["name"]] = (meta["uid"], volume_name)
         phase = "auxiliary_resources"
         # kubectl may fetch full objects internally; emit and retain metadata only.
         auxiliary = _query(command + ["--namespace", scope["namespace"], "get",
@@ -197,7 +218,10 @@ def absence_proof(binary, cwd, env, scope, name):
             if not isinstance(metadata.get("name"), str) or not metadata["name"]:
                 _refuse()
             markers = json.dumps(metadata, sort_keys=True).lower()
-            if claim.get("namespace") == scope["namespace"] or (not claim and "devsy" in markers):
+            if claim.get("namespace") == scope["namespace"]:
+                if claims.get(claim.get("name")) != (claim.get("uid"), metadata["name"]):
+                    _refuse()
+            elif not claim and "devsy" in markers:
                 _refuse()
         phase = "recheck"
         _configuration(env, scope, name)

@@ -41,7 +41,7 @@ def tools():
     result = []
     for tool in sorted(MUTATIONS | READS):
         mutation = tool in MUTATIONS
-        properties = {"name": {"type": "string", "enum": ["cas-worker-01"]}}
+        properties = {"name": {"type": "string", "enum": ["cas-worker-01", "rcc-worker-01"]}}
         if mutation:
             properties["request_id"] = {
                 "type": "string",
@@ -52,7 +52,7 @@ def tools():
             {
                 "name": tool,
                 "description": (
-                    "Submit one approved owner-scoped lifecycle job; poll workspace_status_scoped. Never replay an uncertain job."
+                    "Submit one approved owner-scoped lifecycle job using the Codex Action Server bootstrap recipe from main. Clone engineering repositories into separate workspaces after readiness. Poll workspace_status_scoped; never replay an uncertain job."
                     if mutation
                     else "Read and reconcile the owner scope job without provisioning. Only new_request_allowed=true permits one fresh create request ID; never replay an old ID."
                 ),
@@ -273,6 +273,22 @@ class WorkerScope:
                        and 0 < value <= time.time()]
             # A later capability renewal must not hide this operation's remnants.
             proof_scope = {**scope, "recovery_cutoff": min(cutoffs) if cutoffs else None}
+            siblings = {}
+            for sibling in scope["allowed_new_names"]:
+                if sibling == record["name"]:
+                    continue
+                sibling_record = self.read(sibling)
+                if not sibling_record or sibling_record.get("status") != "completed":
+                    continue
+                sibling_uid = sibling_record.get("workspace_uid")
+                row = self.verified_row(sibling, scope, sibling_uid)
+                execution = self.execution_context(sibling_record, scope)
+                if (row.get("source", {}).get("gitCommit") != execution["revision"]
+                        or row.get("devContainerPath") != execution["recipe"]
+                        or row["provider"]["options"].get("KUBERNETES_CONFIG", {}).get("value") not in scope.get("bindings", {})):
+                    raise ScopeError("Sibling source or provider binding changed.")
+                siblings[sibling] = sibling_uid
+            proof_scope["verified_siblings"] = siblings
             evidence = self.absence(record["name"], proof_scope)
             if (not isinstance(evidence, dict) or evidence.get("kind") != "absent"
                     or any(evidence.get(key) is not True for key in (
@@ -311,6 +327,72 @@ class WorkerScope:
             if record.get("name") == name and record.get("request_id") == request_id:
                 return {**record, "new_request_allowed": False, "retry_safe": False, "replayed_receipt": True}
         return None
+
+    def migrate_legacy_creation(self, *, receipts, name, operation_id, fingerprint,
+                                source, workspace_uid, created_at, credential):
+        """Operator-only migration; never provisions or relaxes duplicate admission.
+
+        Source and UID are historical operator evidence, not adopted workspace
+        identity. The original receipt and fresh absence proof remain durable.
+        Run with the bridge stopped while extending its approved name scope.
+        """
+        scope = self.authenticate(credential)
+        if (name != "rcc-worker-01" or name not in scope["allowed_new_names"]
+                or name in scope["protected_names"]
+                or source != "git:https://github.com/joshyorko/rcc.git"
+                or not isinstance(workspace_uid, str)
+                or not re.fullmatch(r"default-rc-[a-z0-9]+", workspace_uid)
+                or not isinstance(fingerprint, str) or not re.fullmatch(r"[a-f0-9]{64}", fingerprint)
+                or not isinstance(operation_id, str)
+                or not re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", operation_id)
+                or isinstance(created_at, bool) or not isinstance(created_at, (int, float))
+                or not math.isfinite(created_at) or not 0 < created_at < time.time()):
+            raise ScopeError("Legacy migration identity or cutoff refused.")
+        self.root()
+        receipts.private_root()
+        key, _ = receipts.key({"name": name})
+        with self.mutex:
+            descriptors = []
+            try:
+                for path in (self.state / "admission.lock", receipts.state / (key + ".lock")):
+                    fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+                    descriptors.append(fd)
+                    info = os.fstat(fd)
+                    if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                            or stat.S_IMODE(info.st_mode) != 0o600):
+                        raise ScopeError("Unsafe migration lock.")
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                legacy_path = receipts.state / (key + ".json")
+                stored = receipts.read(legacy_path)
+                original = stored.get("original_receipt", stored) if stored else None
+                if (not original or original.get("name") != name
+                        or original.get("operation_id") != operation_id
+                        or original.get("fingerprint") != fingerprint
+                        or original.get("status") != "outcome_unknown"):
+                    raise ScopeError("Legacy receipt does not match migration evidence.")
+                record = self.read(name)
+                evidence = {"source": source, "workspace_uid": workspace_uid, "created_at": created_at}
+                if record and (record.get("operation_id") != operation_id
+                               or record.get("legacy_receipt") != original
+                               or record.get("legacy_identity") != evidence):
+                    raise ScopeError("Existing scoped record prevents legacy migration.")
+                if not record:
+                    record = {"name": name, "operation_id": operation_id, "operation": "create",
+                              "request_id": "legacy-" + operation_id, "status": "outcome_unknown",
+                              "retry_safe": False, "new_request_allowed": False,
+                              "accepted_at": created_at, "legacy_receipt": original,
+                              "legacy_identity": evidence}
+                    self.write(name, record)
+                record = self.reconcile(record, scope)
+                if record.get("new_request_allowed") is True:
+                    self.archive(record)
+                    receipts.write(legacy_path, {**original, "status": "reconciled_scoped",
+                        "original_receipt": original, "scoped_operation_id": operation_id,
+                        "reconciliation": record["reconciliation"]})
+                return record
+            finally:
+                for fd in reversed(descriptors):
+                    os.close(fd)
 
     def archive(self, record):
         key = "history-" + hashlib.sha256(record["operation_id"].encode()).hexdigest()
@@ -403,7 +485,14 @@ class WorkerScope:
                 if active and active.is_alive():
                     return record
                 if operation == "create":
-                    if name in self.inventory():
+                    existing_names = self.inventory()
+                    pending = sum(1 for sibling in scope["allowed_new_names"]
+                                  if sibling != name and (self.read(sibling) or {}).get("status") in {"accepted", "running", "outcome_unknown"})
+                    if pending >= scope["max_pending_creates"]:
+                        raise ScopeError("Scoped pending creation limit reached.")
+                    if len(existing_names) >= scope["max_active_workspaces"]:
+                        raise ScopeError("Scoped workspace capacity reached.")
+                    if name in existing_names:
                         raise ScopeError(
                             "Existing workspace is not owned by this creation receipt; no adoption or recreation."
                         )
