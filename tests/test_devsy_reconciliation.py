@@ -294,3 +294,35 @@ def test_rcc_name_is_admitted_only_by_scope(proof):
         proof.module.absence_proof('/fixture/devsy', str(proof.root), proof.env, proof.scope, 'rcc-worker-01')
     proof.scope['allowed_new_names'].append('rcc-worker-01')
     assert proof.module.absence_proof('/fixture/devsy', str(proof.root), proof.env, proof.scope, 'rcc-worker-01')['kind'] == 'absent'
+
+
+@pytest.mark.parametrize('change', [None, 'target', 'id_flag', 'source', 'create', 'recent', 'binary'])
+def test_only_preexisting_exact_verified_sibling_attachment_is_exempt(proof, change):
+    binary = proof.root / 'devsy-binary'
+    binary.write_bytes(b'approved executable')
+    process = proof.proc / '123'
+    process.mkdir()
+    (process / 'exe').symlink_to(binary)
+    (proof.proc / 'stat').write_text('btime 100\n')
+    (process / 'stat').write_text('123 (devsy) S ' + '0 ' * 18 + '100\n')
+    proof.scope['allowed_new_names'].append('rcc-worker-01')
+    proof.scope['verified_siblings'] = {'rcc-worker-01': 'default-rc-fixture'}
+    argv = ['/fixture/devsy', 'workspace', 'up', 'rcc-worker-01', '--ide', 'vscode-insiders',
+            '--ide-launch', 'auto', '--log-level', 'info', '--result-format', 'json',
+            '--log-output', 'json', '--task-id', 'fixturetask']
+    if change == 'target': argv[3] = 'cas-worker-01'
+    if change == 'source': argv[3] = 'git:https://example.invalid/repo'
+    if change == 'create': argv[2] = 'create'
+    if change == 'id_flag': argv += ['--id', 'rcc-worker-01']
+    if change == 'recent': proof.scope['recovery_cutoff'] = 100
+    if change == 'binary':
+        other = proof.root / 'different-binary'
+        other.write_bytes(b'unapproved executable')
+        (process / 'exe').unlink()
+        (process / 'exe').symlink_to(other)
+    (process / 'cmdline').write_bytes(b'\0'.join(a.encode() for a in argv))
+    if change is None:
+        proof.module._processes_absent(str(binary), proof.scope, 'cas-worker-01')
+    else:
+        with pytest.raises(proof.module.ReconciliationError):
+            proof.module._processes_absent(str(binary), proof.scope, 'cas-worker-01')

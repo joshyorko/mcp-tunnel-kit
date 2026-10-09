@@ -53,7 +53,42 @@ def _configuration(env, scope, name):
     return kube
 
 
-def _processes_absent(binary):
+def _preexisting_sibling_attachment(process, argv, binary, scope, name):
+    """Exempt only the desktop's exact old attachment to a verified sibling.
+
+    No source, ID override, create/start, scoped child, unknown argument, newer
+    process, or different executable may borrow this exception.
+    """
+    if not scope or len(argv) != 16 or argv[1:3] != ["workspace", "up"]:
+        return False
+    sibling = argv[3]
+    if (sibling == name or sibling not in scope.get("verified_siblings", {})
+            or sibling not in scope["allowed_new_names"]
+            or sibling in scope.get("protected_names", [])):
+        return False
+    if (argv[4:14] != ["--ide", "vscode-insiders", "--ide-launch", "auto",
+                       "--log-level", "info", "--result-format", "json", "--log-output", "json"]
+            or argv[14] != "--task-id" or not re.fullmatch(r"[a-z0-9]{1,64}", argv[15])):
+        return False
+    cutoff = scope.get("recovery_cutoff")
+    if (isinstance(cutoff, bool) or not isinstance(cutoff, (int, float))
+            or not math.isfinite(cutoff) or not 0 < cutoff <= time.time()):
+        return False
+    fields = process.joinpath("stat").read_text().rsplit(")", 1)[1].split()
+    boot = next(int(line.split()[1]) for line in PROC_ROOT.joinpath("stat").read_text().splitlines()
+                if line.startswith("btime "))
+    started = boot + int(fields[19]) / os.sysconf("SC_CLK_TCK")
+    if started >= cutoff - 1:
+        return False  # boot time has one-second resolution; deny the boundary.
+    with open(binary, "rb") as approved, process.joinpath("exe").open("rb") as actual:
+        if hashlib.file_digest(approved, "sha256").digest() != hashlib.file_digest(actual, "sha256").digest():
+            return False
+    # Detect PID reuse or argv changes while checking executable provenance.
+    return (process.joinpath("stat").read_text().rsplit(")", 1)[1].split()[19] == fields[19]
+            and [part.decode("utf-8", errors="replace") for part in process.joinpath("cmdline").read_bytes().split(b"\0") if part] == argv)
+
+
+def _processes_absent(binary, scope=None, name=None):
     for process in PROC_ROOT.iterdir():
         if not process.name.isdigit():
             continue
@@ -71,7 +106,8 @@ def _processes_absent(binary):
             argv[index:index + 2] in (["workspace", "up"], ["workspace", "create"], ["workspace", "start"])
             for index in range(len(argv) - 1))
         if child or native:
-            _refuse()
+            if child or not _preexisting_sibling_attachment(process, argv, binary, scope, name):
+                _refuse()
 
 
 def _references(value, name):
@@ -149,7 +185,7 @@ def absence_proof(binary, cwd, env, scope, name):
     try:
         kube = _configuration(env, scope, name)
         phase = "processes"
-        _processes_absent(binary)
+        _processes_absent(binary, scope, name)
         phase = "tasks"
         _tasks_absent(env, name)
         phase = "inventory"
@@ -226,7 +262,7 @@ def absence_proof(binary, cwd, env, scope, name):
         phase = "recheck"
         _configuration(env, scope, name)
         _tasks_absent(env, name)
-        _processes_absent(binary)
+        _processes_absent(binary, scope, name)
         return {"kind": "absent", "observed_at": time.time(), "namespace_uid": uid,
                 "kubernetes_context": scope["kubernetes_context"], "namespace": scope["namespace"],
                 "workspace_absent": True, "provider_resources_absent": True,
