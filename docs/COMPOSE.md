@@ -44,10 +44,12 @@ your selected `CAS_IMAGE`, `CAS_TARGETS_SOURCE`, socket, runtime, receipts, or
 state paths with example values. A fresh Executor needs the browser setup below
 before you can add its PAT.
 `CAS_IMAGE` defaults to its published `:latest` tag and also accepts immutable
-digests and full SHA tags. Executor is pinned to v2 beta.8: upstream `:latest`
-currently selects v1.6.10 with a different runtime UID, incompatible with this
-stack and its retained storage. Executor and tunnel-client are pinned by exact
-release and immutable digest in `compose.yaml`.
+digests and full SHA tags. `EXECUTOR_IMAGE` defaults to v2 beta.12 pinned by
+its immutable digest. There is no final v2 release published yet. Upstream
+Executor `:latest` points
+to v1.6.10, which is incompatible with this v2 stack and retained storage.
+Override `EXECUTOR_IMAGE` with a release tag or digest when a fixed version is
+needed. The tunnel-client image remains pinned.
 
 Normal `scripts/control-plane-up` refreshes configured images before starting
 services, including cached `:latest` tags. A failed pull stops startup and
