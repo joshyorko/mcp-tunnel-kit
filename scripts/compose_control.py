@@ -840,8 +840,8 @@ def status():
 
 def restart_cas(configuration):
     image = configuration['services']['codex-action-server']['image']
-    if not re.fullmatch(r'ghcr\.io/joshyorko/codex-action-server(?::sha-[0-9a-f]{40}|@sha256:[0-9a-f]{64})', image):
-        raise ControlError('Pin the verified immutable CAS image before a CAS-only rollout.')
+    if not re.fullmatch(r'ghcr\.io/joshyorko/codex-action-server(?::latest|:sha-[0-9a-f]{40}|@sha256:[0-9a-f]{64})', image):
+        raise ControlError('Use the published CAS latest tag or a verified immutable image for a CAS-only rollout.')
     network_preflight(configuration)
     compose('pull', 'codex-action-server', timeout=600)
     compose('up', '-d', '--no-deps', '--wait', '--wait-timeout', '120', 'codex-action-server', timeout=150)
