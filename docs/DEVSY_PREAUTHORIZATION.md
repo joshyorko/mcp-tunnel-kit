@@ -90,6 +90,8 @@ Each scoped job copies its hash-bound Devsy config into that private directory a
 
 Scoped status verifies the admitted worker's source, pinned commit, recipe, cluster, and UID. The first observed UID is retained for that operation. Diagnostics accept this verified identity without changing the existing operator-pinned diagnostic target. A replacement UID, revoked scope, or changed binding is refused.
 
+Use `workspace_diagnostics` for CPU, available memory, workspace disk, daemon, and login checks. This fixed read-only probe needs no browser approval and uses the UID-checked Kubernetes route. Capacity values are snapshots, not reserved resources. Do not use generic `workspace_exec` for this check: arbitrary command execution remains approval-gated.
+
 The bridge publishes verified workers into a separate private `cas/dynamic-targets.json` registry. Static targets such as `local` and `devsy` are never overwritten. CAS reads the registry on each call and checks the bridge's private `/worker-authorized` endpoint for current scope authorization. Revocation or an unavailable authority blocks dynamic access while static routes remain available. Native Devsy metadata must still match every published cluster and source binding before CAS connects.
 
 Host-network CAS requests to the configured bridge gateway use a loopback source address. The bridge's peer restriction is unchanged; other private authorities use normal routing.

@@ -119,3 +119,25 @@ def test_scope_owned_selection_uses_approved_cluster_and_no_static_rebind(tmp_pa
     monkeypatch.setattr(module, '_run', lambda *args: pytest.fail('Changed cluster must not be queried'))
     with pytest.raises(module.DiagnosticError):
         module.diagnose(source, arguments, lambda *args: {'structuredContent': row}, None, selection=approved)
+
+
+def test_capacity_probe_returns_only_bounded_numeric_fields(tmp_path, monkeypatch):
+    module = helper()
+    row = {'id': 'codex-action-server', 'uid': 'default-co-f715f', 'context': 'default',
+           'provider': {'name': 'kubernetes', 'options': {'KUBERNETES_CONTEXT': {'value': 'ror'},
+             'KUBERNETES_NAMESPACE': {'value': 'devsy'}, 'KUBERNETES_CONFIG': {'value': '/fixture/kubeconfig'}}}}
+    pod = {'metadata': {'name': 'worker', 'namespace': 'devsy', 'uid': 'pod-1',
+           'labels': {'devsy.sh/workspace-uid': row['uid']}},
+           'spec': {'containers': [{'name': 'devsy'}]}, 'status': {'phase': 'Running'}}
+    output = 'capacity=' + json.dumps({'cpu_effective_cores': 4.0, 'memory_available_bytes': 1024,
+        'workspace_free_bytes': 2048, 'workspace_total_bytes': 4096, 'secret': 'PRIVATE'}) + '\n'
+    def run(args, env):
+        if 'pods' in args: return json.dumps({'items': [pod]})
+        if 'exec' in args: return output
+        return json.dumps(pod)
+    monkeypatch.setattr(module, '_run', run)
+    result = module.diagnose(selected(tmp_path), {'name': row['id'], 'workspace_uid': row['uid']},
+                              lambda *args: {'structuredContent': row}, None)
+    assert result['capacity']['cpu_effective_cores'] == 4.0
+    assert result['capacity']['workspace_free_bytes'] == 2048
+    assert 'PRIVATE' not in json.dumps(result)
