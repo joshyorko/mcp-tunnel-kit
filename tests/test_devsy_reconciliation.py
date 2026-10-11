@@ -50,6 +50,9 @@ def proof(tmp_path, monkeypatch):
         else:
             assert args[0] == str(kubectl)
             assert args[1:6] == ["--kubeconfig", str(kube), "--context", "ror", "--request-timeout=5s"]
+            if args[-2:] == ["-o", "jsonpath={.metadata}"]:
+                value = outputs["retained_metadata"]
+                return SimpleNamespace(returncode=0, stdout=json.dumps(value() if callable(value) else value), stderr="SECRET")
             assert args[-2:] == ["-o", "json"] or args[-3:] == ["-o", "custom-columns=KIND:.kind,NAME:.metadata.name,UID:.metadata.uid,CREATED:.metadata.creationTimestamp", "--no-headers"]
             if "namespace" in args:
                 key = "namespace"
@@ -369,3 +372,75 @@ def test_target_absence_rechecks_inventory(proof, target_check):
     proof.outputs["inventory"] = changing
     with pytest.raises(proof.module.ReconciliationError):
         target_check()
+
+@pytest.fixture
+def retained(proof):
+    metadata = {"name": "operator-access", "namespace": "devsy",
+                "uid": "00000000-0000-4000-8000-000000000003",
+                "creationTimestamp": "2026-10-11T17:04:52Z", "resourceVersion": "123",
+                "labels": {"migration-issue": "16"}}
+    proof.outputs["auxiliary_resources"] += "Secret operator-access " + metadata["uid"] + " " + metadata["creationTimestamp"] + "\n"
+    proof.outputs["retained_metadata"] = metadata
+    data = {"version": 1, "namespace": "devsy", "namespace_uid": "namespace-123",
+            "kubernetes_context": "ror", "evidence": "Operator-created access object, separate migration receipt",
+            "objects": [{"kind": "Secret", "metadata": dict(metadata)}]}
+    path = proof.root / "retained.json"
+    def save():
+        path.write_text(json.dumps(data)); path.chmod(0o600)
+        proof.scope["bindings"][str(path)] = hashlib.sha256(path.read_bytes()).hexdigest()
+        proof.scope["retained_auxiliary_file"] = str(path)
+    save()
+    return SimpleNamespace(data=data, path=path, save=save, metadata=metadata)
+
+
+def test_attested_unrelated_new_object_allows_full_proof(proof, retained):
+    result = proof.check()
+    assert result["kind"] == "absent"
+    assert result["retained_auxiliary_count"] == 1
+    assert "operator-access" not in json.dumps(result)
+    assert sum(c[-1] == "jsonpath={.metadata}" for c in proof.calls) == 2
+
+
+@pytest.mark.parametrize("field,value", [
+    ("uid", "00000000-0000-4000-8000-000000000004"), ("resourceVersion", "124"),
+    ("namespace", "other"), ("name", "other"), ("deletionTimestamp", "2026-10-11T18:00:00Z"),
+    ("ownerReferences", [{"uid": "worker-uid"}]), ("labels", {"devsy.sh/created": "true"}),
+])
+def test_changed_or_worker_owned_attested_object_blocks(proof, retained, field, value):
+    retained.metadata[field] = value
+    with pytest.raises(proof.module.ReconciliationError):
+        proof.check()
+
+
+def test_attestation_cannot_authorize_worker_owned_object(proof, retained):
+    retained.data["objects"][0]["metadata"]["labels"] = {"devsy.sh/workspace-uid": "old"}
+    retained.save()
+    with pytest.raises(proof.module.ReconciliationError): proof.check()
+
+
+@pytest.mark.parametrize("change", ["namespace", "context", "evidence", "unbound", "mode", "tamper", "duplicate"])
+def test_invalid_attestation_fails_closed(proof, retained, change):
+    if change == "namespace": retained.data["namespace_uid"] = "other"
+    if change == "context": retained.data["kubernetes_context"] = "other"
+    if change == "evidence": retained.data["evidence"] = ""
+    if change == "duplicate": retained.data["objects"] *= 2
+    retained.save()
+    if change == "unbound": del proof.scope["bindings"][str(retained.path)]
+    if change == "mode": retained.path.chmod(0o644)
+    if change == "tamper": retained.path.write_text('{}')
+    with pytest.raises(proof.module.ReconciliationError): proof.check()
+
+
+def test_object_change_during_full_proof_blocks(proof, retained):
+    count = 0
+    def changing():
+        nonlocal count
+        count += 1
+        return {**retained.metadata, "resourceVersion": "123" if count == 1 else "124"}
+    proof.outputs["retained_metadata"] = changing
+    with pytest.raises(proof.module.ReconciliationError): proof.check()
+
+
+def test_attestation_does_not_allow_other_new_auxiliary_objects(proof, retained):
+    proof.outputs["auxiliary_resources"] += "Role unknown 00000000-0000-4000-8000-000000000004 2026-10-11T17:04:52Z\n"
+    with pytest.raises(proof.module.ReconciliationError): proof.check()

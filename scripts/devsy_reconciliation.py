@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 import time
 import uuid
@@ -208,10 +209,66 @@ def target_absence_proof(binary, cwd, env, scope, target):
         raise ReconciliationError(phase) from None
 
 
-def _preexisting_auxiliary(output, recovery_cutoff):
+def _retained_auxiliary(scope, namespace_uid):
+    """Load operator provenance, never derive exemptions from live inventory."""
+    path = scope.get("retained_auxiliary_file")
+    if path is None:
+        return {}
+    if not isinstance(path, str) or not Path(path).is_absolute() or path not in scope["bindings"]:
+        _refuse()
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd, "rb") as handle:
+        info = os.fstat(handle.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o600:
+            _refuse()
+        raw = handle.read()
+    if hashlib.sha256(raw).hexdigest() != scope["bindings"][path]:
+        _refuse()
+    value = json.loads(raw)
+    if (value.get("version") != 1 or value.get("namespace_uid") != namespace_uid
+            or any(value.get(key) != scope[key] for key in ("namespace", "kubernetes_context"))
+            or not isinstance(value.get("evidence"), str) or not value["evidence"].strip()
+            or not isinstance(value.get("objects"), list) or not value["objects"]):
+        _refuse()
+    retained = {}
+    for item in value["objects"]:
+        kind, metadata = item["kind"], item["metadata"]
+        if kind not in {"Secret", "ConfigMap", "Role", "RoleBinding", "ServiceAccount"}:
+            _refuse()
+        _unowned_metadata(metadata, scope["namespace"])
+        key = (kind, metadata["name"])
+        if key in retained:
+            _refuse()
+        retained[key] = metadata
+    return retained
+
+
+def _unowned_metadata(metadata, namespace):
+    if (not isinstance(metadata, dict) or metadata.get("namespace") != namespace
+            or any(not isinstance(metadata.get(key), str) or not metadata[key] for key in
+                   ("name", "uid", "creationTimestamp", "resourceVersion"))
+            or metadata.get("ownerReferences") or metadata.get("deletionTimestamp")
+            or not isinstance(metadata.get("labels", {}), dict)
+            or any("devsy" in key.lower() for key in metadata.get("labels", {}))):
+        _refuse()
+
+
+def _verify_retained(command, cwd, env, retained, namespace):
+    for (kind, name), expected in retained.items():
+        actual = _query(command + ["--namespace", namespace, "get", kind, name,
+                                   "-o", "jsonpath={.metadata}"], cwd, env)
+        _unowned_metadata(actual, namespace)
+        # resourceVersion pins all object changes, including data not fetched here.
+        keys = ("name", "namespace", "uid", "creationTimestamp", "resourceVersion", "labels", "ownerReferences")
+        if any(actual.get(key) != expected.get(key) for key in keys):
+            _refuse()
+
+
+def _preexisting_auxiliary(output, recovery_cutoff, retained=None):
     """Only metadata predating the original operation can explain leftovers."""
     count = 0
     seen = set()
+    retained = retained or {}
     for line in output.splitlines():
         fields = line.split()
         if len(fields) != 4:
@@ -232,9 +289,16 @@ def _preexisting_auxiliary(output, recovery_cutoff):
         timestamp = Decimal(int(whole)) + Decimal(match[2] or "0")
         if (kind, name) in {("ConfigMap", "kube-root-ca.crt"), ("ServiceAccount", "default")}:
             continue
+        pinned = retained.get((kind, name))
+        if pinned is not None:
+            if pinned["uid"] != uid or pinned["creationTimestamp"] != created:
+                _refuse()
+            continue
         if not recovery_cutoff or timestamp >= Decimal(str(recovery_cutoff)):
             _refuse()
         count += 1
+    if not retained.keys() <= seen:
+        _refuse()
     return count
 
 
@@ -299,7 +363,9 @@ def absence_proof(binary, cwd, env, scope, name):
         if (isinstance(recovery_cutoff, bool) or not isinstance(recovery_cutoff, (int, float))
                 or not math.isfinite(recovery_cutoff) or recovery_cutoff <= 0 or recovery_cutoff > time.time()):
             recovery_cutoff = 0
-        preexisting_auxiliary_count = _preexisting_auxiliary(auxiliary, recovery_cutoff)
+        retained = _retained_auxiliary(scope, uid)
+        _verify_retained(command, cwd, env, retained, scope["namespace"])
+        preexisting_auxiliary_count = _preexisting_auxiliary(auxiliary, recovery_cutoff, retained)
         phase = "volumes"
         volumes = _query(command + ["get", "persistentvolumes", "-o", "json"], cwd, env)
         for volume in _items(volumes):
@@ -320,6 +386,7 @@ def absence_proof(binary, cwd, env, scope, name):
                 _refuse()
         phase = "recheck"
         _configuration(env, scope, name)
+        _verify_retained(command, cwd, env, retained, scope["namespace"])
         _tasks_absent(env, name)
         _processes_absent(binary, scope, name)
         return {"kind": "absent", "observed_at": time.time(), "namespace_uid": uid,
@@ -327,7 +394,8 @@ def absence_proof(binary, cwd, env, scope, name):
                 "workspace_absent": True, "provider_resources_absent": True,
                 "lifecycle_processes_absent": True,
                 "preexisting_auxiliary_count": preexisting_auxiliary_count,
-                "recovery_cutoff": recovery_cutoff}
+                "recovery_cutoff": recovery_cutoff,
+                "retained_auxiliary_count": len(retained)}
     except Exception:
         # JSON, filesystem, permission, process and provider errors all fail closed.
         # Never chain exceptions: they may contain credential-bearing argv/output.
