@@ -207,3 +207,22 @@ def test_completed_worker_is_not_retired_on_metadata_failure_alone(tmp_path):
     assert current['new_request_allowed'] is False
     assert create(scope, 'unsafe-retry')['operation_id'] == current['operation_id']
     assert calls == []
+
+
+def test_retained_object_proof_keeps_history_and_rechecks_before_admission(tmp_path):
+    _, scope, calls, original = stuck(tmp_path)
+    scope.absence = lambda name, approved: {**proof(name, approved), 'retained_auxiliary_count': 4}
+    result = status(scope)
+    assert result['new_request_allowed'] is True
+    assert result['reconciliation']['retained_auxiliary_count'] == 4
+    assert result['unreconciled_receipt'] == original
+    assert calls == []
+    def changed(*args):
+        error = RuntimeError('changed retained object')
+        error.phase = 'auxiliary_resources'
+        raise error
+    scope.absence = changed
+    result = create(scope, 'fresh-after-object-change')
+    assert result['new_request_allowed'] is False
+    assert result['reconciliation']['phase'] == 'auxiliary_resources'
+    assert calls == []

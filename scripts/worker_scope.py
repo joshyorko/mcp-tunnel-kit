@@ -322,7 +322,7 @@ class WorkerScope:
             record["reconciliation"] = {key: evidence[key] for key in (
                 "kind", "observed_at", "namespace_uid", "namespace", "kubernetes_context",
                 "workspace_absent", "provider_resources_absent", "lifecycle_processes_absent")}
-            for key in ("preexisting_auxiliary_count", "recovery_cutoff"):
+            for key in ("preexisting_auxiliary_count", "retained_auxiliary_count", "recovery_cutoff"):
                 if key in evidence:
                     record["reconciliation"][key] = evidence[key]
             record["status"] = "retired" if retiring else "failed"

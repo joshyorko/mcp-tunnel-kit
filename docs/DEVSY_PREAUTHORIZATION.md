@@ -141,3 +141,23 @@ The execution context and CAS registry retain `source_kind=image`, repository-on
 Devsy's actual `source.image` must match the joined immutable reference. Existing
 Git-created workers remain verified against their recorded Git commit and original
 remote-worker recipe; changing the default never recreates or pulls those workers.
+
+### Retained unrelated access objects
+
+An operator may attach `retained_auxiliary_file` to the private scope, with its
+exact SHA256 in `bindings`. The file must be an operator-owned, non-symlink 0600
+JSON file. Schema: `version: 1`, `kubernetes_context`, `namespace`,
+`namespace_uid`, a nonempty `evidence` describing independently verified origin,
+and `objects` containing `kind` and Kubernetes `metadata`. Metadata pins name,
+namespace, UID, creationTimestamp, resourceVersion, labels and ownerReferences.
+Do not include Secret data or kubeconfig contents.
+
+This is an explicit provenance attestation, not an inventory-generated allowlist.
+Verify origin from the original creation receipt/manifest before attesting.
+Never attest a possible worker remnant merely because no pod is running. The
+proof rejects owned, deleting, Devsy-labelled, replaced, changed, missing, or
+unlisted recent auxiliary objects. It checks pins twice around the ordinary
+workload, process and volume absence checks. Cluster configuration remains
+hash-bound and namespace identity must match. Changed objects require renewed
+operator provenance review, not automatic pin refresh. No Kubernetes mutation,
+cutoff change, receipt erasure or stale-request replay is involved.
