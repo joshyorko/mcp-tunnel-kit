@@ -185,29 +185,33 @@ class ComposeBoundaryTests(unittest.TestCase):
                 paths[name] = str(path)
             environment = {**os.environ,
                            'CAS_SSH_CONFIG_SOURCE': paths['ssh_config'],
-                           'CAS_SSH_IDENTITY_SOURCE': paths['identity'],
                            'CAS_SSH_KNOWN_HOSTS_SOURCE': paths['known_hosts'],
                            'DEVSY_CONFIG_FILE': str(base / 'devsy-config.yaml'),
                            'DEVSY_CONTEXT_DIR': str(base / 'contexts' / 'default'),
                            'DEVSY_KUBECONFIG_FILE': str(base / 'kubeconfig'),
                            'DEVSY_CONTEXT': 'default', 'CAS_DEVSY_HOME': '/tmp'}
-            result = subprocess.run(['docker', 'compose', '--env-file', '.env.example',
-                                     '-f', 'compose.yaml', '-f', 'compose.vm-ssh.yaml',
-                                     '-f', 'compose.devsy.yaml',
-                                     'config', '--format', 'json'], cwd=ROOT, env=environment,
-                                    capture_output=True, text=True, timeout=10, check=True)
-        service = json.loads(result.stdout)['services']['codex-action-server']
-        mounts = {volume['target']: volume for volume in service['volumes']}
-        self.assertNotIn('/run/native-codex', mounts)
-        self.assertEqual(set(mounts) & {'/run/codex-ssh/ssh_config', '/run/codex-ssh/identity',
-                                        '/run/codex-ssh/known_hosts'},
-                         {'/run/codex-ssh/ssh_config', '/run/codex-ssh/identity',
-                          '/run/codex-ssh/known_hosts'})
-        self.assertIn('/tmp/config.yaml', mounts)
-        self.assertIn('/tmp/contexts/default', mounts)
-        for target in ('/run/codex-ssh/ssh_config', '/run/codex-ssh/identity',
-                       '/run/codex-ssh/known_hosts'):
-            self.assertTrue(mounts[target]['read_only'])
+
+            def resolved(files, env):
+                result = subprocess.run(['docker', 'compose', '--env-file', '.env.example',
+                                         *[item for path in files for item in ('-f', path)],
+                                         'config', '--format', 'json'], cwd=ROOT, env=env,
+                                        capture_output=True, text=True, timeout=10, check=True)
+                service = json.loads(result.stdout)['services']['codex-action-server']
+                return {volume['target']: volume for volume in service['volumes']}
+
+            keyless = resolved(['compose.yaml', 'compose.vm-ssh.yaml', 'compose.devsy.yaml'], environment)
+            keyed_env = {**environment, 'CAS_SSH_IDENTITY_SOURCE': paths['identity']}
+            keyed = resolved(['compose.yaml', 'compose.vm-ssh.yaml', 'compose.vm-ssh-key.yaml',
+                              'compose.devsy.yaml'], keyed_env)
+        self.assertNotIn('/run/native-codex', keyless)
+        self.assertNotIn('/run/codex-ssh/identity', keyless)
+        self.assertIn('/run/codex-ssh/identity', keyed)
+        for mounts in (keyless, keyed):
+            self.assertIn('/tmp/config.yaml', mounts)
+            self.assertIn('/tmp/contexts/default', mounts)
+            for target in ('/run/codex-ssh/ssh_config', '/run/codex-ssh/known_hosts'):
+                self.assertTrue(mounts[target]['read_only'])
+        self.assertTrue(keyed['/run/codex-ssh/identity']['read_only'])
 
     def test_host_devsy_errors_are_actionable_at_the_command_boundary(self):
         helper = self.helper()
@@ -316,7 +320,6 @@ class ComposeBoundaryTests(unittest.TestCase):
             paths = {}
             volumes = []
             for name, target in (('ssh_config', '/run/codex-ssh/ssh_config'),
-                                 ('identity', '/run/codex-ssh/identity'),
                                  ('known_hosts', '/run/codex-ssh/known_hosts')):
                 path = base / name
                 path.write_text('fixture\n')
@@ -325,8 +328,16 @@ class ComposeBoundaryTests(unittest.TestCase):
                 volumes.append({'type': 'bind', 'source': str(path), 'target': target,
                                 'read_only': True, 'bind': {'create_host_path': False}})
             helper.validate_remote_ssh_mounts({'volumes': volumes})
+            identity = base / 'identity'
+            identity.write_text('fixture\n')
+            identity.chmod(0o600)
+            keyed = copy.deepcopy(volumes)
+            keyed.append({'type': 'bind', 'source': str(identity),
+                          'target': '/run/codex-ssh/identity', 'read_only': True,
+                          'bind': {'create_host_path': False}})
+            helper.validate_remote_ssh_mounts({'volumes': keyed})
             unsafe = copy.deepcopy(volumes)
-            unsafe[1]['read_only'] = False
+            unsafe[0]['read_only'] = False
             with self.assertRaises(helper.ControlError):
                 helper.validate_remote_ssh_mounts({'volumes': unsafe})
             socket_mount = copy.deepcopy(volumes)
@@ -334,9 +345,9 @@ class ComposeBoundaryTests(unittest.TestCase):
                                  'target': '/run/native-codex', 'read_only': True})
             with self.assertRaises(helper.ControlError):
                 helper.validate_remote_ssh_mounts({'volumes': socket_mount})
-            paths['identity'].chmod(0o644)
+            identity.chmod(0o644)
             with self.assertRaises(helper.ControlError):
-                helper.validate_remote_ssh_mounts({'volumes': volumes})
+                helper.validate_remote_ssh_mounts({'volumes': keyed})
 
     def test_missing_native_socket_has_actionable_safe_diagnostic(self):
         helper = self.helper()

@@ -1,0 +1,11 @@
+# Optional overlay for conventional SSH key authentication. Do not use for
+# keyless Tailscale SSH; the VM's host tailscaled already owns tailnet access.
+services:
+  codex-action-server:
+    volumes:
+      - type: bind
+        source: ${CAS_SSH_IDENTITY_SOURCE:?Set CAS_SSH_IDENTITY_SOURCE to the selected VM-side private key}
+        target: /run/codex-ssh/identity
+        read_only: true
+        bind:
+          create_host_path: false
