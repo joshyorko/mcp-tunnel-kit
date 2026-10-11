@@ -202,15 +202,14 @@ def prepare_targets(source: Path, socket_directory: Path | None, uid: int, *, da
 
 
 def validate_remote_ssh_mounts(service) -> None:
-    expected = {
-        "/run/codex-ssh/ssh_config",
-        "/run/codex-ssh/identity",
-        "/run/codex-ssh/known_hosts",
-    }
+    expected = {"/run/codex-ssh/ssh_config", "/run/codex-ssh/known_hosts"}
+    optional = {"/run/codex-ssh/identity"}
     selected = [volume for volume in service["volumes"] if volume["target"] in expected]
+    selected.extend(volume for volume in service["volumes"] if volume["target"] in optional)
     mounts = {volume["target"]: Path(volume["source"]) for volume in selected}
-    if len(selected) != len(expected) or set(mounts) != expected:
-        raise ControlError("The SSH Compose profile must provide only the configured SSH config, key, and known_hosts files.")
+    if (len(selected) != len(mounts) or not expected.issubset(mounts)
+            or set(mounts) - expected - optional):
+        raise ControlError("The SSH Compose profile must provide its config and pinned known_hosts, with at most one optional identity file.")
     for volume in service["volumes"]:
         if volume["target"] == "/run/native-codex":
             raise ControlError("The SSH Compose profile must not mount a native Codex socket.")
