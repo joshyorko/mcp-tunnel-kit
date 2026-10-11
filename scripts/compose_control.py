@@ -213,7 +213,7 @@ def validate_remote_ssh_mounts(service) -> None:
     for volume in service["volumes"]:
         if volume["target"] == "/run/native-codex":
             raise ControlError("The SSH Compose profile must not mount a native Codex socket.")
-        if volume["target"] in expected and (not volume.get("read_only")
+        if volume["target"] in expected | optional and (not volume.get("read_only")
                 or volume.get("type") != "bind"
                 or volume.get("bind", {}).get("create_host_path") is not False):
             raise ControlError("SSH config, identity, and known_hosts mounts must be narrow read-only file binds.")

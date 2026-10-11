@@ -336,6 +336,10 @@ class ComposeBoundaryTests(unittest.TestCase):
                           'target': '/run/codex-ssh/identity', 'read_only': True,
                           'bind': {'create_host_path': False}})
             helper.validate_remote_ssh_mounts({'volumes': keyed})
+            writable_key = copy.deepcopy(keyed)
+            writable_key[-1]['read_only'] = False
+            with self.assertRaises(helper.ControlError):
+                helper.validate_remote_ssh_mounts({'volumes': writable_key})
             unsafe = copy.deepcopy(volumes)
             unsafe[0]['read_only'] = False
             with self.assertRaises(helper.ControlError):
