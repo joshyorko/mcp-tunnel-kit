@@ -1,0 +1,44 @@
+# VM profile for CAS's remote SSH worker. Set COMPOSE_FILE to include this
+# file on the VM; it removes the Dakota-local Unix socket bind entirely.
+services:
+  codex-action-server:
+    volumes: !override
+      - type: bind
+        source: ${CONTROL_PLANE_STATE_DIR:-./.state}/cas-targets.json
+        target: /run/codex-action-server/targets.json
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${CONTROL_PLANE_STATE_DIR:-./.state}/cas
+        target: /var/lib/codex-action-server
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${CAS_RUNTIME_DIR:-${CONTROL_PLANE_STATE_DIR:-./.state}/cas/runtime}
+        target: /var/lib/codex-action-server/runtime
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${CAS_RECEIPTS_DIR:-${CONTROL_PLANE_STATE_DIR:-./.state}/cas/receipts}
+        target: /var/lib/codex-action-server/receipts
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${CAS_SSH_CONFIG_SOURCE:?Set CAS_SSH_CONFIG_SOURCE to the private VM-side SSH config}
+        target: /run/codex-ssh/ssh_config
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${CAS_SSH_IDENTITY_SOURCE:?Set CAS_SSH_IDENTITY_SOURCE to the selected VM-side private key}
+        target: /run/codex-ssh/identity
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${CAS_SSH_KNOWN_HOSTS_SOURCE:?Set CAS_SSH_KNOWN_HOSTS_SOURCE to the pinned VM-side known_hosts file}
+        target: /run/codex-ssh/known_hosts
+        read_only: true
+        bind:
+          create_host_path: false

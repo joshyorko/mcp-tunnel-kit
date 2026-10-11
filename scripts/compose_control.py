@@ -158,7 +158,7 @@ def validate_network(subnet, gateway, routes, networks) -> None:
 
 def validate_engine(options) -> None:
     if sys.platform != "linux" or any("rootless" in value or "userns" in value for value in options):
-        raise ControlError("This host-network/native-socket deployment requires rootful Linux Docker without user namespace remapping.")
+        raise ControlError("This host-network deployment requires rootful Linux Docker without user namespace remapping.")
 
 
 def network_preflight(configuration) -> None:
@@ -172,14 +172,23 @@ def network_preflight(configuration) -> None:
     validate_network(ipam[0]["subnet"], ipam[0]["gateway"], routes, networks)
 
 
-def prepare_targets(source: Path, socket_directory: Path, uid: int):
+def read_operator_targets(source: Path):
     info = source.lstat()
     if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
         raise ControlError("The operator target file must be a regular file owned by you; symlinks are refused.")
-    data = json.loads(source.read_text())
+    return json.loads(source.read_text())
+
+
+def prepare_targets(source: Path, socket_directory: Path | None, uid: int, *, data=None):
+    data = read_operator_targets(source) if data is None else data
     local = data.get("targets", {}).get("local", {})
-    if local.get("transport") != "local" or not local.get("socket_path"):
-        raise ControlError("Configure local.socket_path explicitly in the operator target file before deployment.")
+    if local.get("transport") == "ssh":
+        if (local.get("ssh_config") != "/run/codex-ssh/ssh_config"
+                or local.get("known_hosts") != "/run/codex-ssh/known_hosts"):
+            raise ControlError("The SSH target must use the mounted private SSH config and pinned known_hosts paths.")
+        return data
+    if local.get("transport") != "local" or not local.get("socket_path") or socket_directory is None:
+        raise ControlError("Configure local.socket_path or the supported SSH target in the operator target file.")
     try:
         socket_path = Path(local["socket_path"]).resolve(strict=True)
         info = socket_path.stat()
@@ -190,6 +199,33 @@ def prepare_targets(source: Path, socket_directory: Path, uid: int):
         raise ControlError("The resolved native socket must match the narrow mount directory and CAS UID.")
     local["socket_path"] = "/run/native-codex/" + socket_path.name
     return data
+
+
+def validate_remote_ssh_mounts(service) -> None:
+    expected = {
+        "/run/codex-ssh/ssh_config",
+        "/run/codex-ssh/identity",
+        "/run/codex-ssh/known_hosts",
+    }
+    selected = [volume for volume in service["volumes"] if volume["target"] in expected]
+    mounts = {volume["target"]: Path(volume["source"]) for volume in selected}
+    if len(selected) != len(expected) or set(mounts) != expected:
+        raise ControlError("The SSH Compose profile must provide only the configured SSH config, key, and known_hosts files.")
+    for volume in service["volumes"]:
+        if volume["target"] == "/run/native-codex":
+            raise ControlError("The SSH Compose profile must not mount a native Codex socket.")
+        if volume["target"] in expected and (not volume.get("read_only")
+                or volume.get("type") != "bind"
+                or volume.get("bind", {}).get("create_host_path") is not False):
+            raise ControlError("SSH config, identity, and known_hosts mounts must be narrow read-only file binds.")
+    for path in mounts.values():
+        try:
+            info = path.lstat()
+        except OSError:
+            raise ControlError("The configured SSH files must exist as private regular files before startup.") from None
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                or stat.S_IMODE(info.st_mode) != 0o600):
+            raise ControlError("SSH config, identity, and known_hosts files must be regular, operator-owned, mode 0600; symlinks are refused.")
 
 
 def mount(service, target):
@@ -206,7 +242,16 @@ def prepare(configuration) -> None:
         raise ControlError("Set CAS_TARGETS_SOURCE to the existing operator-owned target file.")
     target_file = mount(service, "/run/codex-action-server/targets.json")
     state = mount(service, "/var/lib/codex-action-server")
-    generated = prepare_targets(Path(source), mount(service, "/run/native-codex"), uid)
+    source_path = Path(source)
+    try:
+        target_data = read_operator_targets(source_path)
+    except OSError:
+        raise ControlError("The operator target file is unavailable.") from None
+    transport = target_data.get("targets", {}).get("local", {}).get("transport")
+    socket_directory = mount(service, "/run/native-codex") if transport == "local" else None
+    generated = prepare_targets(source_path, socket_directory, uid, data=target_data)
+    if transport == "ssh":
+        validate_remote_ssh_mounts(service)
     private_directory(target_file.parent)
     private_directory(state)
     private_directory(state / "actions")
@@ -795,7 +840,7 @@ def devsy_call(bridge, operation, *arguments):
         raise ControlError(str(error)) from None
 
 
-def start_control_plane(configuration):
+def start_control_plane(configuration, *, start_tunnel=True):
     bridge = host_bridge()
     value = devsy_call(bridge, "settings", configuration)
     print("Refreshing configured images before startup; persistent data retained.", flush=True)
@@ -814,7 +859,19 @@ def start_control_plane(configuration):
     compose("up", "-d", "--no-deps", "--wait", "--wait-timeout", "60", "executor-schema-proxy", timeout=90)
     # Always rerun the completed job. Compose otherwise retains successful one-shot jobs.
     compose("up", "--force-recreate", "--no-deps", "--exit-code-from", "app-ready", "app-ready", timeout=210)
-    compose("up", "-d", "--no-deps", "--wait", "--wait-timeout", "120", "tunnel-client", timeout=150)
+    if start_tunnel:
+        compose("up", "-d", "--no-deps", "--wait", "--wait-timeout", "120", "tunnel-client", timeout=150)
+
+
+def require_staged_services():
+    rows = {row.get("Service"): row for row in compose_rows()}
+    for service in ("executor", "executor-schema-proxy", "codex-action-server"):
+        row = rows.get(service)
+        if not row or row.get("State") != "running" or row.get("Health") != "healthy":
+            raise ControlError("Tunnel start refused: Executor, schema proxy, and CAS must already be healthy.")
+    ready = rows.get("app-ready")
+    if not ready or ready.get("State") != "exited" or str(ready.get("ExitCode")) != "0":
+        raise ControlError("Tunnel start refused: the staged app bootstrap must have completed successfully.")
 
 
 def status():
@@ -849,7 +906,7 @@ def restart_cas(configuration):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("first-run", "secrets", "check", "up", "down", "status", "bootstrap", "probe", "resume", "restart-devsy", "restart-cas"))
+    parser.add_argument("mode", choices=("first-run", "secrets", "check", "up", "staged", "tunnel-only", "down", "down-tunnel", "status", "bootstrap", "probe", "resume", "restart-devsy", "restart-cas"))
     args = parser.parse_args()
     try:
         if args.mode in {"bootstrap", "probe", "resume"}:
@@ -876,6 +933,15 @@ def main():
             devsy_call(bridge, "stop", value["state"])
             devsy_call(bridge, "start", value)
             print("Host Devsy bridge restarted and healthy; containers and native Codex unchanged.")
+        elif args.mode == "down-tunnel":
+            compose("stop", "--timeout", "30", "tunnel-client", timeout=45)
+            print("Tunnel client stopped; Executor, CAS, native workers, and persistent state unchanged.")
+        elif args.mode == "tunnel-only":
+            configuration = config()
+            require_staged_services()
+            refuse_external_tunnel()
+            compose("up", "-d", "--no-deps", "--wait", "--wait-timeout", "120", "tunnel-client", timeout=150)
+            print("Tunnel client started against the existing staged control plane.")
         elif args.mode == "down":
             configuration = config()
             compose("stop", "--timeout", "30", "tunnel-client", timeout=45)
@@ -905,7 +971,7 @@ def main():
             if args.mode == "check":
                 print("Compose paths, socket ownership, private files, supported image and bridge collision checks passed; no service started.")
             else:
-                start_control_plane(configuration)
+                start_control_plane(configuration, start_tunnel=args.mode != "staged")
                 status()
     except ControlError as error:
         print(str(error), file=sys.stderr)
