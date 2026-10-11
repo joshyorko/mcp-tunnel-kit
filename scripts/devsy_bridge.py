@@ -1003,8 +1003,13 @@ def scoped_child(config, parent, operation, name, state_dir, operation_id, snaps
                  '--provider-option', 'KUBERNETES_CONTEXT=' + job_scope['kubernetes_context'],
                  '--provider-option', 'CREATE_NAMESPACE=false', '--provider-option', 'CLUSTER_ROLE=',
                  '--provider-option', 'SERVICE_ACCOUNT=default']
-    if operation == 'create' and execution.get('source_kind') != 'image':
-        arguments += ['--devcontainer', execution['recipe']]
+    if operation == 'create':
+        if execution.get('source_kind') == 'image':
+            # Devsy v1.23 treats positional input heuristically; --source selects
+            # its typed image parser instead of falling back to a Git URL.
+            arguments += ['--source', source]
+        else:
+            arguments += ['--devcontainer', execution['recipe']]
     def parent_death():
         # This supervisor is single-threaded, unlike the HTTP bridge.
         if libc.prctl(1, signal.SIGKILL, 0, 0, 0) != 0:
