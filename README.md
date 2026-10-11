@@ -218,3 +218,22 @@ Kubernetes workspace. It requires both name and UID, rejects arbitrary commands
 and changed identities, and never starts or restarts the workspace or daemon.
 Arbitrary exec and material mutations retain browser approval; unknown calls
 fail closed.
+
+### Dynamic worker registration retirement
+
+The host Devsy bridge reconciles its private dynamic registry during startup,
+catalog health checks, and scoped status discovery. Only a registry owner that
+matches the persisted operation and UID pin can be withdrawn. Successful Devsy
+inventory and two reads of the bound Kubernetes namespace/resources/PVs must
+prove that exact UID absent; a reused workspace name does not adopt the new UID.
+An explicitly disabled or expired, otherwise validated owner policy also
+withdraws its registrations. Timeouts, unreadable policy, binding drift, and
+partial provider results retain active registrations and remain fail closed.
+
+Removal atomically deletes only the matching `targets` and `owners` keys under
+the publication lock, keeping a bounded history receipt with `removed_reason`.
+That receipt fences late publication by the removed operation. Valid owned
+workers can republish from their journal on scoped status discovery after a
+bridge restart. Static targets are never reconciled automatically: change their
+authoritative host file only while the whole control plane is down, then use
+`scripts/control-plane-up` to regenerate the bind mount.

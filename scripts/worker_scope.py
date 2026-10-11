@@ -83,7 +83,7 @@ class WorkerScope:
         self.threads = {}
         self.mutex = threading.Lock()
 
-    def load(self):
+    def load(self, *, allow_revoked=False):
         value = private_json(self.config)
         expected = json.loads(
             (
@@ -99,9 +99,11 @@ class WorkerScope:
             isinstance(expiration, bool)
             or not isinstance(expiration, (int, float))
             or not math.isfinite(expiration)
-            or expiration <= time.time()
+            or expiration <= 0
         )
-        if value.get("enabled") is not True or invalid_expiration:
+        if type(value.get("enabled")) is not bool or invalid_expiration:
+            raise ScopeError("Owner lifecycle capability is invalid.")
+        if not allow_revoked and (not value["enabled"] or expiration is not None and expiration <= time.time()):
             raise ScopeError("Owner lifecycle capability is disabled or expired.")
         if not re.fullmatch("[a-f0-9]{64}", value.get("capability_sha256", "")):
             raise ScopeError("Owner capability is not configured.")

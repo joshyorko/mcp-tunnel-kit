@@ -149,6 +149,65 @@ def _items(value):
     return value["items"]
 
 
+def target_absence_proof(binary, cwd, env, scope, target):
+    """Prove the pinned UID absent, even when its name belongs to a new UID.
+
+    This only withdraws an active registration; it never authorizes creation.
+    Inventory or provider errors remain unknown, not deleted.
+    """
+    phase = "configuration"
+    try:
+        name, uid = target["workspace"], target["workspace_uid"]
+        kube = _configuration(env, scope, name)
+        if (target["kubeconfig"] != kube or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", uid)
+                or any(target[key] != scope[key] for key in (
+                    "context", "provider", "namespace", "kubernetes_context"))):
+            _refuse()
+        kubectl = shutil.which("kubectl", path=env.get("PATH", ""))
+        if not kubectl:
+            _refuse()
+        command = [kubectl, "--kubeconfig", kube, "--context", scope["kubernetes_context"], "--request-timeout=5s"]
+        namespace_uid = None
+        for _ in range(2):
+            phase = "inventory"
+            rows = _query([binary, "--context", scope["context"], "--result-format", "json",
+                           "workspace", "list", "--skip-pro"], cwd, env)
+            if (not isinstance(rows, list) or any(not isinstance(row, dict)
+                    or not isinstance(row.get("id"), str) or not row["id"]
+                    or not isinstance(row.get("uid"), str) or not row["uid"] or row["uid"] == uid for row in rows)):
+                _refuse()
+            phase = "namespace"
+            namespace = _query(command + ["get", "namespace", scope["namespace"], "-o", "json"], cwd, env)
+            meta = namespace.get("metadata", {})
+            if (meta.get("name") != scope["namespace"] or not meta.get("uid") or meta.get("deletionTimestamp")
+                    or namespace_uid is not None and meta["uid"] != namespace_uid):
+                _refuse()
+            namespace_uid = meta["uid"]
+            phase = "resources"
+            resources = _query(command + ["--namespace", scope["namespace"], "get", RESOURCES, "-o", "json"], cwd, env)
+            for item in _items(resources):
+                metadata = item.get("metadata")
+                if (not isinstance(metadata, dict) or not metadata.get("name") or not metadata.get("uid")
+                        or uid in json.dumps(metadata, sort_keys=True)):
+                    _refuse()
+            phase = "volumes"
+            volumes = _query(command + ["get", "persistentvolumes", "-o", "json"], cwd, env)
+            for item in _items(volumes):
+                if not isinstance(item.get("metadata"), dict) or not isinstance(item.get("spec"), dict):
+                    _refuse()
+                claim = item["spec"].get("claimRef", {}) or {}
+                if not isinstance(claim, dict) or uid in json.dumps(item["metadata"], sort_keys=True):
+                    _refuse()
+                if claim.get("namespace") == scope["namespace"] and uid in json.dumps(claim, sort_keys=True):
+                    _refuse()
+        phase = "recheck"
+        _configuration(env, scope, name)
+        return {"kind": "absent", "observed_at": time.time(), "workspace_uid": uid,
+                "namespace_uid": namespace_uid, "workspace_absent": True, "provider_resources_absent": True}
+    except Exception:
+        raise ReconciliationError(phase) from None
+
+
 def _preexisting_auxiliary(output, recovery_cutoff):
     """Only metadata predating the original operation can explain leftovers."""
     count = 0

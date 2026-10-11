@@ -284,3 +284,54 @@ def test_image_registry_preserves_exact_digest_provenance(registry):
     assert target['image_ref'] == value['image_ref'] and target['image_digest'] == value['image_digest']
     with pytest.raises(module.RegistryError):
         module.publish(path, static, 'cas-worker-01', {**value, 'image_digest': 'latest'}, 'image-operation')
+
+
+@pytest.mark.parametrize("reason", ["workspace_absent", "authority_revoked"])
+def test_unregister_archives_exact_owner_and_preserves_static_and_other_targets(registry, reason):
+    publish(registry)
+    publish(registry, name="sibling", uid="sibling-uid", operation="sibling-op")
+    module, path, static = registry
+    original = static.read_bytes()
+    expected = json.loads(path.read_text())["targets"]["cas-worker-01"]
+    assert module.unregister(path, static, "cas-worker-01", expected, "operation-1", reason)
+    actual = json.loads(path.read_text())
+    assert set(actual["targets"]) == {"sibling"}
+    assert set(actual["owners"]) == {"sibling"}
+    assert actual["history"][-1]["target"] == expected
+    assert actual["history"][-1]["removed_reason"] == reason
+    assert static.read_bytes() == original
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    again = path.read_bytes()
+    assert not module.unregister(path, static, "cas-worker-01", expected, "operation-1", reason)
+    assert path.read_bytes() == again
+    with pytest.raises(module.RegistryError):
+        publish(registry)
+    publish(registry, uid="new-uid", operation="new-op")
+    assert json.loads(path.read_text())["targets"]["cas-worker-01"]["workspace_uid"] == "new-uid"
+
+
+def test_stale_removal_cannot_remove_recreated_name_or_different_authority(registry):
+    publish(registry)
+    module, path, static = registry
+    expected = json.loads(path.read_text())["targets"]["cas-worker-01"]
+    publish(registry, uid="new-uid", operation="new-op")
+    original = path.read_bytes()
+    with pytest.raises(module.RegistryError):
+        module.unregister(path, static, "cas-worker-01", expected, "operation-1", "workspace_absent")
+    assert path.read_bytes() == original
+    expected = json.loads(original)["targets"]["cas-worker-01"]
+    expected["kubernetes_context"] = "other"
+    with pytest.raises(module.RegistryError):
+        module.unregister(path, static, "cas-worker-01", expected, "new-op", "workspace_absent")
+    assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize("reason", ["timeout", "discovery_error", "unknown"])
+def test_unregister_refuses_unknown_outcomes(registry, reason):
+    publish(registry)
+    module, path, static = registry
+    original = path.read_bytes()
+    expected = json.loads(original)["targets"]["cas-worker-01"]
+    with pytest.raises(module.RegistryError):
+        module.unregister(path, static, "cas-worker-01", expected, "operation-1", reason)
+    assert path.read_bytes() == original

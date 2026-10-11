@@ -196,7 +196,69 @@ class Devsy:
         return module.publish(self.registry_source, self.targets_source, selection['workspace'],
                               selection, selection['operation_id'])
 
+    def target_absence(self, target, scope):
+        import importlib.util
+        path = Path(__file__).with_name('devsy_reconciliation.py')
+        spec = importlib.util.spec_from_file_location('devsy_reconciliation', path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.target_absence_proof(self.binary, self.cwd, self.env or os.environ, scope, target)
+
+    def reconcile_registry(self):
+        """Withdraw exact owned registrations only on positive deletion/revocation.
+
+        Catalog health and startup perform this sweep without owner credentials.
+        Missing policy, provider errors, and unrelated records retain targets.
+        """
+        if not self.registry_source or not self.scope:
+            return
+        import hashlib
+        import importlib.util
+        path = Path(__file__).with_name('worker_registry.py')
+        spec = importlib.util.spec_from_file_location('worker_registry', path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        try:
+            value = module.snapshot(self.registry_source)
+            if not value['targets']:
+                return
+            with self.scope.mutex:
+                approved = self.scope.load(allow_revoked=True)
+                for name, target in value['targets'].items():
+                    try:
+                        owner = value.get('owners', {}).get(name)
+                        if (not owner or name != target['workspace'] or name not in approved['allowed_new_names']
+                                or name in approved['protected_names']
+                                or target['kubeconfig'] not in approved.get('bindings', {})
+                                or any(target[key] != approved[key] for key in (
+                                    'context', 'provider', 'namespace', 'kubernetes_context'))):
+                            continue
+                        record = self.scope.read(name)
+                        pin = self.scope.read('identity-' + hashlib.sha256(owner['operation_id'].encode()).hexdigest())
+                        active = self.scope.threads.get(name)
+                        if (not record or record.get('operation_id') != owner['operation_id']
+                                or pin != {'name': name, **owner} or active and active.is_alive()):
+                            continue
+                        revoked = not approved['enabled'] or (approved.get('expires_at') is not None
+                                                              and approved['expires_at'] <= time.time())
+                        if revoked:
+                            reason = 'authority_revoked'
+                        else:
+                            evidence = self.target_absence(target, approved)
+                            if evidence.get('kind') != 'absent' or evidence.get('workspace_uid') != target['workspace_uid']:
+                                continue
+                            reason = 'workspace_absent'
+                        if self.scope.load(allow_revoked=True) != approved or self.scope.read(name) != record:
+                            continue
+                        module.unregister(self.registry_source, self.targets_source, name, target,
+                                          owner['operation_id'], reason)
+                    except Exception:
+                        continue  # Unknown outcomes never withdraw a registration.
+        except Exception:
+            return
+
     def discover_owned(self, value, credential):
+        self.reconcile_registry()
         if value.get('status') not in {'running', 'completed', 'outcome_unknown'}:
             return value
         value = dict(value)
@@ -361,6 +423,7 @@ class Devsy:
     def catalog(self):
         with self.session(timeout=10) as session:
             tools = self.discover(session)
+        self.reconcile_registry()
         if self.targets_source:
             tools.append(normalize_tool(self.diagnostic_module().TOOL))
         if self.creation_state:

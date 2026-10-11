@@ -4,6 +4,7 @@ The lifecycle caller supplies verified scope ownership. This module only owns
 private registry persistence; it never contacts or mutates a provider.
 """
 import fcntl
+from contextlib import contextmanager
 import json
 import math
 import os
@@ -114,8 +115,10 @@ def _validate_registry(value):
             _refuse()
         _owner(owner, value["targets"][name])
     for receipt in value.get("history", []):
-        if not isinstance(receipt, dict) or set(receipt) != {
+        if not isinstance(receipt, dict) or set(receipt) - {"removed_reason"} != {
                 "target_name", "target", "owner", "replaced_at", "replaced_by_operation_id"}:
+            _refuse()
+        if "removed_reason" in receipt and receipt["removed_reason"] not in {"workspace_absent", "authority_revoked"}:
             _refuse()
         _target_name(receipt["target_name"])
         if receipt["target"] != _target(receipt["target"]):
@@ -145,13 +148,11 @@ def _write(directory, name, value):
             pass
 
 
-def publish(path, static_targets_source, target_name, selection, operation_id):
-    """Atomically publish one verified target, preserving all unrelated entries."""
+@contextmanager
+def _locked(path, static_targets_source, target_name):
     directory = lock = None
     try:
         target_name = _target_name(target_name)
-        operation_id = _identity(operation_id)
-        target = _target(selection)
         path = Path(path)
         if not path.is_absolute() or path.name in {"", ".", ".."}:
             _refuse()
@@ -173,6 +174,55 @@ def publish(path, static_targets_source, target_name, selection, operation_id):
         if value is None:
             value = {"version": 1, "targets": {}, "owners": {}}
         _validate_registry(value)
+        yield directory, path.name, value
+    except Exception:
+        raise RegistryError(SAFE_ERROR) from None
+    finally:
+        if lock is not None:
+            os.close(lock)
+        if directory is not None:
+            os.close(directory)
+
+
+def snapshot(path):
+    """Read one validated atomic snapshot; failures never imply absence."""
+    try:
+        value = _read(path)
+        if value is None:
+            return {"version": 1, "targets": {}, "owners": {}}
+        _validate_registry(value)
+        return value
+    except Exception:
+        raise RegistryError(SAFE_ERROR) from None
+
+
+def unregister(path, static_targets_source, target_name, expected, operation_id, reason):
+    """Remove only the positively reconciled identity, fencing late publishers."""
+    with _locked(path, static_targets_source, target_name) as (directory, name, value):
+        operation_id = _identity(operation_id)
+        if reason not in {"workspace_absent", "authority_revoked"} or expected != _target(expected):
+            _refuse()
+        previous = value["targets"].get(target_name)
+        if previous is None:
+            return False
+        owner = value.get("owners", {}).get(target_name)
+        if previous != expected or owner != {"operation_id": operation_id, "workspace_uid": expected["workspace_uid"]}:
+            _refuse()
+        receipt = {"target_name": target_name, "target": previous, "owner": owner,
+                   "replaced_at": time.time(), "replaced_by_operation_id": operation_id,
+                   "removed_reason": reason}
+        value["history"] = (value.get("history", []) + [receipt])[-32:]
+        del value["targets"][target_name]
+        del value["owners"][target_name]
+        _write(directory, name, value)
+        return True
+
+
+def publish(path, static_targets_source, target_name, selection, operation_id):
+    """Atomically publish one verified target, preserving all unrelated entries."""
+    with _locked(path, static_targets_source, target_name) as (directory, name, value):
+        operation_id = _identity(operation_id)
+        target = _target(selection)
         if any(owner["operation_id"] == operation_id and name != target_name
                for name, owner in value.get("owners", {}).items()):
             _refuse()
@@ -193,14 +243,6 @@ def publish(path, static_targets_source, target_name, selection, operation_id):
             value["history"] = (value.get("history", []) + [receipt])[-32:]
         value["targets"][target_name] = target
         value.setdefault("owners", {})[target_name] = {"operation_id": operation_id, "workspace_uid": target["workspace_uid"]}
-        _write(directory, path.name, value)
+        _write(directory, name, value)
         return {"target": target_name, "operation_id": operation_id,
                 "workspace_uid": target["workspace_uid"], "published": True}
-    except Exception:
-        # Do not retain paths, selected metadata, or raw filesystem errors.
-        raise RegistryError(SAFE_ERROR) from None
-    finally:
-        if lock is not None:
-            os.close(lock)
-        if directory is not None:
-            os.close(directory)

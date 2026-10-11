@@ -326,3 +326,46 @@ def test_only_preexisting_exact_verified_sibling_attachment_is_exempt(proof, cha
     else:
         with pytest.raises(proof.module.ReconciliationError):
             proof.module._processes_absent(str(binary), proof.scope, 'cas-worker-01')
+
+
+@pytest.fixture
+def target_check(proof):
+    target = {"workspace": "cas-worker-01", "workspace_uid": "old-uid", "context": "default",
+              "provider": "kubernetes", "namespace": "devsy", "kubernetes_context": "ror",
+              "kubeconfig": str(proof.kube)}
+    return lambda: proof.module.target_absence_proof("/fixture/devsy", str(proof.root), proof.env, proof.scope, target)
+
+
+def test_target_absence_is_exact_uid_and_provider_authority(proof, target_check):
+    assert target_check()["kind"] == "absent"
+    proof.outputs["inventory"] = [{"id": "cas-worker-01", "uid": "new-uid"}]
+    proof.outputs["resources"] = {"items": [{"kind": "Pod", "metadata": {
+        "name": "devsy-new-uid", "uid": "pod-new", "labels": {"devsy.sh/workspace-uid": "new-uid"}}}]}
+    assert target_check()["workspace_uid"] == "old-uid"
+
+
+@pytest.mark.parametrize("phase,value", [
+    ("inventory", [{"id": "cas-worker-01", "uid": "old-uid"}]),
+    ("inventory", [{"id": "cas-worker-01"}]),
+    ("inventory", {"error": "unknown"}),
+    ("resources", {"items": [{"kind": "Pod", "metadata": {"name": "devsy-old-uid", "uid": "pod"}}]}),
+    ("volumes", {"items": [{"metadata": {"name": "pv", "uid": "pv-uid"}, "spec": {
+        "claimRef": {"namespace": "devsy", "name": "devsy-old-uid"}}}]}),
+    ("resources", subprocess.TimeoutExpired("SECRET", 5)),
+    ("namespace", {"metadata": {"name": "devsy"}}),
+])
+def test_target_absence_unknown_or_remaining_resource_preserves_registration(proof, target_check, phase, value):
+    proof.outputs[phase] = value
+    with pytest.raises(proof.module.ReconciliationError):
+        target_check()
+
+
+def test_target_absence_rechecks_inventory(proof, target_check):
+    count = 0
+    def changing():
+        nonlocal count
+        count += 1
+        return [] if count == 1 else [{"id": "cas-worker-01", "uid": "old-uid"}]
+    proof.outputs["inventory"] = changing
+    with pytest.raises(proof.module.ReconciliationError):
+        target_check()
