@@ -73,6 +73,57 @@ class ComposeBoundaryTests(unittest.TestCase):
                 helper.start_control_plane({})
         self.assertFalse(any(call.args[0] == 'up' for call in compose.call_args_list))
 
+    def test_staged_startup_does_not_start_tunnel(self):
+        helper = self.helper()
+        bridge = helper.host_bridge()
+        with patch.object(helper, 'host_bridge', return_value=bridge), \
+             patch.object(helper, 'devsy_call', return_value=None), \
+             patch.object(helper, 'network_preflight'), \
+             patch.object(helper, 'compose') as compose:
+            helper.start_control_plane({'x-operator': {'devsy_state': '/fixture'}}, start_tunnel=False)
+        calls = compose.call_args_list
+        self.assertTrue(any(call.args[0:2] == ('up', '-d') and 'executor' in call.args for call in calls))
+        self.assertFalse(any(call.args[0] == 'up' and 'tunnel-client' in call.args for call in calls))
+
+    def test_tunnel_only_start_requires_staged_health_and_mutates_only_tunnel(self):
+        helper = self.helper()
+        calls = []
+        rows = [
+            {'Service': 'executor', 'State': 'running', 'Health': 'healthy'},
+            {'Service': 'executor-schema-proxy', 'State': 'running', 'Health': 'healthy'},
+            {'Service': 'codex-action-server', 'State': 'running', 'Health': 'healthy'},
+            {'Service': 'app-ready', 'State': 'exited', 'ExitCode': 0},
+        ]
+        with patch.object(helper, 'config', return_value={}), \
+             patch.object(helper, 'compose_rows', return_value=rows), \
+             patch.object(helper, 'refuse_external_tunnel'), \
+             patch.object(helper, 'compose', side_effect=lambda *args, **kwargs: calls.append(args)), \
+             patch('sys.argv', ['compose_control.py', 'tunnel-only']):
+            self.assertEqual(helper.main(), 0)
+        self.assertEqual(calls, [('up', '-d', '--no-deps', '--wait', '--wait-timeout', '120', 'tunnel-client')])
+
+    def test_tunnel_only_start_refuses_missing_or_unhealthy_staged_services(self):
+        helper = self.helper()
+        ready = [
+            {'Service': 'executor', 'State': 'running', 'Health': 'healthy'},
+            {'Service': 'executor-schema-proxy', 'State': 'running', 'Health': 'healthy'},
+            {'Service': 'codex-action-server', 'State': 'running', 'Health': 'healthy'},
+            {'Service': 'app-ready', 'State': 'exited', 'ExitCode': 0},
+        ]
+        for rows in (ready[:-1], [{**ready[0], 'Health': 'starting'}, *ready[1:]]):
+            with self.subTest(rows=rows), self.assertRaises(helper.ControlError):
+                with patch.object(helper, 'compose_rows', return_value=rows), \
+                     patch.object(helper, 'compose', side_effect=AssertionError('tunnel start forbidden')):
+                    helper.require_staged_services()
+
+    def test_tunnel_only_down_stops_no_other_service(self):
+        helper = self.helper()
+        calls = []
+        with patch.object(helper, 'compose', side_effect=lambda *args, **kwargs: calls.append(args)), \
+             patch('sys.argv', ['compose_control.py', 'down-tunnel']):
+            self.assertEqual(helper.main(), 0)
+        self.assertEqual(calls, [('stop', '--timeout', '30', 'tunnel-client')])
+
     def helper(self):
         path = ROOT / "scripts/compose_control.py"
         self.assertTrue(path.is_file(), "Compose boundary helper is missing")
@@ -122,6 +173,45 @@ class ComposeBoundaryTests(unittest.TestCase):
                        '/fixture/kubeconfig']:
             self.assertTrue(mounts[target]['read_only'])
         self.assertTrue(any(value.startswith('/tmp:rw,exec,') for value in service['tmpfs']))
+
+    def test_vm_ssh_compose_profile_removes_native_socket_and_mounts_only_pinned_files(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            paths = {}
+            for name in ('ssh_config', 'identity', 'known_hosts'):
+                path = base / name
+                path.write_text('fixture\n')
+                path.chmod(0o600)
+                paths[name] = str(path)
+            environment = {**os.environ,
+                           'CAS_SSH_CONFIG_SOURCE': paths['ssh_config'],
+                           'CAS_SSH_KNOWN_HOSTS_SOURCE': paths['known_hosts'],
+                           'DEVSY_CONFIG_FILE': str(base / 'devsy-config.yaml'),
+                           'DEVSY_CONTEXT_DIR': str(base / 'contexts' / 'default'),
+                           'DEVSY_KUBECONFIG_FILE': str(base / 'kubeconfig'),
+                           'DEVSY_CONTEXT': 'default', 'CAS_DEVSY_HOME': '/tmp'}
+
+            def resolved(files, env):
+                result = subprocess.run(['docker', 'compose', '--env-file', '.env.example',
+                                         *[item for path in files for item in ('-f', path)],
+                                         'config', '--format', 'json'], cwd=ROOT, env=env,
+                                        capture_output=True, text=True, timeout=10, check=True)
+                service = json.loads(result.stdout)['services']['codex-action-server']
+                return {volume['target']: volume for volume in service['volumes']}
+
+            keyless = resolved(['compose.yaml', 'compose.vm-ssh.yaml', 'compose.devsy.yaml'], environment)
+            keyed_env = {**environment, 'CAS_SSH_IDENTITY_SOURCE': paths['identity']}
+            keyed = resolved(['compose.yaml', 'compose.vm-ssh.yaml', 'compose.vm-ssh-key.yaml',
+                              'compose.devsy.yaml'], keyed_env)
+        self.assertNotIn('/run/native-codex', keyless)
+        self.assertNotIn('/run/codex-ssh/identity', keyless)
+        self.assertIn('/run/codex-ssh/identity', keyed)
+        for mounts in (keyless, keyed):
+            self.assertIn('/tmp/config.yaml', mounts)
+            self.assertIn('/tmp/contexts/default', mounts)
+            for target in ('/run/codex-ssh/ssh_config', '/run/codex-ssh/known_hosts'):
+                self.assertTrue(mounts[target]['read_only'])
+        self.assertTrue(keyed['/run/codex-ssh/identity']['read_only'])
 
     def test_host_devsy_errors_are_actionable_at_the_command_boundary(self):
         helper = self.helper()
@@ -207,6 +297,61 @@ class ComposeBoundaryTests(unittest.TestCase):
                 self.assertEqual(generated, data)
             finally:
                 server.close()
+
+    def test_remote_ssh_target_preparation_needs_no_local_socket_or_worker(self):
+        helper = self.helper()
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / 'operator.json'
+            data = {'targets': {'local': {
+                'transport': 'ssh', 'destination': 'dakota', 'codex_bin': '/usr/bin/codex',
+                'socket_path': '/run/user/1000/codex.sock',
+                'ssh_config': '/run/codex-ssh/ssh_config',
+                'known_hosts': '/run/codex-ssh/known_hosts'}}}
+            original = json.dumps(data)
+            source.write_text(original)
+            generated = helper.prepare_targets(source, None, os.getuid())
+            self.assertEqual(generated, data)
+            self.assertEqual(source.read_text(), original)
+
+    def test_remote_ssh_mount_validation_rejects_unmounted_socket_and_unsafe_files(self):
+        helper = self.helper()
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            paths = {}
+            volumes = []
+            for name, target in (('ssh_config', '/run/codex-ssh/ssh_config'),
+                                 ('known_hosts', '/run/codex-ssh/known_hosts')):
+                path = base / name
+                path.write_text('fixture\n')
+                path.chmod(0o600)
+                paths[name] = path
+                volumes.append({'type': 'bind', 'source': str(path), 'target': target,
+                                'read_only': True, 'bind': {'create_host_path': False}})
+            helper.validate_remote_ssh_mounts({'volumes': volumes})
+            identity = base / 'identity'
+            identity.write_text('fixture\n')
+            identity.chmod(0o600)
+            keyed = copy.deepcopy(volumes)
+            keyed.append({'type': 'bind', 'source': str(identity),
+                          'target': '/run/codex-ssh/identity', 'read_only': True,
+                          'bind': {'create_host_path': False}})
+            helper.validate_remote_ssh_mounts({'volumes': keyed})
+            writable_key = copy.deepcopy(keyed)
+            writable_key[-1]['read_only'] = False
+            with self.assertRaises(helper.ControlError):
+                helper.validate_remote_ssh_mounts({'volumes': writable_key})
+            unsafe = copy.deepcopy(volumes)
+            unsafe[0]['read_only'] = False
+            with self.assertRaises(helper.ControlError):
+                helper.validate_remote_ssh_mounts({'volumes': unsafe})
+            socket_mount = copy.deepcopy(volumes)
+            socket_mount.append({'type': 'bind', 'source': '/tmp/dakota',
+                                 'target': '/run/native-codex', 'read_only': True})
+            with self.assertRaises(helper.ControlError):
+                helper.validate_remote_ssh_mounts({'volumes': socket_mount})
+            identity.chmod(0o644)
+            with self.assertRaises(helper.ControlError):
+                helper.validate_remote_ssh_mounts({'volumes': keyed})
 
     def test_missing_native_socket_has_actionable_safe_diagnostic(self):
         helper = self.helper()

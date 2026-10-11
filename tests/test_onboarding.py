@@ -155,7 +155,8 @@ class OnboardingTests(unittest.TestCase):
             seen.append("prepare")
             self.assertEqual((self.secrets / "executor-pat").read_text(), "FIXTURE_PAT\n")
             self.assertEqual((self.secrets / "executor-auth-header").read_text(), "Bearer FIXTURE_PAT\n")
-        def start(configuration):
+        def start(configuration, *, start_tunnel=True):
+            self.assertTrue(start_tunnel)
             self.assertEqual(seen, ["prepare"])
             self.assertEqual((self.secrets / "executor-auth-header").read_text(), "Bearer FIXTURE_PAT\n")
             seen.append("start-control-plane")

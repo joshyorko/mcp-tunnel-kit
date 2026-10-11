@@ -1,6 +1,6 @@
 # Run the control plane with Compose
 
-Run these commands on the Bluefin host from this checkout. Docker Compose owns
+Run these commands on the control-plane host from this checkout. Docker Compose owns
 the control-plane containers. Existing native Codex and Devsy state remain
 operator-owned.
 
@@ -67,12 +67,11 @@ services, including cached `:latest` tags. A failed pull stops startup and
 retains persistent data. `--check` validates configuration without pulling.
 
 
-Set `CAS_TARGETS_SOURCE` to your existing operator target JSON. Its `local`
-target must have an explicit `socket_path`. Set `NATIVE_CODEX_SOCKET_DIR` to the
-resolved socket's parent directory and `CAS_UID` to the socket owner's UID.
-The default narrow mount is `/tmp/codex-daemon-1000` at `/run/native-codex`, read
-only. The generated private target file changes only `local.socket_path` to
-that mounted socket name. The original target file remains untouched.
+Set `CAS_TARGETS_SOURCE` to your existing operator target JSON. For a local
+native Codex target, set an explicit `socket_path` and set
+`NATIVE_CODEX_SOCKET_DIR` to the resolved socket's parent directory. For the
+VM profile below, use a static SSH target so CAS needs no Dakota-local socket.
+The generated private target file is separate from the operator source.
 
 The repo-local `.env` uses `CAS_TARGETS_SOURCE`, `CAS_RUNTIME_DIR`, and
 `CAS_RECEIPTS_DIR` for operator-owned host paths. Compose sets
@@ -102,6 +101,54 @@ network subnets. It rejects collisions and public subnets. An existing bridge
 is retained only when its Compose ownership, subnet, and gateway match. To use
 another collision-free private `/24`, set both `CONTROL_PLANE_SUBNET` and its
 first usable address in `CONTROL_PLANE_GATEWAY`.
+
+## VM host with a remote Codex worker
+
+On the VM, set `COMPOSE_FILE=compose.yaml:compose.vm-ssh.yaml` in the private
+`.env`. This keyless profile removes the native socket bind from CAS and mounts
+only the selected SSH config and pinned `known_hosts` read-only. Set
+`CAS_SSH_CONFIG_SOURCE` and `CAS_SSH_KNOWN_HOSTS_SOURCE` to VM-side files; both
+must be operator-owned, regular, and mode `0600`. The static `local` target uses `transport: "ssh"`,
+the existing SSH alias in `destination`, the verified remote `codex_bin` and
+app-server `socket_path`, plus `ssh_config: "/run/codex-ssh/ssh_config"` and
+`known_hosts: "/run/codex-ssh/known_hosts"`. The alias config points
+at the verified worker and sets `IdentitiesOnly yes`. For keyless Tailscale SSH,
+set `IdentityFile none`; host-networked CAS uses the VM's existing tailnet route
+and host `tailscaled`, with no Tailscale sidecar or daemon-socket mount. Confirm
+the exact destination and pinned host key before use.
+
+For conventional SSH keys, append `compose.vm-ssh-key.yaml` to `COMPOSE_FILE`
+and set `CAS_SSH_IDENTITY_SOURCE`. This optional overlay mounts only that
+operator-owned regular file read-only at `/run/codex-ssh/identity`, mode `0600`.
+The SSH config can then point `IdentityFile` there. The VM profile validator
+accepts either configuration and still rejects any native socket mount.
+CAS can load and list the static target while the worker is offline; only an
+action that contacts it will fail.
+
+The SSH target requires the CAS source change from commit
+`396f7b283639c5ca05ff7e6b7937f3ab070ee54a`. That image is not published or
+accepted yet; use its published immutable digest once available. A Compose
+fixture or source test does not prove VM readiness or remote connectivity.
+
+The SSH profile needs Docker Compose 2.24.4 or later for its volume override.
+Keep `CONTROL_PLANE_SUBNET` and `CONTROL_PLANE_GATEWAY` on a collision-free
+private `/24`; preflight checks routes and Docker networks before startup. The
+default is only a candidate and must be checked on the destination host. Keep
+Kubernetes access in `compose.devsy.yaml` separate and disabled until the exact
+provider, context, and VM network path have been verified. If the provider is
+qualified, use this overlay order so its selected read-only mounts are retained:
+`COMPOSE_FILE=compose.yaml:compose.vm-ssh.yaml:compose.devsy.yaml`. The optional
+host Devsy bridge remains off when `DEVSY_MCP_ENABLED=false`. With conventional
+SSH keys, insert `compose.vm-ssh-key.yaml` after `compose.vm-ssh.yaml` and before
+`compose.devsy.yaml`.
+
+For a no-tunnel staging startup, run `scripts/control-plane-up --staged`. It
+starts Executor, CAS, and app bootstrap while leaving `tunnel-client` stopped.
+After staged health passes, `scripts/control-plane-up --tunnel-only` starts
+only the tunnel client. It requires the staged application services to be
+healthy and the app bootstrap to have completed. Run
+`scripts/control-plane-down --tunnel-only` to stop only that client. Normal up
+and down continue to manage the full stack.
 
 ## Create the browser owner and organization
 

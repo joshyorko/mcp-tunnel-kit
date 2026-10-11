@@ -2,5 +2,13 @@
 set +x
 set -euo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
-[[ $# -eq 0 ]] || { printf '%s\n' 'usage: scripts/control-plane-down' >&2; exit 2; }
-exec "${CONTROL_PLANE_PYTHON:-python3}" scripts/compose_control.py down
+
+mode=down
+case "${1:-}" in
+  "") ;;
+  --tunnel-only) mode=down-tunnel ;;
+  *) printf '%s\n' 'usage: scripts/control-plane-down [--tunnel-only]' >&2; exit 2 ;;
+esac
+[[ $# -le 1 ]] || { printf '%s\n' 'Use one mode only.' >&2; exit 2; }
+
+exec "${CONTROL_PLANE_PYTHON:-python3}" scripts/compose_control.py "$mode"
