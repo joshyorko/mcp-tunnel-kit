@@ -403,6 +403,7 @@ def test_attested_unrelated_new_object_allows_full_proof(proof, retained):
 
 @pytest.mark.parametrize("field,value", [
     ("uid", "00000000-0000-4000-8000-000000000004"), ("resourceVersion", "124"),
+    ("creationTimestamp", "2026-10-11T17:04:53Z"),
     ("namespace", "other"), ("name", "other"), ("deletionTimestamp", "2026-10-11T18:00:00Z"),
     ("ownerReferences", [{"uid": "worker-uid"}]), ("labels", {"devsy.sh/created": "true"}),
 ])
@@ -418,12 +419,15 @@ def test_attestation_cannot_authorize_worker_owned_object(proof, retained):
     with pytest.raises(proof.module.ReconciliationError): proof.check()
 
 
-@pytest.mark.parametrize("change", ["namespace", "context", "evidence", "unbound", "mode", "tamper", "duplicate"])
+@pytest.mark.parametrize("change", ["namespace", "context", "evidence", "unbound", "mode", "tamper", "duplicate", "version", "data", "annotations"])
 def test_invalid_attestation_fails_closed(proof, retained, change):
     if change == "namespace": retained.data["namespace_uid"] = "other"
     if change == "context": retained.data["kubernetes_context"] = "other"
     if change == "evidence": retained.data["evidence"] = ""
     if change == "duplicate": retained.data["objects"] *= 2
+    if change == "version": retained.data["version"] = True
+    if change == "data": retained.data["objects"][0]["data"] = {"token": "not-a-secret"}
+    if change == "annotations": retained.data["objects"][0]["metadata"]["annotations"] = {"extra": "not-allowed"}
     retained.save()
     if change == "unbound": del proof.scope["bindings"][str(retained.path)]
     if change == "mode": retained.path.chmod(0o644)

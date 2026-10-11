@@ -225,17 +225,22 @@ def _retained_auxiliary(scope, namespace_uid):
     if hashlib.sha256(raw).hexdigest() != scope["bindings"][path]:
         _refuse()
     value = json.loads(raw)
-    if (value.get("version") != 1 or value.get("namespace_uid") != namespace_uid
+    if (set(value) != {"version", "namespace_uid", "namespace", "kubernetes_context", "evidence", "objects"}
+            or type(value.get("version")) is not int or value["version"] != 1 or value.get("namespace_uid") != namespace_uid
             or any(value.get(key) != scope[key] for key in ("namespace", "kubernetes_context"))
             or not isinstance(value.get("evidence"), str) or not value["evidence"].strip()
             or not isinstance(value.get("objects"), list) or not value["objects"]):
         _refuse()
     retained = {}
     for item in value["objects"]:
+        if set(item) != {"kind", "metadata"}:
+            _refuse()
         kind, metadata = item["kind"], item["metadata"]
         if kind not in {"Secret", "ConfigMap", "Role", "RoleBinding", "ServiceAccount"}:
             _refuse()
         _unowned_metadata(metadata, scope["namespace"])
+        if not metadata.keys() <= {"name", "namespace", "uid", "creationTimestamp", "resourceVersion", "labels", "ownerReferences"}:
+            _refuse()
         key = (kind, metadata["name"])
         if key in retained:
             _refuse()
