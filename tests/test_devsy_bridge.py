@@ -689,5 +689,6 @@ def test_image_create_uses_digest_without_git_or_devcontainer_override(tmp_path)
     result = devsy.scoped_execute('create', 'cas-worker-01', {**job, 'execution_context': execution, 'recipe_snapshot': recipe})
     args = json.loads((tmp_path/'image-args.json').read_text())
     assert args[args.index('up')+1] == 'image:ghcr.io/joshyorko/codex-action-server@sha256:'+'d'*64
+    assert args[args.index('--source')+1] == args[args.index('up')+1]
     assert '--devcontainer' not in args
     assert result['exit_code'] == 0
