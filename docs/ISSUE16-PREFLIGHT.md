@@ -1,6 +1,6 @@
 # Issue 16 migration preflight, 2026-10-11
 
-Status: source preparation in progress; production migration blocked. No VM staging, state copy, backup claim, tunnel handoff, credential mutation, or daemon restart occurred.
+Status: source changes under draft review; production migration blocked. No VM staging, state copy, backup claim, tunnel handoff, credential mutation, or daemon restart occurred.
 
 Issue: https://github.com/joshyorko/mcp-tunnel-kit/issues/16
 
@@ -47,3 +47,16 @@ Executor authoritative volume is codex-control-plane_executor-data mounted at /a
 Before future cutover: verify a consistent backup and restore integrity, stage with no tunnel, prove exact remote native and qualified provider reads, verify independent operator/rollback, stop Dakota tunnel through supported lifecycle and verify exit, then start one VM tunnel. On failure stop VM tunnel and verify exit before restoring Dakota tunnel. Do not stop old control-plane services until end-to-end acceptance.
 
 Workers: /root/cas_ssh and /root/vm_portability, both GPT-6 Luna medium. Root alone owns integration and live cutover.
+
+## CAS source validation
+
+Draft CAS PR: https://github.com/joshyorko/codex-action-server/pull/15
+Head: 396f7b283639c5ca05ff7e6b7937f3ab070ee54a. Optional pinned SSH config/known-host fields preserve existing targets; no worker probe was added to startup. Local package task test: 701 passed, 17 skipped. Skips cover 1 blank-worker image test, 6 container-image tests and 10 serialized composition/runtime tests. Package lint and whitespace check passed.
+
+Hosted CAS unit-test CI passed. Worker-image CI run 38154666273 and both provider jobs in run 38154666291 failed resolving the existing Containerfile.worker base digest de48bf9e2c93f8e358fcb5ac13e3159473245f5f271456c8f7d4dcc2ab881338 (not found). That pin is outside this patch and was not replaced. No green-CI, published-image or runtime acceptance claim is made for the new CAS source.
+
+## Tunnel-kit source validation
+
+Lane B source checkpoint: 00236830b0183c28395232588fab2a511d03d25b, integrated as 3522db3. Added VM SSH volume override, offline target preparation, staged no-tunnel startup and tunnel-only lifecycle. The Compose fixture verifies that adding the qualified Devsy overlay retains provider mounts while removing the native socket bind.
+
+Integrated affected suites (Compose, onboarding and combined control flow): 74 passed, 32 subtests passed. Shell syntax, base Compose configuration and whitespace checks passed. The first full host run had 366 passed, 64 subtests passed and 11 failures: ten native fixture/launcher tests refused the already-running production tunnel; one onboarding mock required the new startup keyword and was corrected before the affected-suite pass. The live tunnel was not stopped or bypassed for tests. Full hosted acceptance remains separate.
