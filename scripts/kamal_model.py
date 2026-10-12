@@ -163,6 +163,7 @@ def render(profile, manifest):
         options={
             "user": "1000:1000",
             "network-alias": "executor",
+            "log-opt": "max-size=10m",
             "health-cmd": "executor-host health",
             "health-interval": "10s",
             "health-timeout": "5s",
@@ -245,6 +246,7 @@ def render(profile, manifest):
         options={
             "user": "1000:1000",
             "read-only": True,
+            "log-opt": "max-size=10m",
             "cap-drop": ["ALL"],
             "security-opt": "no-new-privileges:true",
             "tmpfs": "/tmp:rw,exec,nosuid,nodev,size=256m,mode=1777",
@@ -299,6 +301,9 @@ def render(profile, manifest):
         "service": "mcp-control-plane",
         "image": images["cas"],
         "builder": {"arch": "amd64"},
+        # Suppress Kamal's implicit max-size for driver=none accessories.
+        # Executor/CAS retain bounded json-file logs through their own options.
+        "logging": {"driver": "json-file"},
         "servers": {"web": {"hosts": [host], "proxy": False}},
         # Kamal 2.12 matches local registries with /^localhost[:$]/, so a port
         # is required. Accessory prepare skips login; no registry is started.

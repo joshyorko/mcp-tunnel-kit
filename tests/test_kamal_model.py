@@ -106,6 +106,19 @@ def test_runner_ssh_uses_selected_key_without_agent_or_default_config():
     assert "/runner/tmp/kamal_known_hosts" not in json.dumps(config)
 
 
+def test_none_logging_accessories_do_not_inherit_kamal_default_size_option():
+    config = rendered()
+    # An explicit global driver suppresses Kamal's implicit max-size option.
+    assert config['logging'] == {'driver': 'json-file'}
+    for name, accessory in config['accessories'].items():
+        options = accessory['options']
+        if name in ('schema-proxy', 'tunnel'):
+            assert options['log-driver'] == 'none'
+            assert 'log-opt' not in options
+        else:
+            assert options['log-opt'] == 'max-size=10m'
+
+
 def test_executor_keeps_named_volume_loopback_port_and_network_alias():
     executor = rendered()["accessories"]["executor"]
 
