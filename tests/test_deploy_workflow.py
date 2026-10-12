@@ -79,6 +79,7 @@ class DeployWorkflowTests(unittest.TestCase):
                 "RUNNER_NAME": "pi5-01-mcp-control-plane",
             }
             with patch.object(deploy, "SSH", files[0]), \
+                    patch.object(deploy, "validate_ssh_config"), \
                     patch.object(deploy, "KEY", files[1]), \
                     patch.object(deploy, "KNOWN", files[2]), \
                     patch.object(deploy.socket, "gethostname", return_value="pi5-01"), \
