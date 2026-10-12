@@ -298,7 +298,8 @@ def render(profile, manifest):
     config = {
         "service": "mcp-control-plane",
         "image": images["cas"],
-        "proxy": False,
+        "builder": {"arch": "amd64"},
+        "servers": {"web": {"hosts": [host], "proxy": False}},
         # Kamal 2.12 accessory prepare calls registry.login. localhost makes
         # that command a no-op for these public images; no shared Docker auth is written.
         "registry": {

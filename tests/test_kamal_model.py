@@ -67,7 +67,9 @@ def test_accessory_model_keeps_private_control_plane_topology_and_order():
     config = rendered()
 
     assert config["service"] == "mcp-control-plane"
-    assert config["proxy"] is False
+    assert 'proxy' not in config
+    assert config['servers']['web']['proxy'] is False
+    assert config['builder']['arch'] == 'amd64'
     assert config["registry"] == {
         "server": "localhost",
         "username": "unused",
