@@ -1,0 +1,20 @@
+[Unit]
+Description=Bounded native Codex SSH endpoint on the Tailscale address
+# tailscaled is a system service, not a user-manager dependency. Retry until
+# its exact tailnet address exists; never bind a wildcard as a fallback.
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/sshd -D -e -f %h/.local/state/native-codex-ssh/sshd_config
+Restart=on-failure
+RestartSec=5s
+UMask=0077
+NoNewPrivileges=yes
+# Native daemon socket resolves into the host /tmp; isolation would hide it.
+PrivateTmp=no
+ProtectSystem=strict
+ReadWritePaths=%h/.local/state/native-codex-ssh
+RestrictAddressFamilies=AF_INET AF_UNIX
+
+[Install]
+WantedBy=default.target

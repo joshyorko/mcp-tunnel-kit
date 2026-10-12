@@ -1,0 +1,75 @@
+name: Deploy VM control plane
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Controlled operation (adopt is one-time Compose to Kamal handoff)
+        type: choice
+        default: preflight
+        options: [preflight, status, adopt, cas, deploy, rollback]
+        required: true
+      cas_digest:
+        description: Optional approved CAS sha256 digest; revision must also be supplied
+        type: string
+        required: false
+      cas_revision:
+        description: CAS source commit matching the image OCI revision label
+        type: string
+        required: false
+      approve_full_stack:
+        description: Explicitly approve bounded downtime for adopt, deploy, or rollback
+        type: boolean
+        default: false
+permissions:
+  contents: read
+concurrency:
+  group: mcp-control-plane-production
+  cancel-in-progress: false
+jobs:
+  deploy:
+    if: github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch'
+    runs-on: [self-hosted, Linux, ARM64, pi5-01, kamal, mcp-control-plane]
+    environment: control-plane-production
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Load existing pinned Ruby and isolated Kamal bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          export RBENV_ROOT=/home/kdlocpanda/.rbenv
+          export PATH="$RBENV_ROOT/bin:$RBENV_ROOT/shims:$PATH"
+          export RBENV_VERSION=3.4.8
+          export BUNDLE_GEMFILE="$GITHUB_WORKSPACE/Gemfile.deploy"
+          export BUNDLE_PATH=/home/kdlocpanda/.local/share/bundle/mcp-control-plane
+          export BUNDLE_APP_CONFIG=/home/kdlocpanda/.config/bundle/mcp-control-plane
+          export BUNDLE_FROZEN=true
+          ruby -v
+          bundle _2.6.9_ install --jobs 2 --retry 2
+          bundle _2.6.9_ exec kamal version
+          for name in RBENV_ROOT RBENV_VERSION BUNDLE_GEMFILE BUNDLE_PATH BUNDLE_APP_CONFIG BUNDLE_FROZEN; do
+            printf '%s=%s\n' "$name" "${!name}" >> "$GITHUB_ENV"
+          done
+          printf '%s\n' "$RBENV_ROOT/bin" "$RBENV_ROOT/shims" >> "$GITHUB_PATH"
+      - name: Locked, digest-pinned deployment and authenticated acceptance
+        shell: bash
+        env:
+          OPERATION: ${{ inputs.operation }}
+          CAS_DIGEST: ${{ inputs.cas_digest }}
+          CAS_REVISION: ${{ inputs.cas_revision }}
+          FULL_APPROVAL: ${{ inputs.approve_full_stack }}
+        run: |
+          set -euo pipefail
+          args=("$OPERATION" --cas-digest "$CAS_DIGEST" --cas-revision "$CAS_REVISION")
+          if [ "$FULL_APPROVAL" = true ]; then args+=(--approve-full-stack); fi
+          python3 scripts/deploy_control_plane.py "${args[@]}" | tee "$RUNNER_TEMP/control-plane-receipt.json"
+          {
+            printf '### Control-plane operation: %s\n\n' "$OPERATION"
+            printf 'Source `%s`; runner `%s`; VM `kamal-test-deploy`.\n\n' "$GITHUB_SHA" "$RUNNER_NAME"
+            printf '```json\n'
+            cat "$RUNNER_TEMP/control-plane-receipt.json"
+            printf '\n```\n'
+          } >> "$GITHUB_STEP_SUMMARY"

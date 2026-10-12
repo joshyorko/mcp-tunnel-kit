@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "images": {
+    "cas": {
+      "repository": "ghcr.io/joshyorko/codex-action-server",
+      "digest": "sha256:bda7ef55e9d31574aefbd650ec38bfbe993b5adbbfffc15a49a7ca83e6ba26ca",
+      "revision": "54278b1ecc3c67d46ebdb25148971814243f51a6"
+    },
+    "executor": {
+      "repository": "ghcr.io/usefulsoftwareco/executor-selfhost:2.0.0-beta.12",
+      "digest": "sha256:89a2b829150d01bc26305f844159ca8064ea8a4ace047490d09b6a3c8bdcf600"
+    },
+    "schema_proxy": {
+      "repository": "ghcr.io/joshyorko/codex-action-server",
+      "digest": "sha256:bda7ef55e9d31574aefbd650ec38bfbe993b5adbbfffc15a49a7ca83e6ba26ca",
+      "revision": "54278b1ecc3c67d46ebdb25148971814243f51a6"
+    },
+    "tunnel": {
+      "repository": "ghcr.io/openai/tunnel-client:v0.0.15",
+      "digest": "sha256:119799b778ba8411a124f53588f9dc837fd62ba03e5fadf77d675123c92ab58e"
+    }
+  }
+}

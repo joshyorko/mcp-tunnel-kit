@@ -257,6 +257,9 @@ def prepare(configuration) -> None:
     private_directory(mount(service, "/var/lib/codex-action-server/runtime"))
     private_directory(mount(service, "/var/lib/codex-action-server/receipts"))
     private_directory(mount(configuration["services"]["app-ready"], "/var/lib/tunnel-kit"))
+    for volume in configuration['services']['app-ready'].get('volumes', []):
+        if isinstance(volume, dict) and volume.get('target') == '/var/lib/deployment':
+            private_directory(Path(volume['source']))
     write_bind_file(target_file, json.dumps(generated, indent=2) + "\n")
 
 
@@ -903,11 +906,31 @@ def restart_cas(configuration):
     compose('up', '-d', '--no-deps', '--wait', '--wait-timeout', '120', 'codex-action-server', timeout=150)
 
 
+def guard_kamal_owner(mode):
+    if mode not in {'up', 'staged', 'tunnel-only', 'down', 'down-tunnel', 'restart-cas', 'restart-devsy', 'bootstrap'}:
+        return
+    authority = os.environ.get('CONTROL_PLANE_AUTHORITY_FILE')
+    if mode == 'bootstrap' and authority:
+        receipt = Path(authority)
+        if receipt.exists() and json.loads(read_private(receipt)).get('authority') == 'kamal':
+            raise ControlError('Kamal owns this deployment; app bootstrap refused.')
+        return
+    configuration = config()
+    state = Path(configuration['x-operator']['devsy_state']).resolve().parent
+    receipt = state / 'deployment/current.json'
+    if receipt.exists() and json.loads(read_private(receipt)).get('authority') == 'kamal':
+        raise ControlError('Kamal owns this deployment. Use the protected deploy-control-plane workflow or its runner break-glass command.')
+    names = '^/mcp-control-plane-(executor|schema-proxy|cas|tunnel)$'
+    if command(['docker', 'ps', '-aq', '--filter', 'name=' + names]).strip():
+        raise ControlError('Kamal containers exist; Compose lifecycle refused to avoid competing managers.')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=("first-run", "secrets", "check", "up", "staged", "tunnel-only", "down", "down-tunnel", "status", "bootstrap", "probe", "resume", "restart-devsy", "restart-cas"))
     args = parser.parse_args()
     try:
+        guard_kamal_owner(args.mode)
         if args.mode in {"bootstrap", "probe", "resume"}:
             def expire(_signal, _frame):
                 raise ControlError("The bounded bootstrap/probe deadline expired.")

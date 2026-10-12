@@ -94,7 +94,8 @@ class ComposeBoundaryTests(unittest.TestCase):
             {'Service': 'codex-action-server', 'State': 'running', 'Health': 'healthy'},
             {'Service': 'app-ready', 'State': 'exited', 'ExitCode': 0},
         ]
-        with patch.object(helper, 'config', return_value={}), \
+        with patch.object(helper, 'guard_kamal_owner'), \
+             patch.object(helper, 'config', return_value={}), \
              patch.object(helper, 'compose_rows', return_value=rows), \
              patch.object(helper, 'refuse_external_tunnel'), \
              patch.object(helper, 'compose', side_effect=lambda *args, **kwargs: calls.append(args)), \
@@ -119,7 +120,8 @@ class ComposeBoundaryTests(unittest.TestCase):
     def test_tunnel_only_down_stops_no_other_service(self):
         helper = self.helper()
         calls = []
-        with patch.object(helper, 'compose', side_effect=lambda *args, **kwargs: calls.append(args)), \
+        with patch.object(helper, 'guard_kamal_owner'), \
+             patch.object(helper, 'compose', side_effect=lambda *args, **kwargs: calls.append(args)), \
              patch('sys.argv', ['compose_control.py', 'down-tunnel']):
             self.assertEqual(helper.main(), 0)
         self.assertEqual(calls, [('stop', '--timeout', '30', 'tunnel-client')])
