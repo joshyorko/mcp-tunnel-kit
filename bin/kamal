@@ -1,0 +1,9 @@
+#!/usr/bin/env python3
+"""Local operator entrypoint for this singleton Kamal accessory stack."""
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
+from local_kamal import main
+
+raise SystemExit(main())

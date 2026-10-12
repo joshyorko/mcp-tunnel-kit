@@ -5,6 +5,42 @@ Kamal 2.12.0 **accessories**, using GitHub's dedicated `pi5-01-mcp-control-plane
 ARM64 runner. Fizzy's runner/service and the existing Kamal proxy are separate.
 Images are published Linux amd64 artifacts; nothing is rebuilt on the Pi.
 
+## Local workstation commands
+
+From this repository on Dakota, `bin/kamal` reads the ignored, private
+`.env.kamal.local` and connects **directly to the VM** using the existing SSH key
+and pinned host identity. It does not relay through the Pi or GitHub.
+
+```sh
+bin/kamal accessory deploy       # full pinned redeploy
+bin/kamal accessory deploy cas   # CAS only
+bin/kamal accessory stop         # stop this stack; retain containers/data
+bin/kamal accessory start        # health-ordered start of existing containers
+bin/kamal accessory details      # VM service status
+bin/kamal rollback              # previous recorded generation
+```
+
+The equivalent shortcuts are `make deploy`, `make cas`, `make down`, `make up`,
+`make status`, and `make rollback`. Stop disconnects the production tool connection;
+start checks Executor identity before starting the tunnel. Both use the same VM
+lock as GitHub deployments. Full start/stop also manages only the stack's existing
+host Devsy service. Other applications and Dakota's native Codex are unaffected.
+
+This repository's `accessory deploy` command is an operator alias for the tested
+Kamal accessory reboot sequence, with image pins, backup, health checks and
+rollback. `bin/kamal deploy` is the same shortcut; it does not build an app image
+or invoke Kamal's top-level app/proxy deployment. `start`/`stop` use real Kamal
+accessory lifecycle operations and do not pull images or recreate containers.
+
+For another local checkout, use `config/kamal-local.env.example` to create a
+0600 `.env.kamal.local` with three absolute file references. The referenced SSH
+config, existing key and known-hosts file must also be private (0600), and the
+configuration must match the existing VM pin and strict SSH policy. No registry,
+tunnel or kubeconfig secrets belong in this local file. `make setup` installs the
+locked Kamal bundle under the user's data directory using installed Ruby 3.4.8;
+Fizzy's bundle/configuration is not modified. The environment file is parsed as
+data, never executed as shell code.
+
 ## GitHub operations
 
 Open Actions → **Deploy VM control plane** → **Run workflow**, select **main**.

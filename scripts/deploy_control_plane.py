@@ -35,11 +35,9 @@ VM_HOST_PIN='SHA256:S6qJ1D1sigx5Dj2ZQH5XCP7DspX/gTWJemO9/Q+2Se8'
 
 
 def trusted_context(env, local=False):
-    if local:
-        if not LOCAL_CONFIGURED:raise ValueError('Local deployment requires an explicitly loaded private SSH config')
-    else:
+    if not (local and LOCAL_CONFIGURED):
         if socket.gethostname()!='pi5-01' or os.uname().machine!='aarch64':raise ValueError('Deployment must run on the approved ARM64 Pi')
-        if (env.get('GITHUB_REPOSITORY')!='joshyorko/mcp-tunnel-kit' or env.get('GITHUB_REF')!='refs/heads/main' or env.get('GITHUB_EVENT_NAME')!='workflow_dispatch' or env.get('RUNNER_NAME')!='pi5-01-mcp-control-plane'):
+        if not local and (LOCAL_CONFIGURED or env.get('GITHUB_REPOSITORY')!='joshyorko/mcp-tunnel-kit' or env.get('GITHUB_REF')!='refs/heads/main' or env.get('GITHUB_EVENT_NAME')!='workflow_dispatch' or env.get('RUNNER_NAME')!='pi5-01-mcp-control-plane'):
             raise ValueError('Untrusted workflow/runner context')
     for p in (SSH,KEY,KNOWN):
         s=p.lstat()
@@ -310,7 +308,7 @@ def execute(args):
 
 
 def main():
-    p=argparse.ArgumentParser();p.add_argument('operation',choices=('preflight','status','adopt','cas','deploy','rollback'));p.add_argument('--cas-digest',default='');p.add_argument('--cas-revision',default='');p.add_argument('--approve-full-stack',action='store_true');p.add_argument('--local',action='store_true',help='Direct operator mode; requires configure_local(path) first')
+    p=argparse.ArgumentParser();p.add_argument('operation',choices=('preflight','status','adopt','cas','deploy','rollback'));p.add_argument('--cas-digest',default='');p.add_argument('--cas-revision',default='');p.add_argument('--approve-full-stack',action='store_true');p.add_argument('--local',action='store_true',help='Approved Pi break-glass, or bin/kamal with explicit private local config')
     args=p.parse_args()
     try:print(json.dumps(execute(args),indent=2))
     except Exception as e:print(str(e),file=sys.stderr);sys.exit(1)

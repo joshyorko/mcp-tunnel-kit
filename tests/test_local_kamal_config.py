@@ -114,7 +114,7 @@ PreferredAuthentications publickey
             deploy.configure_local(self.env_file)
 
     def test_local_bypass_requires_explicit_configuration_and_does_not_relax_ci_gates(self):
-        with self.assertRaisesRegex(ValueError, "explicitly loaded"):
+        with patch.object(deploy.socket, "gethostname", return_value="dakota"), self.assertRaisesRegex(ValueError, "approved ARM64 Pi"):
             deploy.trusted_context({}, local=True)
 
         with self.configured():
@@ -138,6 +138,13 @@ PreferredAuthentications publickey
                     patch.object(deploy.os, "uname", return_value=type("U", (), {"machine": "aarch64"})()):
                 with self.assertRaisesRegex(ValueError, "Untrusted workflow"):
                     deploy.trusted_context({**good_ci, "GITHUB_REF": "refs/heads/fork"}, local=False)
+
+    def test_existing_pi_break_glass_still_works_without_local_config(self):
+        with self.configured(), patch.object(deploy, 'SSH', self.ssh), \
+                patch.object(deploy, 'KEY', self.key), patch.object(deploy, 'KNOWN', self.known), \
+                patch.object(deploy.socket, 'gethostname', return_value='pi5-01'), \
+                patch.object(deploy.os, 'uname', return_value=type('U', (), {'machine': 'aarch64'})()):
+            deploy.trusted_context({}, local=True)
 
     def test_start_is_a_supported_accessory_operation(self):
         with patch.object(deploy, "remote", return_value={"path": "/private/empty-docker-config"}), \

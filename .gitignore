@@ -55,7 +55,8 @@ log/
 .secrets.baseline
 
 # External/downloaded binaries and build artifacts
-bin/
+bin/*
+!bin/kamal
 binaries/
 downloads/
 build/
