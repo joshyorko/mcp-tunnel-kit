@@ -300,10 +300,10 @@ def render(profile, manifest):
         "image": images["cas"],
         "builder": {"arch": "amd64"},
         "servers": {"web": {"hosts": [host], "proxy": False}},
-        # Kamal 2.12 accessory prepare calls registry.login. localhost makes
-        # that command a no-op for these public images; no shared Docker auth is written.
+        # Kamal 2.12 matches local registries with /^localhost[:$]/, so a port
+        # is required. Accessory prepare skips login; no registry is started.
         "registry": {
-            "server": "localhost",
+            "server": "localhost:5555",
             "username": "unused",
             "password": "unused",
         },
