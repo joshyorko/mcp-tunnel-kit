@@ -98,6 +98,27 @@ proxy setup, `docker compose down -v`, pruning, blank Executor initialization or
 credential rotation. The original Dakota rollback from #16 remains separately
 retained; do not start it while the VM production tunnel is live.
 
+For status directly on the VM, run from `/home/kdlocpanda/Projects/mcp-tunnel-kit`:
+
+```sh
+python3 scripts/vm_deploy_host.py status
+```
+
+After Kamal adoption, an existing accessory can be restarted locally without
+the runner. This example restarts only CAS and takes the same VM deployment
+lock; if the lock is busy, let the running deployment finish before retrying.
+
+```sh
+printf '%s\n' '{"service":"cas"}' | flock -n \
+  /home/kdlocpanda/.local/share/codex-control-plane/deployment/deploy.lock \
+  python3 scripts/vm_deploy_host.py restart-local
+```
+
+This restarts the existing container; image changes and generation rollback use
+the approved runner. A failed deployment reports its fixed phase name and whether
+automatic rollback succeeded. `automatic rollback FAILED` requires recovery;
+it is not a claim that production was restored.
+
 The VM's `deployment/current.json` and `previous.json` record authority, source
 and image generations. `deployment/backups` contains private encrypted-volume and
 essential-state archives. Digest rollback preserves current application data;
