@@ -118,3 +118,18 @@ PreferredAuthentications publickey
     with pytest.raises(ValueError,match='fingerprint mismatch'):d.validate_ssh_config(config,key,known)
     config.write_text(config.read_text().replace('StrictHostKeyChecking yes','StrictHostKeyChecking no'))
     with pytest.raises(ValueError,match='not strictly pinned'):d.validate_ssh_config(config,key,known)
+
+
+def test_bootstrap_container_checks_mounted_authority_without_docker(tmp_path):
+    spec=importlib.util.spec_from_file_location('compose_container_guard',ROOT/'scripts/compose_control.py');c=importlib.util.module_from_spec(spec);spec.loader.exec_module(c)
+    r=tmp_path/'current.json';r.write_text('{"authority":"kamal"}');r.chmod(0o600)
+    with patch.dict(os.environ,{'CONTROL_PLANE_AUTHORITY_FILE':str(r)}),patch.object(c,'config',side_effect=AssertionError('Bootstrap container has no Docker')):
+        with pytest.raises(c.ControlError,match='bootstrap refused'):c.guard_kamal_owner('bootstrap')
+        r.write_text('{"authority":"compose"}')
+        c.guard_kamal_owner('bootstrap')
+
+
+def test_network_check_handles_host_and_null_networks_without_stopping_production():
+    rows=[{'Name':'host','IPAM':{'Config':None}},{'Name':'none','IPAM':{'Config':None}}]
+    with patch.object(h,'run',side_effect=[b'a b',json.dumps(rows).encode(),b'[]']):
+        assert h.network_check(d.profile()['network']) is False

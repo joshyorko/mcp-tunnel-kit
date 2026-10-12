@@ -133,14 +133,14 @@ def network_check(want):
     ids=run(['docker','network','ls','-q']).decode().split();rows=json.loads(run(['docker','network','inspect',*ids]))
     bridges=[];exists=False
     for row in rows:
-        for item in row.get('IPAM',{}).get('Config',[]):
+        for item in row.get('IPAM',{}).get('Config') or []:
             subnet=item.get('Subnet')
             if subnet and ipaddress.ip_network(subnet).version==4 and ipaddress.ip_network(subnet).overlaps(ipaddress.ip_network(want['subnet'])):
                 labels=row.get('Labels',{}) or {}
                 owned=(row['Name']==want['name'] and labels.get('mcp-control-plane.owner')=='kamal')
                 compose=(row['Name']=='codex-control-plane_control-plane' and labels.get('com.docker.compose.project')=='codex-control-plane' and labels.get('com.docker.compose.network')=='control-plane')
                 if row['Driver']!='bridge' or not (owned or compose) or subnet!=want['subnet'] or item.get('Gateway')!=want['gateway']:raise ValueError('Private network conflicts with another owner')
-                bridges.append(row.get('Options',{}).get('com.docker.network.bridge.name','br-'+row['Id'][:12]))
+                bridges.append((row.get('Options') or {}).get('com.docker.network.bridge.name','br-'+row['Id'][:12]))
                 exists=exists or owned
     if len(bridges)>1:raise ValueError('Multiple private network owners')
     for route in json.loads(run(['ip','-j','-4','route','show'])):

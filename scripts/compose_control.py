@@ -257,6 +257,9 @@ def prepare(configuration) -> None:
     private_directory(mount(service, "/var/lib/codex-action-server/runtime"))
     private_directory(mount(service, "/var/lib/codex-action-server/receipts"))
     private_directory(mount(configuration["services"]["app-ready"], "/var/lib/tunnel-kit"))
+    for volume in configuration['services']['app-ready'].get('volumes', []):
+        if isinstance(volume, dict) and volume.get('target') == '/var/lib/deployment':
+            private_directory(Path(volume['source']))
     write_bind_file(target_file, json.dumps(generated, indent=2) + "\n")
 
 
@@ -905,6 +908,12 @@ def restart_cas(configuration):
 
 def guard_kamal_owner(mode):
     if mode not in {'up', 'staged', 'tunnel-only', 'down', 'down-tunnel', 'restart-cas', 'restart-devsy', 'bootstrap'}:
+        return
+    authority = os.environ.get('CONTROL_PLANE_AUTHORITY_FILE')
+    if mode == 'bootstrap' and authority:
+        receipt = Path(authority)
+        if receipt.exists() and json.loads(read_private(receipt)).get('authority') == 'kamal':
+            raise ControlError('Kamal owns this deployment; app bootstrap refused.')
         return
     configuration = config()
     state = Path(configuration['x-operator']['devsy_state']).resolve().parent

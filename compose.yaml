@@ -135,6 +135,7 @@ services:
       DEVSY_MCP_ENABLED: ${DEVSY_MCP_ENABLED:-false}
       DEVSY_MCP_URL: http://${CONTROL_PLANE_GATEWAY:-172.30.86.1}:8089/mcp
       CONTROL_PLANE_BOOTSTRAP_DIR: /var/lib/tunnel-kit
+      CONTROL_PLANE_AUTHORITY_FILE: /var/lib/deployment/current.json
       EXECUTOR_PAT_FILE: /run/secrets/executor-pat
     secrets:
       - executor-pat
@@ -143,6 +144,12 @@ services:
       - type: bind
         source: ${CONTROL_PLANE_STATE_DIR:-./.state}/bootstrap
         target: /var/lib/tunnel-kit
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${CONTROL_PLANE_STATE_DIR:-./.state}/deployment
+        target: /var/lib/deployment
+        read_only: true
         bind:
           create_host_path: false
     networks:
