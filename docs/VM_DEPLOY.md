@@ -41,8 +41,10 @@ Fresh worker creation/deletion is never a deployment smoke test.
 Kamal accessories are named `mcp-control-plane-executor`,
 `mcp-control-plane-schema-proxy`, `mcp-control-plane-cas`, and
 `mcp-control-plane-tunnel`. The top-level Kamal app/proxy/registry lifecycle is
-never invoked. Public image pulls use Kamal's local-registry login no-op; they do
-not replace shared Docker registry credentials.
+never invoked. Public image pulls use Kamal's local-registry login no-op and a
+dedicated empty Docker config under `deployment/anonymous-docker-config` on the
+VM. The same config is used for Compose recovery. Shared Docker registry
+credentials are neither used nor replaced.
 
 Executor keeps the original `codex-control-plane_executor-data` named volume.
 Existing private VM files remain under
