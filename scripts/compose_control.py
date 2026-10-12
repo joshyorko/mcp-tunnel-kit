@@ -25,6 +25,7 @@ import urllib.request
 ROOT = Path(__file__).resolve().parents[1]
 PROJECT = "codex-control-plane"
 NETWORK = PROJECT + "_control-plane"
+KAMAL_NETWORK = "mcp-control-plane"
 COMPACT = {"execute", "resume", "skills"}
 PROTOCOL_VERSIONS = {"2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"}
 DEVSY_READS = {"provider_list", "workspace_list", "workspace_status", "workspace_diagnostics", "workspace_create_receipt", "workspace_status_scoped"}
@@ -116,7 +117,7 @@ def config():
     return json.loads(compose("config", "--format", "json"))
 
 
-def validate_network(subnet, gateway, routes, networks) -> None:
+def validate_network(subnet, gateway, routes, networks, *, allow_kamal=False) -> None:
     try:
         chosen = ipaddress.IPv4Network(subnet, strict=True)
         address = ipaddress.IPv4Address(gateway)
@@ -128,8 +129,18 @@ def validate_network(subnet, gateway, routes, networks) -> None:
     managed_interfaces = set()
     for network in networks:
         own = network.get("Name") == NETWORK
+        kamal = allow_kamal and network.get("Name") == KAMAL_NETWORK
         labels = network.get("Labels") or {}
         entries = (network.get("IPAM") or {}).get("Config") or []
+        if kamal:
+            if (network.get("Driver") != "bridge"
+                    or labels.get("mcp-control-plane.owner") != "kamal"
+                    or len(entries) != 1 or entries[0].get("Subnet") != subnet
+                    or entries[0].get("Gateway") != gateway):
+                raise ControlError("The existing Kamal bridge does not match its owner, subnet, and gateway.")
+            interface = (network.get("Options") or {}).get("com.docker.network.bridge.name")
+            managed_interfaces.add(interface or "br-" + network.get("Id", "")[:12])
+            continue
         if own:
             if (network.get("Driver") != "bridge"
                     or labels.get("com.docker.compose.project") != PROJECT
@@ -145,6 +156,8 @@ def validate_network(subnet, gateway, routes, networks) -> None:
             if other and ipaddress.ip_network(other, strict=False).version == 4:
                 if chosen.overlaps(ipaddress.ip_network(other, strict=False)):
                     raise ControlError("The chosen subnet overlaps an unrelated Docker network. Choose another private /24.")
+    if len(managed_interfaces) > 1:
+        raise ControlError("Multiple managed bridges claim the selected subnet.")
     for route in routes:
         destination = route.get("dst", "default")
         if destination == "default":
@@ -161,7 +174,7 @@ def validate_engine(options) -> None:
         raise ControlError("This host-network deployment requires rootful Linux Docker without user namespace remapping.")
 
 
-def network_preflight(configuration) -> None:
+def network_preflight(configuration, *, allow_kamal=False) -> None:
     validate_engine(json.loads(command(["docker", "info", "--format", "{{json .SecurityOptions}}"])))
     ipam = configuration["networks"]["control-plane"]["ipam"]["config"]
     if len(ipam) != 1 or configuration.get("name") != PROJECT:
@@ -169,7 +182,8 @@ def network_preflight(configuration) -> None:
     ids = command(["docker", "network", "ls", "--quiet"]).split()
     networks = json.loads(command(["docker", "network", "inspect", *ids])) if ids else []
     routes = json.loads(command(["ip", "-json", "-4", "route", "show", "table", "all"]))
-    validate_network(ipam[0]["subnet"], ipam[0]["gateway"], routes, networks)
+    validate_network(ipam[0]["subnet"], ipam[0]["gateway"], routes, networks,
+                     allow_kamal=allow_kamal)
 
 
 def read_operator_targets(source: Path):

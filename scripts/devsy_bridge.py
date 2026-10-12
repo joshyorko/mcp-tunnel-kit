@@ -871,9 +871,9 @@ def serve(config):
     signal.signal(signal.SIGINT, shutdown)
     value = json.loads(read_private(Path(config)))
     validate_settings(value)
-    # Direct invocation still must prove the managed Compose network and gateway.
+    # Direct invocation must prove the managed Compose or Kamal network and gateway.
     configuration = compose_config()
-    network_preflight(configuration)
+    network_preflight(configuration, allow_kamal=True)
     if settings(configuration) != value:
         raise BridgeError('Host bridge settings do not match the managed Compose configuration.')
     state = Path(value['state'])

@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import re
 import sqlite3
+import stat
 import subprocess
 import sys
 import tarfile
@@ -18,6 +19,7 @@ import time
 ROOT = Path('/home/kdlocpanda/Projects/mcp-tunnel-kit')
 STATE = Path('/home/kdlocpanda/.local/share/codex-control-plane')
 STORE = STATE / 'deployment'
+PUBLIC_DOCKER_CONFIG = STORE / 'anonymous-docker-config'
 NAMES = {'compose': {'executor':'codex-control-plane-executor-1','schema-proxy':'codex-control-plane-executor-schema-proxy-1','cas':'codex-control-plane-codex-action-server-1','tunnel':'codex-control-plane-tunnel-client-1'},
          'kamal': {name:'mcp-control-plane-'+name for name in ('executor','schema-proxy','cas','tunnel')}}
 
@@ -27,6 +29,57 @@ def run(args, timeout=180, env=None):
     if r.returncode:
         raise RuntimeError('VM operation failed: '+Path(args[0]).name+'; output withheld')
     return r.stdout
+
+
+def ensure_anonymous_docker_config():
+    """Create/validate an empty private config, isolated from ~/.docker."""
+    STORE.mkdir(mode=0o700, parents=True, exist_ok=True)
+    store_stat = STORE.lstat()
+    if (not STORE.is_dir() or STORE.is_symlink() or store_stat.st_uid != os.getuid()
+            or store_stat.st_mode & 0o777 != 0o700):
+        raise ValueError('Deployment directory is not private')
+    PUBLIC_DOCKER_CONFIG.mkdir(mode=0o700, exist_ok=True)
+    directory_stat = PUBLIC_DOCKER_CONFIG.lstat()
+    if (not PUBLIC_DOCKER_CONFIG.is_dir() or PUBLIC_DOCKER_CONFIG.is_symlink()
+            or directory_stat.st_uid != os.getuid() or directory_stat.st_mode & 0o777 != 0o700):
+        raise ValueError('Anonymous Docker config directory is unsafe')
+
+    config = PUBLIC_DOCKER_CONFIG / 'config.json'
+    try:
+        fd = os.open(config, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    except FileExistsError:
+        fd = None
+    if fd is not None:
+        with os.fdopen(fd, 'wb') as stream:
+            stream.write(b'{}\n')
+            stream.flush()
+            os.fsync(stream.fileno())
+    try:
+        metadata = config.lstat()
+        entries = {entry.name for entry in PUBLIC_DOCKER_CONFIG.iterdir()}
+        if (entries != {'config.json'} or not config.is_file() or config.is_symlink()
+                or metadata.st_uid != os.getuid() or metadata.st_mode & 0o777 != 0o600):
+            raise ValueError('Anonymous Docker config is unsafe')
+        read_fd = os.open(config, os.O_RDONLY | os.O_NOFOLLOW)
+        opened_stat = os.fstat(read_fd)
+        if (not stat.S_ISREG(opened_stat.st_mode) or opened_stat.st_uid != os.getuid()
+                or opened_stat.st_mode & 0o777 != 0o600):
+            os.close(read_fd)
+            raise ValueError('Anonymous Docker config is unsafe')
+        with os.fdopen(read_fd, 'rb') as stream:
+            valid_config = stream.read(1024) == b'{}\n' and stream.read(1) == b''
+    except OSError as exc:
+        raise ValueError('Anonymous Docker config is unsafe') from exc
+    if not valid_config:
+        raise ValueError('Anonymous Docker config is unsafe')
+    return PUBLIC_DOCKER_CONFIG
+
+
+def anonymous_docker_environment():
+    env = os.environ.copy()
+    env.pop('DOCKER_AUTH_CONFIG', None)
+    env['DOCKER_CONFIG'] = str(ensure_anonymous_docker_config())
+    return env
 
 
 def private(path):
@@ -116,11 +169,13 @@ def validate_profile():
 def images(manifest, pull=True):
     repos={'cas':'ghcr.io/joshyorko/codex-action-server','schema_proxy':'ghcr.io/joshyorko/codex-action-server','executor':'ghcr.io/usefulsoftwareco/executor-selfhost:2.0.0-beta.12','tunnel':'ghcr.io/openai/tunnel-client:v0.0.15'}
     if set(manifest['images'])!=set(repos): raise ValueError('Image set mismatch')
-    result={}
     for name,want in manifest['images'].items():
         if want['repository']!=repos[name] or not re.fullmatch(r'sha256:[0-9a-f]{64}',want['digest']): raise ValueError('Unapproved image reference')
+    result={}
+    pull_env=anonymous_docker_environment() if pull else None
+    for name,want in manifest['images'].items():
         ref=want['repository']+'@'+want['digest']
-        if pull:run(['docker','pull','--platform','linux/amd64',ref],600)
+        if pull:run(['docker','pull','--platform','linux/amd64',ref],600,env=pull_env)
         r=json.loads(run(['docker','image','inspect',ref]))[0]
         if r['Architecture']!='amd64' or r['Os']!='linux': raise ValueError('Image architecture mismatch')
         if name in ('cas','schema_proxy') and (not re.fullmatch('[0-9a-f]{40}',want.get('revision','')) or r['Config'].get('Labels',{}).get('org.opencontainers.image.revision')!=want['revision']): raise ValueError('CAS source provenance mismatch')
@@ -224,6 +279,15 @@ def smoke():
     return {'catalog':'PASS','native_read':'PASS','devsy_reads':'PASS'}
 
 
+def compose_start():
+    env=anonymous_docker_environment()
+    env['DEVSY_MCP_ENABLED']='false'
+    run(['sudo','-n','systemctl','stop','codex-control-plane-devsy'])
+    run([str(ROOT/'scripts/control-plane-up')],900,env=env)
+    run(['sudo','-n','systemctl','start','codex-control-plane-devsy'])
+    return {'compose_started':True}
+
+
 def main():
     os.umask(0o077);STORE.mkdir(mode=0o700,exist_ok=True)
     action=sys.argv[1];data=json.load(sys.stdin) if action in ('images','image-check','network','network-check','wait','commit','baseline','set-current','rollback-commit','restart-local') else {}
@@ -241,6 +305,7 @@ def main():
         if r['Config'].get('Labels',{}).get('service')!=NAMES['kamal'][name]:raise ValueError('Accessory ownership mismatch')
         run(['docker','restart',r['Id']]);wait_service('kamal',name);result={'break_glass_restart':name,'health':'PASS'}
     elif action=='profile':validate_profile();result={'private_mounts':'PASS','active_provisioning':False}
+    elif action=='anonymous-docker-config':result={'path':str(ensure_anonymous_docker_config())}
     elif action=='current':result=json.loads(private(STORE/'current.json')) if (STORE/'current.json').exists() else None
     elif action=='images':result={'image_provenance':'PASS','image_ids':images(data)}
     elif action=='image-check':result={'image_provenance':'PASS','image_ids':images(data,pull=False)}
@@ -270,10 +335,7 @@ def main():
     elif action=='compose-stop':
         run(['sudo','-n','systemctl','stop','codex-control-plane-devsy']);run([str(ROOT/'scripts/control-plane-down')]);result={'compose_stopped':True}
     elif action=='compose-start':
-        run(['sudo','-n','systemctl','stop','codex-control-plane-devsy'])
-        env={**os.environ,'DEVSY_MCP_ENABLED':'false'}
-        run([str(ROOT/'scripts/control-plane-up')],900,env=env)
-        run(['sudo','-n','systemctl','start','codex-control-plane-devsy']);result={'compose_started':True}
+        result=compose_start()
     elif action=='devsy-start':
         helper=ROOT/'scripts/host_devsy_service.py'
         starter=STATE/'start-host-devsy.py';old=STATE/'deployment/start-host-devsy.before-kamal.py'
