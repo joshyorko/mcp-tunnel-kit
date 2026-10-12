@@ -40,6 +40,65 @@ def test_bind_refuses_wildcard_loopback_lan_and_wrong_gateway():
             raise AssertionError("Unsafe bind accepted")
 
 
+def test_serve_uses_kamal_aware_host_network_preflight(tmp_path, monkeypatch):
+    import contextlib
+    import json
+    import sys
+    import types
+    import pytest
+
+    module = bridge()
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    value = {"subnet": "172.30.86.0/24", "gateway": "172.30.86.1",
+             "binary": "/usr/bin/devsy", "cwd": str(tmp_path), "state": str(state),
+             "home": "", "targets_source": None, "scope_source": None, "registry_source": None}
+    configuration = {"networks": {"control-plane": {"ipam": {"config": [
+        {"subnet": value["subnet"], "gateway": value["gateway"]}]}}}}
+    preflights = []
+
+    class StopAfterStartup(Exception):
+        pass
+
+    class FakeDevsy:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def catalog(self):
+            return []
+
+    class FakeServer:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def serve_forever(self, **_kwargs):
+            raise StopAfterStartup
+
+        def server_close(self):
+            pass
+
+    compose = types.ModuleType("compose_control")
+    compose.read_private = lambda _path: json.dumps(value)
+    compose.write_private = lambda path, contents: Path(path).write_text(contents)
+    compose.network_preflight = lambda config, **kwargs: preflights.append(kwargs)
+    compose.config = lambda: configuration
+    compose.state_lock = lambda *_args, **_kwargs: contextlib.nullcontext()
+    monkeypatch.setitem(sys.modules, "compose_control", compose)
+    monkeypatch.setattr(module, "validate_settings", lambda _value: None)
+    monkeypatch.setattr(module, "settings", lambda _configuration: value)
+    monkeypatch.setattr(module, "Devsy", FakeDevsy)
+    monkeypatch.setattr(module, "BridgeServer", FakeServer)
+    monkeypatch.setattr(module, "state_lock", lambda *_args, **_kwargs: contextlib.nullcontext())
+    monkeypatch.setattr(module, "process_identity", lambda _pid: "fixture-start")
+    monkeypatch.setattr(module, "stop_children", lambda: None)
+    monkeypatch.setattr(module.signal, "signal", lambda *_args: None)
+
+    with pytest.raises(StopAfterStartup):
+        module.serve(str(tmp_path / "config.json"))
+
+    assert preflights == [{"allow_kamal": True}]
+
+
 def fixture(module, tmp_path, **environment):
     import os
     import sys

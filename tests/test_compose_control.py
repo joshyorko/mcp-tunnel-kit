@@ -260,6 +260,62 @@ class ComposeBoundaryTests(unittest.TestCase):
         with self.assertRaises(helper.ControlError):
             helper.validate_network("172.30.86.0/24", "172.30.86.1", routes, [network])
 
+    def test_kamal_bridge_is_only_accepted_for_explicit_host_bridge_preflight(self):
+        helper = self.helper()
+        network = {"Name": "mcp-control-plane", "Driver": "bridge", "Id": "abcdef1234567890",
+                   "Labels": {"mcp-control-plane.owner": "kamal"},
+                   "IPAM": {"Config": [{"Subnet": "172.30.86.0/24", "Gateway": "172.30.86.1"}]}}
+        routes = [{"dst": "172.30.86.0/24", "dev": "br-abcdef123456"}]
+
+        with self.assertRaises(helper.ControlError):
+            helper.validate_network("172.30.86.0/24", "172.30.86.1", routes, [network])
+        helper.validate_network("172.30.86.0/24", "172.30.86.1", routes, [network], allow_kamal=True)
+
+        for field, value in (("Driver", "macvlan"),):
+            invalid = {**network, field: value}
+            with self.subTest(field=field), self.assertRaises(helper.ControlError):
+                helper.validate_network("172.30.86.0/24", "172.30.86.1", routes, [invalid], allow_kamal=True)
+
+        for labels, subnet, gateway in (
+            ({"mcp-control-plane.owner": "other"}, "172.30.86.0/24", "172.30.86.1"),
+            ({"mcp-control-plane.owner": "kamal"}, "172.30.85.0/24", "172.30.85.1"),
+            ({"mcp-control-plane.owner": "kamal"}, "172.30.86.0/24", "172.30.86.2"),
+        ):
+            invalid = {**network, "Labels": labels, "IPAM": {"Config": [{"Subnet": subnet, "Gateway": gateway}]}}
+            with self.subTest(labels=labels, subnet=subnet, gateway=gateway), self.assertRaises(helper.ControlError):
+                helper.validate_network("172.30.86.0/24", "172.30.86.1", routes, [invalid], allow_kamal=True)
+
+        with self.assertRaises(helper.ControlError):
+            helper.validate_network("172.30.86.0/24", "172.30.86.1",
+                                    [{"dst": "172.30.0.0/16", "dev": "vpn0"}], [network], allow_kamal=True)
+
+        compose_network = {"Name": "codex-control-plane_control-plane", "Driver": "bridge",
+                           "Id": "123456789012abcdef",
+                           "Labels": {"com.docker.compose.project": "codex-control-plane",
+                                      "com.docker.compose.network": "control-plane"},
+                           "IPAM": {"Config": [{"Subnet": "172.30.86.0/24", "Gateway": "172.30.86.1"}]}}
+        with self.assertRaises(helper.ControlError):
+            helper.validate_network("172.30.86.0/24", "172.30.86.1", routes,
+                                    [network, compose_network], allow_kamal=True)
+
+    def test_host_bridge_preflight_forwards_explicit_kamal_network_permission(self):
+        helper = self.helper()
+        configuration = {"name": "codex-control-plane", "networks": {"control-plane": {"ipam": {"config": [
+            {"subnet": "172.30.86.0/24", "gateway": "172.30.86.1"}]}}}}
+        network = {"Name": "mcp-control-plane", "Driver": "bridge", "Id": "abcdef1234567890",
+                   "Labels": {"mcp-control-plane.owner": "kamal"},
+                   "IPAM": {"Config": [{"Subnet": "172.30.86.0/24", "Gateway": "172.30.86.1"}]}}
+        routes = [{"dst": "172.30.86.0/24", "dev": "br-abcdef123456"}]
+        responses = iter(("[]", "network-id", json.dumps([network]), json.dumps(routes)))
+
+        with patch.object(helper, "validate_engine"), patch.object(helper, "command", side_effect=lambda *_args: next(responses)):
+            helper.network_preflight(configuration, allow_kamal=True)
+
+        responses = iter(("[]", "network-id", json.dumps([network]), json.dumps(routes)))
+        with patch.object(helper, "validate_engine"), patch.object(helper, "command", side_effect=lambda *_args: next(responses)):
+            with self.assertRaises(helper.ControlError):
+                helper.network_preflight(configuration)
+
     def test_labeled_nonbridge_network_is_not_adopted(self):
         helper = self.helper()
         network = {"Name": "codex-control-plane_control-plane", "Driver": "macvlan",
