@@ -68,7 +68,11 @@ def test_accessory_model_keeps_private_control_plane_topology_and_order():
 
     assert config["service"] == "mcp-control-plane"
     assert config["proxy"] is False
-    assert config["registry"] == {"server": "localhost"}
+    assert config["registry"] == {
+        "server": "localhost",
+        "username": "unused",
+        "password": "unused",
+    }
     assert list(config["accessories"]) == ["executor", "schema-proxy", "cas", "tunnel"]
     assert [item["service"] for item in config["accessories"].values()] == [
         "mcp-control-plane-executor",

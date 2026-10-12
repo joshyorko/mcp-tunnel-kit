@@ -267,3 +267,18 @@ def test_remove_network_leaves_foreign_network_untouched(tmp_path, monkeypatch):
         os.umask(old_umask)
 
     assert not any(command[:3] == ["docker", "network", "rm"] for command in docker_calls)
+
+
+def test_explicit_rollback_recovers_unhealthy_generation_without_healthy_precondition():
+    previous=generation(authority='kamal');calls=[]
+    def remote(action,data=None):
+        calls.append(action)
+        if action in ('current','rollback-target'):return previous
+        if action=='status':return {'inventory':{'executor':{'state':'running'},'cas':{'state':'exited'}},'healthy':False}
+        if action=='snapshot':raise AssertionError('Broken deployment cannot satisfy healthy snapshot')
+        return {}
+    with patch.object(d,'trusted_context'),patch.object(d,'lock',return_value=nullcontext()),patch.object(d,'remote',side_effect=remote),patch.object(d,'prove_images',return_value={}),patch.object(d,'restore',return_value=previous) as restore,patch.dict(os.environ,{'GITHUB_SHA':'b'*40}):
+        result=d.execute(args('rollback',approve=True))
+    assert result['identity_preserved'] is True
+    restore.assert_called_once()
+    assert 'snapshot' not in calls and 'rollback-commit' in calls

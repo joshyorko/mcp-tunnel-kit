@@ -181,6 +181,17 @@ def execute(args):
             result=remote('status')
             result['smoke']=remote('smoke') if result['healthy'] else {'status':'BLOCKED: managed service unhealthy'}
             return result
+        if args.operation=='rollback':
+            current=remote('current');previous=remote('rollback-target')
+            if current is None:raise ValueError('No recorded deployment generation exists')
+            remote('profile')
+            previous['publication_proof']=prove_images(previous['manifest'],previous)
+            remote('images',previous['manifest'])
+            state=remote('status')
+            if state['inventory'].get('executor',{}).get('state')=='running':remote('backup')
+            after=restore(previous,directory)
+            remote('rollback-commit',{'current':previous,'previous':current})
+            return {'operation':'rollback','authority':after['authority'],'inventory':after['inventory'],'identity_preserved':True}
         before=remote('snapshot')
         remote('profile')
         remote('network-check',profile()['network'])
@@ -204,11 +215,6 @@ def execute(args):
         if args.operation=='adopt' and before['authority']!='compose':raise ValueError('Adoption requires the sole Compose owner')
         if args.operation=='deploy' and before['authority']!='kamal':raise ValueError('Use explicit adoption first')
         remote('images',manifest)
-        if args.operation=='rollback':
-            previous=remote('previous');previous['publication_proof']=prove_images(previous['manifest'],previous);remote('images',previous['manifest']);remote('backup')
-            after=restore(previous,directory)
-            remote('rollback-commit',{'current':previous,'previous':current})
-            return {'operation':'rollback','authority':after['authority'],'inventory':after['inventory'],'identity_preserved':True}
         if needs_baseline:remote('baseline',current)
         backup=remote('backup-cas' if args.operation=='cas' else 'backup')
         try:

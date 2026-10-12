@@ -296,6 +296,9 @@ def main():
     elif action=='rollback-commit':
         write(STORE/'previous.json',data['previous']);write(STORE/'current.json',data['current']);result={'rollback_committed':True}
     elif action=='previous':result=json.loads(private(STORE/'previous.json'))
+    elif action=='rollback-target':
+        path=STORE/'previous.json' if (STORE/'previous.json').exists() else STORE/'current.json'
+        result=json.loads(private(path))
     else:raise ValueError('Unknown VM operation')
     print(json.dumps(result))
 

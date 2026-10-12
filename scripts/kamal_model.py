@@ -301,7 +301,11 @@ def render(profile, manifest):
         "proxy": False,
         # Kamal 2.12 accessory prepare calls registry.login. localhost makes
         # that command a no-op for these public images; no shared Docker auth is written.
-        "registry": {"server": "localhost"},
+        "registry": {
+            "server": "localhost",
+            "username": "unused",
+            "password": "unused",
+        },
         "ssh": {
             "user": profile["ssh_user"],
             "keys": [profile["ssh_key"]],
