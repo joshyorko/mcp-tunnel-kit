@@ -160,7 +160,8 @@ class OnboardingTests(unittest.TestCase):
             self.assertEqual(seen, ["prepare"])
             self.assertEqual((self.secrets / "executor-auth-header").read_text(), "Bearer FIXTURE_PAT\n")
             seen.append("start-control-plane")
-        with patch.object(sys, "argv", ["compose_control.py", "up"]), \
+        with patch.object(self.helper, "guard_kamal_owner"), \
+                patch.object(sys, "argv", ["compose_control.py", "up"]), \
                 patch.object(self.helper, "config", return_value=configuration), \
                 patch.object(self.helper, "network_preflight"), \
                 patch.object(self.helper, "prepare", side_effect=prepare), \
@@ -234,7 +235,8 @@ class OnboardingTests(unittest.TestCase):
 
     def test_normal_up_invalid_input_reports_no_values_and_never_starts(self):
         self.dotenv({**VALUES, "EXECUTOR_PAT": '"PRIVATE_SENTINEL\nINJECTED"'})
-        with patch.object(sys, "argv", ["compose_control.py", "up"]), \
+        with patch.object(self.helper, "guard_kamal_owner"), \
+                patch.object(sys, "argv", ["compose_control.py", "up"]), \
                 patch.object(self.helper, "config", return_value=self.configuration), \
                 patch.object(self.helper, "network_preflight"), \
                 patch.object(self.helper, "compose", side_effect=AssertionError("Invalid input reached Compose")), \
