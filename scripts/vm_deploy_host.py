@@ -152,6 +152,21 @@ def status():
     return {'authority':owner,'inventory':inventory,'tunnel_count':len(tunnels),'healthy':len(inventory)==4 and all(x['health']=='healthy' and x['state']=='running' for x in inventory.values())}
 
 
+def lifecycle_check():
+    current=json.loads(private(STORE/'current.json'))
+    if current['authority']!='kamal':raise ValueError('Local lifecycle requires accepted Kamal ownership')
+    _,groups,tunnels=inspect()
+    if any(r and (r['State']['Running'] or r['State'].get('Paused')) for r in groups['compose'].values()):
+        raise ValueError('Compose is active; Kamal start/stop refused')
+    for name,r in groups['kamal'].items():
+        if not r or r['Config'].get('Labels',{}).get('service')!=NAMES['kamal'][name]:
+            raise ValueError('Local lifecycle requires all existing owned accessories')
+    writers=run(['docker','ps','--filter','volume=codex-control-plane_executor-data','--format','{{.Names}}']).decode().split()
+    if any(name!=NAMES['kamal']['executor'] for name in writers) or any(name.lstrip('/')!=NAMES['kamal']['tunnel'] for name in tunnels):
+        raise ValueError('Foreign production writer/client; local lifecycle refused')
+    return status()
+
+
 def validate_profile():
     for relative in ('cas-targets.json','devsy-operator/config.yaml','ror/operator-kubeconfig.json'):
         private(STATE/relative)
@@ -298,6 +313,11 @@ def main():
         fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB);print('LOCKED',flush=True);sys.stdin.read();return
     if action=='snapshot':result=snapshot()
     elif action=='status':result=status()
+    elif action=='lifecycle-check':result=lifecycle_check()
+    elif action=='identity-check':
+        if identity(NAMES['kamal']['executor'])!=json.loads(private(STORE/'current.json'))['identity']:
+            raise ValueError('Executor identity differs from recorded generation; tunnel start refused')
+        result={'identity_preserved':True}
     elif action=='restart-local':
         owner,groups,_=inspect();name=data['service']
         if owner!='kamal' or name not in NAMES['kamal'] or not groups['kamal'][name]:raise ValueError('Break-glass restart requires an existing owned Kamal accessory')
@@ -342,6 +362,10 @@ def main():
         if not old.exists():old.write_bytes(starter.read_bytes());old.chmod(0o600)
         starter.write_text('import runpy\nrunpy.run_path('+repr(str(helper))+', run_name="__main__")\n');starter.chmod(0o700)
         run(['sudo','-n','systemctl','restart','codex-control-plane-devsy']);result={'devsy':'PASS'}
+    elif action=='devsy-stop':
+        run(['sudo','-n','systemctl','stop','codex-control-plane-devsy']);result={'devsy_stopped':True}
+    elif action=='devsy-ensure':
+        run(['sudo','-n','systemctl','start','codex-control-plane-devsy']);result={'devsy_started':True}
     elif action=='devsy-restore':
         run(['sudo','-n','systemctl','stop','codex-control-plane-devsy'])
         old=STORE/'start-host-devsy.before-kamal.py'
