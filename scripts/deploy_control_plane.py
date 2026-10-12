@@ -12,6 +12,7 @@ import re
 import select
 import shlex
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -20,9 +21,13 @@ import time
 from kamal_model import render,validate_manifest
 from image_provenance import verify as verify_provenance
 ROOT=Path(__file__).resolve().parents[1]
-SSH=Path('/home/kdlocpanda/.local/share/mcp-control-plane-deploy/ssh_config')
-KEY=SSH.parent/'identity'
-KNOWN=SSH.parent/'known_hosts'
+DEFAULT_SSH=Path('/home/kdlocpanda/.local/share/mcp-control-plane-deploy/ssh_config')
+DEFAULT_KEY=DEFAULT_SSH.parent/'identity'
+DEFAULT_KNOWN=DEFAULT_SSH.parent/'known_hosts'
+SSH=DEFAULT_SSH
+KEY=DEFAULT_KEY
+KNOWN=DEFAULT_KNOWN
+LOCAL_CONFIGURED=False
 HOST='kamal-test-deploy'
 ORDER=('executor','schema-proxy','cas','tunnel')
 VMROOT='/home/kdlocpanda/Projects/mcp-tunnel-kit'
@@ -30,13 +35,62 @@ VM_HOST_PIN='SHA256:S6qJ1D1sigx5Dj2ZQH5XCP7DspX/gTWJemO9/Q+2Se8'
 
 
 def trusted_context(env, local=False):
-    if socket.gethostname()!='pi5-01' or os.uname().machine!='aarch64':raise ValueError('Deployment must run on the approved ARM64 Pi')
-    if not local and (env.get('GITHUB_REPOSITORY')!='joshyorko/mcp-tunnel-kit' or env.get('GITHUB_REF')!='refs/heads/main' or env.get('GITHUB_EVENT_NAME')!='workflow_dispatch' or env.get('RUNNER_NAME')!='pi5-01-mcp-control-plane'):
-        raise ValueError('Untrusted workflow/runner context')
+    if local:
+        if not LOCAL_CONFIGURED:raise ValueError('Local deployment requires an explicitly loaded private SSH config')
+    else:
+        if socket.gethostname()!='pi5-01' or os.uname().machine!='aarch64':raise ValueError('Deployment must run on the approved ARM64 Pi')
+        if (env.get('GITHUB_REPOSITORY')!='joshyorko/mcp-tunnel-kit' or env.get('GITHUB_REF')!='refs/heads/main' or env.get('GITHUB_EVENT_NAME')!='workflow_dispatch' or env.get('RUNNER_NAME')!='pi5-01-mcp-control-plane'):
+            raise ValueError('Untrusted workflow/runner context')
     for p in (SSH,KEY,KNOWN):
         s=p.lstat()
         if p.is_symlink() or not p.is_file() or s.st_uid!=os.getuid() or s.st_mode&0o777!=0o600:raise ValueError('Runner SSH file ownership/mode mismatch')
     validate_ssh_config(SSH,KEY,KNOWN)
+
+
+def _read_private_file(path, limit=16384):
+    try:
+        metadata=path.lstat()
+        if (path.is_symlink() or not path.is_file() or metadata.st_uid!=os.getuid()
+                or metadata.st_mode&0o777!=0o600):raise ValueError('Local deployment file ownership/mode mismatch')
+        fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW)
+        opened=os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode) or opened.st_uid!=os.getuid() or opened.st_mode&0o777!=0o600:
+            os.close(fd);raise ValueError('Local deployment file ownership/mode mismatch')
+        with os.fdopen(fd,'rb') as stream: data=stream.read(limit+1)
+        if len(data)>limit:raise ValueError('Local deployment file is too large')
+        return data.decode('utf-8')
+    except (OSError,UnicodeError):
+        raise ValueError('Local deployment file is unavailable or invalid') from None
+
+
+def configure_local(path):
+    """Explicitly load a private local SSH path file for the Dakota CLI."""
+    global SSH,KEY,KNOWN,LOCAL_CONFIGURED
+    LOCAL_CONFIGURED=False
+    SSH,KEY,KNOWN=DEFAULT_SSH,DEFAULT_KEY,DEFAULT_KNOWN
+    config_path=Path(path)
+    if not config_path.is_absolute():raise ValueError('Local config path must be absolute')
+    values={}
+    for raw in _read_private_file(config_path).splitlines():
+        line=raw.strip()
+        if not line or line.startswith('#'):continue
+        name,separator,value=line.partition('=')
+        if not separator or name not in {'KAMAL_SSH_CONFIG','KAMAL_SSH_KEY','KAMAL_KNOWN_HOSTS'} or name in values:
+            raise ValueError('Local deployment config has an invalid key set')
+        try:parts=shlex.split(value,comments=True,posix=True)
+        except ValueError:raise ValueError('Local deployment config has invalid quoting') from None
+        if len(parts)!=1 or not parts[0]:raise ValueError('Local deployment config value is invalid')
+        values[name]=Path(parts[0])
+    if set(values)!={'KAMAL_SSH_CONFIG','KAMAL_SSH_KEY','KAMAL_KNOWN_HOSTS'}:
+        raise ValueError('Local deployment config is incomplete')
+    config,key,known=(values['KAMAL_SSH_CONFIG'],values['KAMAL_SSH_KEY'],values['KAMAL_KNOWN_HOSTS'])
+    if any(not value.is_absolute() for value in (config,key,known)):
+        raise ValueError('Local SSH references must be absolute paths')
+    for reference in (config,key,known):_read_private_file(reference)
+    validate_ssh_config(config,key,known)
+    SSH,KEY,KNOWN=config,key,known
+    LOCAL_CONFIGURED=True
+    return {'ssh_config':str(SSH),'ssh_key':str(KEY),'known_hosts':str(KNOWN)}
 
 
 def validate_ssh_config(config,key,known):
@@ -89,7 +143,7 @@ def profile():
 
 def kamal(config,operation,name):
     # Public images only. Never run the unrelated top-level app/proxy/registry commands.
-    if operation not in ('boot','reboot','stop','details') or name not in ORDER:raise ValueError('Unsupported Kamal operation')
+    if operation not in ('boot','reboot','start','stop','details') or name not in ORDER:raise ValueError('Unsupported Kamal operation')
     docker_config=remote('anonymous-docker-config')['path']
     env={**os.environ,'BUNDLE_GEMFILE':str(ROOT/'Gemfile.deploy'),'KAMAL_PUBLIC_DOCKER_CONFIG':docker_config}
     r=subprocess.run(['bundle','exec','ruby',str(ROOT/'scripts/kamal_anonymous.rb'),'accessory',operation,name,'--config-file',str(config)],env=env,capture_output=True,text=True,timeout=300)
@@ -256,7 +310,7 @@ def execute(args):
 
 
 def main():
-    p=argparse.ArgumentParser();p.add_argument('operation',choices=('preflight','status','adopt','cas','deploy','rollback'));p.add_argument('--cas-digest',default='');p.add_argument('--cas-revision',default='');p.add_argument('--approve-full-stack',action='store_true');p.add_argument('--local',action='store_true',help='Operator break-glass on approved Pi; no GitHub context required')
+    p=argparse.ArgumentParser();p.add_argument('operation',choices=('preflight','status','adopt','cas','deploy','rollback'));p.add_argument('--cas-digest',default='');p.add_argument('--cas-revision',default='');p.add_argument('--approve-full-stack',action='store_true');p.add_argument('--local',action='store_true',help='Direct operator mode; requires configure_local(path) first')
     args=p.parse_args()
     try:print(json.dumps(execute(args),indent=2))
     except Exception as e:print(str(e),file=sys.stderr);sys.exit(1)
