@@ -90,8 +90,9 @@ def profile():
 def kamal(config,operation,name):
     # Public images only. Never run the unrelated top-level app/proxy/registry commands.
     if operation not in ('boot','reboot','stop','details') or name not in ORDER:raise ValueError('Unsupported Kamal operation')
-    env={**os.environ,'BUNDLE_GEMFILE':str(ROOT/'Gemfile.deploy')}
-    r=subprocess.run(['bundle','exec','kamal','accessory',operation,name,'--config-file',str(config)],env=env,capture_output=True,text=True,timeout=300)
+    docker_config=remote('anonymous-docker-config')['path']
+    env={**os.environ,'BUNDLE_GEMFILE':str(ROOT/'Gemfile.deploy'),'KAMAL_PUBLIC_DOCKER_CONFIG':docker_config}
+    r=subprocess.run(['bundle','exec','ruby',str(ROOT/'scripts/kamal_anonymous.rb'),'accessory',operation,name,'--config-file',str(config)],env=env,capture_output=True,text=True,timeout=300)
     if r.returncode:raise RuntimeError('Kamal accessory '+operation+' '+name+' failed; raw output withheld')
 
 
