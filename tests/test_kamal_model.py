@@ -71,7 +71,7 @@ def test_accessory_model_keeps_private_control_plane_topology_and_order():
     assert config['servers']['web']['proxy'] is False
     assert config['builder']['arch'] == 'amd64'
     assert config["registry"] == {
-        "server": "localhost",
+        "server": "localhost:5555",
         "username": "unused",
         "password": "unused",
     }
