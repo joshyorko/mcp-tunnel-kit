@@ -217,28 +217,41 @@ def execute(args):
         remote('images',manifest)
         if needs_baseline:remote('baseline',current)
         backup=remote('backup-cas' if args.operation=='cas' else 'backup')
+        phase='source-sync'
         try:
             if args.operation!='cas':sync_source(sha)
             if args.operation=='adopt':
-                remote('compose-stop');remote('network',profile()['network']);remote('devsy-start')
+                phase='compose-stop';remote('compose-stop')
+                phase='network';remote('network',profile()['network'])
+                phase='devsy-start';remote('devsy-start')
                 for name in ORDER:
+                    phase='boot-'+name
                     kamal(config,'boot',name);remote('wait',{'owner':'kamal','service':name})
             elif args.operation=='cas':
+                phase='reboot-cas'
                 kamal(config,'reboot','cas');remote('wait',{'owner':'kamal','service':'cas'})
             else:
-                for name in reversed(ORDER):kamal(config,'stop',name)
+                for name in reversed(ORDER):
+                    phase='stop-'+name;kamal(config,'stop',name)
                 for name in ORDER:
+                    phase='reboot-'+name
                     kamal(config,'reboot',name);remote('wait',{'owner':'kamal','service':name})
+                phase='devsy-start'
                 remote('devsy-start')
+            phase='acceptance'
             after=remote('snapshot');smoke=remote('smoke')
             if after['identity']!=before['identity']:raise RuntimeError('Post-deploy Executor identity changed')
             deployed_source=current['source_sha'] if args.operation=='cas' else sha
             remote('commit',{'authority':'kamal','source_sha':deployed_source,'manifest':manifest,'identity':after['identity'],'publication_proof':publication})
             return {'operation':args.operation,'authority':'kamal','inventory':after['inventory'],'smoke':smoke,'identity_preserved':True,'backup':backup,'source_sha':deployed_source,'controller_sha':sha}
         except Exception:
-            if args.operation=='cas':restore_cas(current,directory)
-            else:restore(current,directory)
-            raise RuntimeError('Deployment acceptance failed; previous generation restored') from None
+            # Report only our fixed phase names, never subprocess output or secrets.
+            try:
+                if args.operation=='cas':restore_cas(current,directory)
+                else:restore(current,directory)
+            except Exception:
+                raise RuntimeError('Deployment failed at '+phase+'; automatic rollback FAILED; operator recovery required') from None
+            raise RuntimeError('Deployment failed at '+phase+'; previous generation restored') from None
 
 
 def main():

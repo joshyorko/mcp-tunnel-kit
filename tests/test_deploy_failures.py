@@ -83,7 +83,8 @@ def test_cas_failure_restores_only_cas_and_uses_cas_backup():
     sync_source.assert_not_called()
 
 
-def test_source_sync_failure_is_inside_protected_deployment_path():
+@pytest.mark.parametrize("rollback_fails", [False, True])
+def test_source_sync_failure_is_inside_protected_deployment_path(rollback_fails):
     before = generation()
     calls = []
 
@@ -100,12 +101,14 @@ def test_source_sync_failure_is_inside_protected_deployment_path():
 
     with patch.object(d, "trusted_context"), patch.object(d, "lock", return_value=nullcontext()), \
          patch.object(d, "remote", side_effect=remote), \
-         patch.object(d, "sync_source", side_effect=RuntimeError("source sync failed")), \
-         patch.object(d, "restore") as restore, patch.dict(os.environ, {"GITHUB_SHA": "b" * 40}):
-        with pytest.raises(RuntimeError, match="previous generation restored"):
+         patch.object(d, "sync_source", side_effect=RuntimeError("secret-source-detail")), \
+         patch.object(d, "restore", side_effect=RuntimeError("secret-rollback-detail") if rollback_fails else None) as restore, patch.dict(os.environ, {"GITHUB_SHA": "b" * 40}):
+        with pytest.raises(RuntimeError, match="Deployment failed at source-sync") as error:
             d.execute(args("deploy", approve=True))
 
     restore.assert_called_once()
+    assert "secret" not in str(error.value)
+    assert ("automatic rollback FAILED" if rollback_fails else "previous generation restored") in str(error.value)
 
 
 def test_adoption_network_conflict_is_rejected_before_stopping_compose():
