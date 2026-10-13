@@ -171,9 +171,10 @@ mkdir -m 0700 "$tools_dir"
 (cd "$drive_dir" && sha256sum -c recovery-tools.sha256)
 tar -xzf "$drive_dir/recovery-tools.tar.gz" -C "$tools_dir"
 cat "$drive_dir/recovery-tools-source.txt"
+cd "$tools_dir"
 ```
 
-Run recovery scripts from the extracted tool directory. Regular deployment workflows still need a trusted Git checkout.
+Run recovery scripts from the extracted tool directory. Set `local_config` to the restored mode-`0600` `.env.kamal.local` after updating its SSH file references for this controller. Do not source that file as shell code. Regular deployment workflows still need a trusted Git checkout.
 
 Read the bundle and key back from their storage locations. `verify-stored` uses the private MinIO `unlock-identity.txt` and the drive's `recovery-key.age`. It does not read the configured identity A path:
 
