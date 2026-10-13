@@ -283,6 +283,15 @@ def _path_is_present(path):
     return os.path.lexists(path)
 
 
+def executor_volume_owner(uid, gid):
+    """The pinned Executor image stores volume files as UID/GID 1000."""
+    return uid==1000 and gid==1000
+
+
+def current_executor_volume_owner():
+    return executor_volume_owner(os.getuid(),os.getgid())
+
+
 def _safe_target_parent(path):
     parent=path.parent
     try:
@@ -347,7 +356,7 @@ def _empty_private_directory(path, *, allow_lock=False):
 
 
 def _target_preflight(*, allow_lock=False):
-    if os.getuid()!=1000 or os.getgid()!=1000:
+    if not current_executor_volume_owner():
         raise ValueError('Replacement operator UID/GID must be 1000 for the captured Executor volume')
     if not ROOT.is_dir() or ROOT.is_symlink() or ROOT.stat().st_uid!=os.getuid():
         raise ValueError('Replacement repository directory is unavailable or unsafe')

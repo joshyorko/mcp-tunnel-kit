@@ -251,12 +251,13 @@ def test_vm_activation_plan_is_read_only_and_refuses_existing_stopped_project_co
     monkeypatch.setattr(host,"_recovery_validator",lambda:lambda _path:prepared)
     monkeypatch.setattr(host,"run",safe_vm_run)
     monkeypatch.setattr(host,"network_check",lambda _network:False)
-    result=host.activation_plan(prepared_dir)
+    with patch.object(host,"current_executor_volume_owner",return_value=True):
+        result=host.activation_plan(prepared_dir)
     assert result["ready"] is True
     assert not host.STATE.exists() and not host.NATIVE_SSH.exists()
     row={"Name":"/mcp-control-plane-executor-1","Config":{"Image":"executor","Labels":{"service":"mcp-control-plane-executor"}},"Mounts":[],"State":{"Status":"exited"}}
     monkeypatch.setattr(host,"_activation_container_rows",lambda:[row])
-    with pytest.raises(ValueError,match="already has control-plane"):
+    with patch.object(host,"current_executor_volume_owner",return_value=True),pytest.raises(ValueError,match="already has control-plane"):
         host.activation_plan(prepared_dir)
     assert not host.STATE.exists()
 
@@ -270,7 +271,8 @@ def test_vm_main_remote_activation_plan_does_not_create_store(tmp_path,monkeypat
     monkeypatch.setattr(sys,"stdin",StringIO(json.dumps({"generation_dir":str(prepared_dir)})))
     output=StringIO();monkeypatch.setattr(sys,"stdout",output)
     previous_umask=os.umask(0o077)
-    try:status=host.main()
+    try:
+        with patch.object(host,"current_executor_volume_owner",return_value=True):status=host.main()
     finally:os.umask(previous_umask)
     assert status is None
     assert json.loads(output.getvalue())["ready"] is True
@@ -280,10 +282,12 @@ def test_vm_main_remote_activation_plan_does_not_create_store(tmp_path,monkeypat
 @pytest.mark.parametrize("owner",["uid","gid"])
 def test_vm_activation_plan_requires_executor_compatible_operator_identity(tmp_path,monkeypatch,owner):
     _prepared_dir,_prepared,_profile=generation_tree(tmp_path,lock=False)
-    if owner=="uid":monkeypatch.setattr(host.os,"getuid",lambda:2000)
-    else:monkeypatch.setattr(host.os,"getgid",lambda:2000)
-    with pytest.raises(ValueError,match="UID/GID must be 1000"):
+    uid,gid=(2000,1000) if owner=="uid" else (1000,2000)
+    assert host.executor_volume_owner(uid,gid) is False
+    with patch.object(host,"current_executor_volume_owner",return_value=False),patch.object(host,"run") as run, \
+         pytest.raises(ValueError,match="UID/GID must be 1000"):
         host._target_preflight()
+    run.assert_not_called()
     assert not host.STATE.exists()
 
 
@@ -293,7 +297,7 @@ def test_vm_activation_plan_refuses_source_revision_mismatch_before_mutation(tmp
     monkeypatch.setattr(host,"_activation_container_rows",lambda:[])
     monkeypatch.setattr(host,"run",lambda command: b"" if command[3]=="status" else b"f"*40)
     monkeypatch.setattr(host,"network_check",lambda _network:False)
-    with pytest.raises(ValueError,match="captured source revision"):
+    with patch.object(host,"current_executor_volume_owner",return_value=True),pytest.raises(ValueError,match="captured source revision"):
         host.activation_plan(prepared_dir)
     assert not host.STATE.exists()
 
@@ -320,13 +324,14 @@ def test_vm_install_rechecks_then_copies_only_verified_files_without_overwrite(t
     monkeypatch.setattr(host,"run",safe_vm_run)
     monkeypatch.setattr(host,"network_check",lambda _network:False)
     digest=hashlib.sha256((prepared_dir/"prepared-manifest.json").read_bytes()).hexdigest()
-    result=host.activation_install(prepared_dir,digest,"c"*32)
+    with patch.object(host,"current_executor_volume_owner",return_value=True):
+        result=host.activation_install(prepared_dir,digest,"c"*32)
     assert result["state_installed"] and result["native_ssh_installed"]
     assert (host.STATE/"secrets/control-plane-api-key").read_bytes()==b"synthetic\n"
     assert (host.STATE/"deployment/current.json").read_bytes()==b'{"authority":"kamal"}\n'
     assert (host.NATIVE_SSH/"identity").read_bytes()==b"native key\n"
     assert (host.ROOT/".env").read_bytes()==b"SECRET=value\n"
-    with pytest.raises(ValueError,match="already exists"):
+    with patch.object(host,"current_executor_volume_owner",return_value=True),pytest.raises(ValueError,match="already exists"):
         host.activation_install(prepared_dir,digest,"c"*32)
 
 
