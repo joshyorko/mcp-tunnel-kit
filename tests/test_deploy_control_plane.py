@@ -2,6 +2,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shlex
 import sys
 from unittest.mock import patch
 import pytest
@@ -17,6 +18,55 @@ def test_wrong_source_or_runner_context_is_refused_before_ssh():
         for key in good:
             with pytest.raises(ValueError,match='Untrusted'):
                 d.trusted_context({**good,key:'untrusted'})
+
+
+def test_execute_requires_private_profile_before_runner_checks_or_transport(tmp_path):
+    args=type('A',(),{'local':False,'operation':'preflight','cas_digest':'','cas_revision':'','approve_full_stack':False})()
+    missing=tmp_path/'missing-instance.json'
+    with patch.object(d,'INSTANCE',None),patch.dict(os.environ,{'KAMAL_INSTANCE_PROFILE':str(missing)}), \
+         patch.object(d,'trusted_context') as trusted,patch.object(d,'remote') as remote:
+        with pytest.raises(ValueError,match='Private instance profile is missing'):
+            d.execute(args)
+    trusted.assert_not_called()
+    remote.assert_not_called()
+
+
+def test_private_profile_drives_rendered_and_remote_paths(tmp_path):
+    instance=json.loads((ROOT/'config/instance.example.json').read_text())
+    d.configure_instance(instance)
+    value=d.profile()
+    assert value['host']==instance['deploy_host']['alias']
+    assert value['repo_dir']==instance['vm']['repo_dir']
+    assert value['state_dir']==instance['vm']['state_dir']
+    assert value['network']==instance['vm']['network']
+    assert value['cas_identity_source']==str(Path(instance['vm']['native_ssh_dir'])/'identity')
+
+
+def test_remote_source_receives_only_validated_profile_over_pinned_alias():
+    from instance_profile import decode
+    instance=json.loads((ROOT/'config/instance.example.json').read_text())
+    d.configure_instance(instance)
+    result=type('Result',(),{'returncode':0,'stdout':'{}','stderr':''})()
+    with patch.object(d.subprocess,'run',return_value=result) as run:
+        assert d.remote('status')=={}
+    argv=run.call_args.args[0]
+    assert argv[-2]==instance['deploy_host']['alias']
+    remote_argv=shlex.split(argv[-1])
+    assert remote_argv[-2]=='status'
+    assert decode(remote_argv[-1])==instance
+
+
+def test_remote_source_injects_stdlib_generation_validator_without_target_install():
+    names=("instance_profile","prepare_recovery_generation")
+    previous={name:sys.modules.get(name) for name in names}
+    try:
+        namespace={"__name__":"remote_source_test"}
+        exec(compile(d.remote_source(),"<remote-source-test>","exec"),namespace)
+        assert callable(sys.modules["prepare_recovery_generation"].validate_generation)
+    finally:
+        for name,module in previous.items():
+            if module is None:sys.modules.pop(name,None)
+            else:sys.modules[name]=module
 
 
 def test_bad_cas_digest_revision_and_repository_are_rejected():
@@ -102,10 +152,13 @@ def test_existing_kamal_containers_refuse_compose_before_pull(tmp_path):
 def test_wrong_ssh_fingerprint_is_refused_for_both_ssh_clients(tmp_path):
     import base64
     key=tmp_path/'identity';known=tmp_path/'known_hosts';config=tmp_path/'ssh_config'
-    known.write_text('kamal-test-deploy,10.10.10.106 ssh-ed25519 '+base64.b64encode(b'wrong-key').decode()+'\n')
-    config.write_text(f'''Host kamal-test-deploy
-HostName 10.10.10.106
-User kdlocpanda
+    instance=json.loads((ROOT/'config/instance.example.json').read_text())
+    d.configure_instance(instance)
+    alias=instance['deploy_host']['alias'];address=instance['deploy_host']['address'];user=instance['deploy_host']['user']
+    known.write_text(alias+','+address+' ssh-ed25519 '+base64.b64encode(b'wrong-key').decode()+'\n')
+    config.write_text(f'''Host {alias}
+HostName {address}
+User {user}
 IdentityFile {key}
 IdentitiesOnly yes
 BatchMode yes

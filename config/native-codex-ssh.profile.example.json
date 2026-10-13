@@ -1,0 +1,8 @@
+{
+  "address": "100.100.100.10",
+  "port": 22222,
+  "codex_bin": "/usr/bin/codex",
+  "socket": "/tmp/codex.sock",
+  "state_dir": "/home/operator/.local/state/native-codex-ssh",
+  "helper": "/home/operator/.local/state/native-codex-ssh/native_codex_ssh.py"
+}

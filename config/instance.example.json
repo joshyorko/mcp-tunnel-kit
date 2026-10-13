@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "deploy_host": {
+    "alias": "control-plane-vm",
+    "address": "203.0.113.10",
+    "user": "operator",
+    "host_key_fingerprint": "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  },
+  "vm": {
+    "repo_dir": "/home/operator/mcp-tunnel-kit",
+    "state_dir": "/home/operator/.local/share/codex-control-plane",
+    "network": {
+      "name": "mcp-control-plane",
+      "subnet": "198.18.0.0/24",
+      "gateway": "198.18.0.1"
+    },
+    "native_ssh_dir": "/home/operator/.local/share/native-codex-ssh",
+    "devsy": {
+      "config_source": "/home/operator/.local/share/codex-control-plane/devsy-operator/config.yaml",
+      "context_dir": "/home/operator/.local/share/codex-control-plane/devsy-operator/contexts/default",
+      "kubeconfig_source": "/home/operator/.local/share/codex-control-plane/ror/operator-kubeconfig.json",
+      "context": "default"
+    }
+  }
+}

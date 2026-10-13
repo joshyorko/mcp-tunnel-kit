@@ -1,15 +1,17 @@
 # VM control-plane deployment
 
+For host rebuild and encrypted recovery, see [Rebuild a control-plane host](REBUILD.md) and [Capture and stage recovery](RECOVERY.md). Keep the instance profile outside the checkout as an owned mode-`0600` file. See [the private profile example](../config/instance.example.json) for its schema. The profile-aware VM helper accepts `--instance-profile` and otherwise reads the default private profile. A captured runtime checkout may predate that helper. Run recovery from the updated controller checkout rather than assuming an old VM checkout supports this flag.
+
 Issue #20 manages Executor, schema proxy, CAS and the original OpenAI tunnel as
 Kamal 2.12.0 **accessories**, using GitHub's dedicated `pi5-01-mcp-control-plane`
 ARM64 runner. Fizzy's runner/service and the existing Kamal proxy are separate.
-Images are published Linux amd64 artifacts; nothing is rebuilt on the Pi.
+Images are published Linux amd64 artifacts; nothing is rebuilt on the approved runner.
 
 ## Local workstation commands
 
-From this repository on Dakota, `bin/kamal` reads the ignored, private
+From this repository on the controller, `bin/kamal` reads the ignored, private
 `.env.kamal.local` and connects **directly to the VM** using the existing SSH key
-and pinned host identity. It does not relay through the Pi or GitHub.
+and pinned host identity. It does not relay through the approved runner or GitHub.
 
 ```sh
 bin/kamal accessory deploy       # full pinned redeploy
@@ -24,7 +26,7 @@ The equivalent shortcuts are `make deploy`, `make cas`, `make down`, `make up`,
 `make status`, and `make rollback`. Stop disconnects the production tool connection;
 start checks Executor identity before starting the tunnel. Both use the same VM
 lock as GitHub deployments. Full start/stop also manages only the stack's existing
-host Devsy service. Other applications and Dakota's native Codex are unaffected.
+host Devsy service. Other applications and the host's native Codex are unaffected.
 
 This repository's `accessory deploy` command is an operator alias for the tested
 Kamal accessory reboot sequence, with image pins, backup, health checks and
@@ -33,10 +35,12 @@ or invoke Kamal's top-level app/proxy deployment. `start`/`stop` use real Kamal
 accessory lifecycle operations and do not pull images or recreate containers.
 
 For another local checkout, use `config/kamal-local.env.example` to create a
-0600 `.env.kamal.local` with three absolute file references. The referenced SSH
-config, existing key and known-hosts file must also be private (0600), and the
-configuration must match the existing VM pin and strict SSH policy. No registry,
-tunnel or kubeconfig secrets belong in this local file. `make setup` installs the
+0600 `.env.kamal.local` with three required absolute SSH file references and an
+optional `KAMAL_INSTANCE_PROFILE` path. If omitted, the profile defaults to
+`$HOME/.config/mcp-control-plane/instance.json`. The referenced SSH config,
+existing key, known-hosts file, and instance profile must be private (0600), and
+the configuration must match the existing VM pin and strict SSH policy. No
+registry, tunnel, or kubeconfig secrets belong in this local file. `make setup` installs the
 locked Kamal bundle under the user's data directory using installed Ruby 3.4.8;
 Fizzy's bundle/configuration is not modified. The environment file is parsed as
 data, never executed as shell code.
@@ -48,7 +52,7 @@ Only manual main dispatches can use the `control-plane-production` environment.
 Every operation has GitHub concurrency serialization and a private VM lock.
 
 - `preflight`: validate host identity, image architecture/OCI source labels,
-  existing encrypted identity, catalog, exact Dakota thread and Devsy reads.
+  existing encrypted identity, catalog, exact configured thread and Devsy reads.
 - `status`: report the current authority, service inventory and authenticated
   smoke results.
 - `adopt`: one-time Compose → Kamal authority handoff. Check the full-stack
@@ -83,14 +87,14 @@ VM. The same config is used for Compose recovery. Shared Docker registry
 credentials are neither used nor replaced.
 
 Executor keeps the original `codex-control-plane_executor-data` named volume.
-Existing private VM files remain under
-`/home/kdlocpanda/.local/share/codex-control-plane`. CAS mounts its authority state,
+Existing private VM files remain under the state path in the private instance
+profile. CAS mounts its authority state,
 UID-bound registry, private operator inputs and SSH key read-only as appropriate.
-Executor binds loopback4312, CAS binds the private172.30.86.1 gateway, and no
+Executor binds loopback4312, CAS binds the configured private gateway, and no
 control-plane listener is added to80/443 or public interfaces.
 
 The host Devsy systemd service loads its existing private bridge config directly,
-independent of Compose. The native Dakota proxy uses the dedicated forced-command
+independent of Compose. The native host proxy uses the dedicated forced-command
 SSH endpoint described in [NATIVE_SSH.md](NATIVE_SSH.md), avoiding Tailscale SSH's
 periodic check requirement. Tailscale network identity/routes remain unchanged.
 
@@ -100,27 +104,28 @@ or encrypted-volume writer. Volumes, secrets and prior config remain available.
 
 ## Bootstrap trust and credentials
 
-The approved runner is repository-scoped on `pi5-01` (`10.10.20.50`), with labels
+The approved runner is repository-scoped on `pi5-01`, with labels
 `self-hosted Linux ARM64 pi5-01 kamal mcp-control-plane`. Ruby 3.4.8 is existing
 rbenv tooling; this repository uses an isolated, frozen Bundler 2.6.9/Kamal 2.12.0
 bundle. The runner uses `ssh_config`, `identity` and `known_hosts` under
-`/home/kdlocpanda/.local/share/mcp-control-plane-deploy` on the Pi; each file is
-checked for owner and mode `0600`. SSH runs in batch mode with strict host-key
+its private deployment-data directory; each file is checked for owner and mode
+`0600`. SSH runs in batch mode with strict host-key
 checking and agent forwarding disabled. The workflow has no pull-request or
 fork trigger; the deployment script also requires this repository's main
 `workflow_dispatch` on the named ARM64 runner. Use trusted repository operators
-only. Deployment runs as VM user `kdlocpanda`, whose Docker authority is required
-by Kamal.
+only. Deployment runs as the configured VM user, whose Docker authority Kamal
+requires.
 
-The VM ED25519 host key is pinned from the already trusted Dakota connection:
-`SHA256:S6qJ1D1sigx5Dj2ZQH5XCP7DspX/gTWJemO9/Q+2Se8`. No deploy-time keyscan or
-host-check relaxation is used. Main-only environment policy and manual dispatch
-are configured on GitHub. The runner registration token was used privately once;
-production secret files were never copied to GitHub.
+The VM ED25519 host key is pinned in the private `known_hosts` file and checked
+against the private instance-profile fingerprint. Obtain a first pin through a
+trusted connection. No deploy-time keyscan or host-check relaxation is used.
+Main-only environment policy and manual dispatch are configured on GitHub. The
+runner registration token was used privately once; production secret files were
+never copied to GitHub.
 
 ## Operator break-glass
 
-On the approved Pi, in a trusted main checkout with its deployment bundle loaded:
+On the approved runner, in a trusted main checkout with its deployment bundle loaded:
 
 ```sh
 export RBENV_VERSION=3.4.8
@@ -133,13 +138,14 @@ python3 scripts/deploy_control_plane.py rollback --local --approve-full-stack
 
 This uses the same pins, VM lock and acceptance checks. Do not use `kamal deploy`,
 proxy setup, `docker compose down -v`, pruning, blank Executor initialization or
-credential rotation. The original Dakota rollback from #16 remains separately
+credential rotation. The original local rollback from #16 remains separately
 retained; do not start it while the VM production tunnel is live.
 
-For status directly on the VM, run from `/home/kdlocpanda/Projects/mcp-tunnel-kit`:
+For direct VM status, use a checkout with the profile-aware helper:
 
 ```sh
-python3 scripts/vm_deploy_host.py status
+python3 scripts/vm_deploy_host.py status \
+  --instance-profile "$HOME/.config/mcp-control-plane/instance.json"
 ```
 
 After Kamal adoption, an existing accessory can be restarted locally without
@@ -147,9 +153,11 @@ the runner. This example restarts only CAS and takes the same VM deployment
 lock; if the lock is busy, let the running deployment finish before retrying.
 
 ```sh
+state_dir="/path/from/private-instance-profile"
 printf '%s\n' '{"service":"cas"}' | flock -n \
-  /home/kdlocpanda/.local/share/codex-control-plane/deployment/deploy.lock \
-  python3 scripts/vm_deploy_host.py restart-local
+  "$state_dir/deployment/deploy.lock" \
+  python3 scripts/vm_deploy_host.py restart-local \
+    --instance-profile "$HOME/.config/mcp-control-plane/instance.json"
 ```
 
 This restarts the existing container; image changes and generation rollback use

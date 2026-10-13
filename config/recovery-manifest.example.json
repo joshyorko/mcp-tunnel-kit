@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "bundle_id": "operator-set-this-per-host-and-capture",
+  "members": [
+    {
+      "name": "native-host-endpoint",
+      "source": "/absolute/private/path/to/native-host-state",
+      "required": true
+    },
+    {
+      "name": "private-instance-profile",
+      "source": "/absolute/private/path/to/instance-profile.json",
+      "required": true
+    },
+    {
+      "name": "vm-executor-snapshot",
+      "source": "/absolute/private/path/to/consistent-executor-snapshot.tar",
+      "required": true
+    },
+    {
+      "name": "vm-cas-snapshots",
+      "source": "/absolute/private/path/to/consistent-cas-snapshots",
+      "required": true
+    }
+  ]
+}

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Private VM deployment boundary. JSON output contains no credential values."""
 import fcntl
+import argparse
 import hashlib
 import importlib.util
 import io
@@ -8,20 +9,40 @@ import ipaddress
 import json
 import os
 from pathlib import Path
+from pathlib import PurePosixPath
 import re
 import sqlite3
 import stat
 import subprocess
 import sys
 import tarfile
+import tempfile
 import time
+import uuid
+from instance_profile import decode, load as load_instance_profile, validate
 
-ROOT = Path('/home/kdlocpanda/Projects/mcp-tunnel-kit')
-STATE = Path('/home/kdlocpanda/.local/share/codex-control-plane')
-STORE = STATE / 'deployment'
-PUBLIC_DOCKER_CONFIG = STORE / 'anonymous-docker-config'
+ROOT = None
+STATE = None
+STORE = None
+PUBLIC_DOCKER_CONFIG = None
+NETWORK = None
+NATIVE_SSH = None
+DEVSY = None
 NAMES = {'compose': {'executor':'codex-control-plane-executor-1','schema-proxy':'codex-control-plane-executor-schema-proxy-1','cas':'codex-control-plane-codex-action-server-1','tunnel':'codex-control-plane-tunnel-client-1'},
          'kamal': {name:'mcp-control-plane-'+name for name in ('executor','schema-proxy','cas','tunnel')}}
+
+
+def configure_profile(profile):
+    """Bind this standalone remote script to validated instance paths."""
+    global ROOT,STATE,STORE,PUBLIC_DOCKER_CONFIG,NETWORK,NATIVE_SSH,DEVSY
+    profile=validate(profile)
+    ROOT=Path(profile['vm']['repo_dir'])
+    STATE=Path(profile['vm']['state_dir'])
+    STORE=STATE/'deployment'
+    PUBLIC_DOCKER_CONFIG=STORE/'anonymous-docker-config'
+    NETWORK=profile['vm']['network']
+    NATIVE_SSH=Path(profile['vm']['native_ssh_dir'])
+    DEVSY=profile['vm']['devsy']
 
 
 def run(args, timeout=180, env=None):
@@ -168,12 +189,12 @@ def lifecycle_check():
 
 
 def validate_profile():
-    for relative in ('cas-targets.json','devsy-operator/config.yaml','ror/operator-kubeconfig.json'):
-        private(STATE/relative)
-    ssh=Path('/home/kdlocpanda/.local/share/issue16-dakota-ssh')
+    for path in (STATE/'cas-targets.json',Path(DEVSY['config_source']),Path(DEVSY['kubeconfig_source'])):
+        private(path)
+    ssh=NATIVE_SSH
     for name in ('ssh_config.native','known_hosts.native','identity'):private(ssh/name)
-    for relative in ('cas','cas/runtime','cas/receipts','devsy-operator/contexts/default'):
-        path=STATE/relative;s=path.lstat()
+    for path in (STATE/'cas',STATE/'cas/runtime',STATE/'cas/receipts',Path(DEVSY['context_dir'])):
+        s=path.lstat()
         if not path.is_dir() or path.is_symlink() or s.st_uid!=os.getuid():raise ValueError('Required VM bind directory missing or wrong owner')
     for path in (STATE/'devsy-bridge/scoped-jobs').glob('*.json'):
         record=json.loads(private(path))
@@ -181,13 +202,13 @@ def validate_profile():
             raise ValueError('Active scoped provisioning must finish before deployment')
 
 
-def images(manifest, pull=True):
+def images(manifest, pull=True, pull_env=None):
     repos={'cas':'ghcr.io/joshyorko/codex-action-server','schema_proxy':'ghcr.io/joshyorko/codex-action-server','executor':'ghcr.io/usefulsoftwareco/executor-selfhost:2.0.0-beta.12','tunnel':'ghcr.io/openai/tunnel-client:v0.0.15'}
     if set(manifest['images'])!=set(repos): raise ValueError('Image set mismatch')
     for name,want in manifest['images'].items():
         if want['repository']!=repos[name] or not re.fullmatch(r'sha256:[0-9a-f]{64}',want['digest']): raise ValueError('Unapproved image reference')
     result={}
-    pull_env=anonymous_docker_environment() if pull else None
+    pull_env=(pull_env or anonymous_docker_environment()) if pull else None
     for name,want in manifest['images'].items():
         ref=want['repository']+'@'+want['digest']
         if pull:run(['docker','pull','--platform','linux/amd64',ref],600,env=pull_env)
@@ -199,7 +220,7 @@ def images(manifest, pull=True):
 
 
 def network_check(want):
-    if want!={'name':'mcp-control-plane','subnet':'172.30.86.0/24','gateway':'172.30.86.1'}: raise ValueError('Unapproved network')
+    if want!=NETWORK: raise ValueError('Unapproved network')
     ids=run(['docker','network','ls','-q']).decode().split();rows=json.loads(run(['docker','network','inspect',*ids]))
     bridges=[];exists=False
     for row in rows:
@@ -224,6 +245,343 @@ def network(want):
     run(['docker','network','create','--driver','bridge','--subnet',want['subnet'],'--gateway',want['gateway'],'--label','mcp-control-plane.owner=kamal',want['name']])
 
 
+def activation_network(activation_id):
+    _activation_marker(activation_id)
+    if network_check(NETWORK):raise ValueError('Replacement VM network appeared after activation preflight')
+    run(['docker','network','create','--driver','bridge','--subnet',NETWORK['subnet'],'--gateway',NETWORK['gateway'],
+         '--label','mcp-control-plane.owner=kamal',NETWORK['name']])
+    if not network_check(NETWORK):raise ValueError('Private activation network was not created')
+    return {'network_created':True}
+
+
+def _recovery_validator():
+    module=sys.modules.get('prepare_recovery_generation')
+    if module is None:
+        try:module=importlib.import_module('prepare_recovery_generation')
+        except ImportError:raise ValueError('Recovery-generation validator is unavailable on this source revision') from None
+    return module.validate_generation
+
+
+def _prepared_generation(directory):
+    root=Path(directory)
+    prepared=_recovery_validator()(root)
+    generation=prepared['generation']
+    path=root/'prepared-manifest.json'
+    fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW)
+    try:
+        info=os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid!=os.getuid() or info.st_mode&0o777!=0o600:
+            raise ValueError('Prepared generation manifest ownership or mode mismatch')
+        digest=hashlib.sha256()
+        while block:=os.read(fd,1024*1024):digest.update(block)
+    finally:os.close(fd)
+    return {'root':root,'prepared':prepared,'generation':generation,
+            'expected_identity':prepared['expected_identity'],'manifest_sha256':digest.hexdigest()}
+
+
+def _path_is_present(path):
+    return os.path.lexists(path)
+
+
+def _safe_target_parent(path):
+    parent=path.parent
+    try:
+        info=parent.lstat()
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid!=os.getuid()
+                or info.st_mode&0o022 or parent.resolve(strict=True)!=parent.absolute()):
+            raise ValueError('Recovery destination parent is unsafe')
+    except OSError:
+        raise ValueError('Recovery destination parent is unavailable') from None
+
+
+def _verify_private_directory(path):
+    try:
+        info=path.lstat()
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid!=os.getuid()
+                or info.st_mode&0o777!=0o700 or path.resolve(strict=True)!=path.absolute()):
+            raise ValueError('Deployment state directory is unsafe')
+    except OSError:
+        raise ValueError('Deployment state directory is unavailable') from None
+
+
+def _ensure_private_state_store():
+    if not _path_is_present(STATE):
+        _safe_target_parent(STATE)
+        try:STATE.mkdir(mode=0o700)
+        except FileExistsError:pass
+    _verify_private_directory(STATE)
+    if not _path_is_present(STORE):
+        try:STORE.mkdir(mode=0o700)
+        except FileExistsError:pass
+    _verify_private_directory(STORE)
+
+
+def _empty_private_directory(path, *, allow_lock=False):
+    if not _path_is_present(path):
+        _safe_target_parent(path)
+        return False
+    try:
+        info=path.lstat()
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid!=os.getuid()
+                or info.st_mode&0o777!=0o700 or path.resolve(strict=True)!=path.absolute()):
+            raise ValueError('Recovery destination must be an owned mode-0700 directory')
+        children={child.name for child in path.iterdir()}
+        if not children:return True
+        if allow_lock and path==STATE and children=={'deployment'}:
+            store=path/'deployment';store_info=store.lstat()
+            allowed={'deploy.lock'}
+            marker=store/'activation-in-progress.json'
+            if os.path.lexists(marker):allowed.add(marker.name)
+            lock=store/'deploy.lock';lock_info=lock.lstat()
+            if (stat.S_ISDIR(store_info.st_mode) and store_info.st_uid==os.getuid()
+                    and store_info.st_mode&0o777==0o700
+                    and {child.name for child in store.iterdir()}==allowed
+                    and stat.S_ISREG(lock_info.st_mode) and lock_info.st_uid==os.getuid()
+                    and lock_info.st_mode&0o777==0o600
+                    and (not os.path.lexists(marker) or
+                         (stat.S_ISREG(marker.lstat().st_mode) and marker.lstat().st_uid==os.getuid()
+                          and marker.lstat().st_mode&0o777==0o600))):return True
+        raise ValueError('Recovery destination directory is not empty')
+    except OSError:
+        raise ValueError('Recovery destination directory is unavailable') from None
+
+
+def _target_preflight(*, allow_lock=False):
+    if os.getuid()!=1000 or os.getgid()!=1000:
+        raise ValueError('Replacement operator UID/GID must be 1000 for the captured Executor volume')
+    if not ROOT.is_dir() or ROOT.is_symlink() or ROOT.stat().st_uid!=os.getuid():
+        raise ValueError('Replacement repository directory is unavailable or unsafe')
+    env_path=ROOT/'.env'
+    if _path_is_present(env_path):raise ValueError('Replacement repository .env already exists')
+    _safe_target_parent(env_path)
+    _empty_private_directory(STATE,allow_lock=allow_lock)
+    _empty_private_directory(NATIVE_SSH)
+    try:
+        status=run(['git','-C',str(ROOT),'status','--porcelain']).decode().strip()
+        source=run(['git','-C',str(ROOT),'rev-parse','HEAD']).decode().strip()
+    except Exception:
+        raise ValueError('Replacement repository source revision is unavailable') from None
+    if status:raise ValueError('Replacement repository has uncommitted changes')
+    return source
+
+
+def _activation_container_rows():
+    ids=run(['docker','ps','-aq']).decode().split()
+    return json.loads(run(['docker','inspect',*ids])) if ids else []
+
+
+def _is_control_plane_container(row):
+    name=row.get('Name','').lstrip('/')
+    labels=row.get('Config',{}).get('Labels',{}) or {}
+    image=row.get('Config',{}).get('Image','')
+    mounts=row.get('Mounts',[]) or []
+    known_names={item for group in NAMES.values() for item in group.values()}
+    return (name in known_names or name.startswith('mcp-recovery-seed-')
+            or labels.get('com.docker.compose.project')=='codex-control-plane'
+            or labels.get('service') in set(NAMES['kamal'].values())
+            or 'executor-selfhost' in image or 'tunnel-client' in image
+            or any(mount.get('Name')=='codex-control-plane_executor-data' for mount in mounts))
+
+
+def _ensure_empty_activation_target(generation_dir, *, allow_lock=False):
+    prepared=_prepared_generation(generation_dir)
+    source=_target_preflight(allow_lock=allow_lock)
+    generation=prepared['generation']
+    if generation.get('authority')!='kamal':raise ValueError('Preserved generation does not use supported Kamal authority')
+    if source!=generation['source_sha']:raise ValueError('Replacement repository does not match captured source revision')
+    rows=_activation_container_rows()
+    if any(_is_control_plane_container(row) for row in rows):
+        raise ValueError('Replacement VM already has control-plane, Executor, or tunnel containers')
+    volumes=set(run(['docker','volume','ls','-q']).decode().split())
+    if 'codex-control-plane_executor-data' in volumes:
+        raise ValueError('Replacement VM already has the Executor data volume')
+    if network_check(NETWORK):raise ValueError('Replacement VM already has the private control-plane network')
+    unit=run(['systemctl','show','--property=LoadState','--value','codex-control-plane-devsy']).decode().strip()
+    if unit!='loaded':raise ValueError('Replacement VM Devsy systemd unit is unavailable')
+    return {**prepared,'repo_source_sha':source,'container_count':len(rows),'network':'absent'}
+
+
+def activation_plan(generation_dir):
+    info=_ensure_empty_activation_target(generation_dir,allow_lock=False)
+    return {'ready':True,'generation':info['generation'],'expected_identity':info['expected_identity'],
+            'prepared_manifest_sha256':info['manifest_sha256'],'inventory_count':len(info['prepared']['inventory']),
+            'repo_source_sha':info['repo_source_sha']}
+
+
+def _activation_marker(activation_id, *, allow_completed=False):
+    if not isinstance(activation_id,str) or not re.fullmatch('[a-f0-9]{32}',activation_id):
+        raise ValueError('Activation ID is invalid')
+    marker=json.loads(private(STORE/'activation-in-progress.json'))
+    if (not isinstance(marker,dict) or marker.get('schema_version')!=1
+            or marker.get('activation_id')!=activation_id
+            or marker.get('status') not in (('installing','activating','activated') if allow_completed else ('installing','activating'))):
+        raise ValueError('Activation ID does not own the current recovery operation')
+    return marker
+
+
+def activation_begin(generation_dir,expected_manifest_sha256,expected_identity,activation_id,original_stopped_attested):
+    info=_ensure_empty_activation_target(generation_dir,allow_lock=True)
+    if (info['manifest_sha256']!=expected_manifest_sha256 or info['expected_identity']!=expected_identity
+            or original_stopped_attested is not True):
+        raise ValueError('Activation authorization does not match the prepared generation')
+    if not isinstance(activation_id,str) or not re.fullmatch('[a-f0-9]{32}',activation_id):
+        raise ValueError('Activation ID is invalid')
+    marker_path=STORE/'activation-in-progress.json'
+    if os.path.lexists(marker_path):raise ValueError('A recovery activation is already recorded')
+    marker={'schema_version':1,'activation_id':activation_id,'status':'installing',
+            'source_sha':info['generation']['source_sha'],'expected_identity':expected_identity,
+            'prepared_manifest_sha256':expected_manifest_sha256,'original_stopped_attested':True,
+            'started_services':[]}
+    write(marker_path,marker)
+    return {'activation_started':True}
+
+
+def activation_track(activation_id,service):
+    marker=_activation_marker(activation_id)
+    if service not in NAMES['kamal']:raise ValueError('Activation service is unsupported')
+    matching=[row for row in _activation_container_rows()
+              if row.get('Name','').lstrip('/')==NAMES['kamal'][service]]
+    if len(matching)!=1 or matching[0].get('Config',{}).get('Labels',{}).get('service')!=NAMES['kamal'][service]:
+        raise ValueError('New Kamal accessory ownership could not be verified')
+    if service not in marker['started_services']:
+        marker['started_services'].append(service)
+        marker['status']='activating';write(STORE/'activation-in-progress.json',marker)
+    return {'accessory_recorded':service}
+
+
+def _copy_verified_file(source,target,row):
+    source_fd=os.open(source,os.O_RDONLY|os.O_NOFOLLOW)
+    try:
+        source_info=os.fstat(source_fd)
+        if (not stat.S_ISREG(source_info.st_mode) or source_info.st_uid!=os.getuid()
+                or source_info.st_mode&0o777!=row['mode'] or source_info.st_size!=row['size']):
+            raise ValueError('Prepared generation file changed after validation')
+        target_fd=os.open(target,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,row['mode'])
+        digest=hashlib.sha256();size=0
+        try:
+            while block:=os.read(source_fd,1024*1024):
+                size+=len(block);digest.update(block)
+                view=memoryview(block)
+                while view:
+                    written=os.write(target_fd,view);view=view[written:]
+            os.fsync(target_fd)
+        finally:os.close(target_fd)
+        if size!=row['size'] or digest.hexdigest()!=row['sha256']:
+            raise ValueError('Prepared generation file digest changed during installation')
+        os.chmod(target,row['mode'],follow_symlinks=False)
+    finally:os.close(source_fd)
+
+
+def _install_tree(prepared,generation_root,source_prefix,destination,*,allow_lock=False):
+    entries=[row for row in prepared['inventory'] if row['path']==source_prefix or row['path'].startswith(source_prefix+'/')]
+    if not entries:raise ValueError('Prepared generation is missing a required payload directory')
+    root_row=next((row for row in entries if row['path']==source_prefix),None)
+    if root_row is None or root_row['type']!='directory':raise ValueError('Prepared generation payload root is invalid')
+    if not _path_is_present(destination):destination.mkdir(mode=root_row['mode'])
+    elif destination==STATE and allow_lock:
+        _empty_private_directory(destination,allow_lock=True)
+    else:
+        _empty_private_directory(destination)
+    created={source_prefix}
+    for row in sorted((item for item in entries if item['path']!=source_prefix),key=lambda item:(item['path'].count('/'),item['path'])):
+        relative=PurePosixPath(row['path']).relative_to(PurePosixPath(source_prefix))
+        target=destination.joinpath(*relative.parts)
+        source=Path(generation_root).joinpath(*PurePosixPath(row['path']).parts)
+        if row['type']=='directory':
+            if target.exists():
+                if source_prefix=='state' and relative.as_posix()=='deployment' and allow_lock:
+                    _empty_private_directory(STATE,allow_lock=True)
+                    continue
+                raise ValueError('Recovery destination contains unexpected data')
+            target.mkdir(mode=row['mode']);created.add(row['path'])
+        else:
+            if target.parent.resolve(strict=True)!=target.parent.absolute():raise ValueError('Recovery destination traverses a symlink')
+            _copy_verified_file(source,target,row)
+
+
+def activation_install(generation_dir,expected_manifest_sha256,activation_id):
+    _activation_marker(activation_id)
+    info=_ensure_empty_activation_target(generation_dir,allow_lock=True)
+    if info['manifest_sha256']!=expected_manifest_sha256:raise ValueError('Prepared generation changed after plan')
+    _install_tree(info['prepared'],info['root'],'state',STATE,allow_lock=True)
+    _install_tree(info['prepared'],info['root'],'native-ssh',NATIVE_SSH)
+    env_row=next((row for row in info['prepared']['inventory'] if row['path']=='vm.env'),None)
+    if env_row is None or env_row['type']!='file':raise ValueError('Prepared generation has no VM environment file')
+    _copy_verified_file(info['root']/'vm.env',ROOT/'.env',env_row)
+    return {'state_installed':True,'native_ssh_installed':True,'vm_environment_installed':True}
+
+
+def activation_pull_images(manifest):
+    with tempfile.TemporaryDirectory(prefix='mcp-activation-docker-') as root:
+        config=Path(root)/'config.json'
+        fd=os.open(config,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+        with os.fdopen(fd,'wb') as stream:stream.write(b'{}\n')
+        env=os.environ.copy();env.pop('DOCKER_AUTH_CONFIG',None);env['DOCKER_CONFIG']=root
+        return {'image_ids':images(manifest,pull=True,pull_env=env),'pulled':True}
+
+
+def activation_seed(generation_dir,expected_manifest_sha256,manifest,activation_id):
+    _activation_marker(activation_id)
+    info=_prepared_generation(generation_dir)
+    if info['manifest_sha256']!=expected_manifest_sha256:raise ValueError('Prepared generation changed before volume seed')
+    if manifest!=info['generation']['manifest']:raise ValueError('Executor seed manifest differs from the captured generation')
+    images(manifest,pull=False)
+    if any(_is_control_plane_container(row) for row in _activation_container_rows()):
+        raise ValueError('Unexpected control-plane container appeared before Executor volume seed')
+    volume='codex-control-plane_executor-data'
+    if volume in set(run(['docker','volume','ls','-q']).decode().split()):
+        raise ValueError('Executor data volume appeared before recovery seed')
+    nonce=uuid.uuid4().hex
+    run(['docker','volume','create','--label','mcp-control-plane.recovery-activation='+nonce,volume])
+    volume_info=json.loads(run(['docker','volume','inspect',volume]))[0]
+    if volume_info.get('Name')!=volume or (volume_info.get('Labels') or {}).get('mcp-control-plane.recovery-activation')!=nonce:
+        raise ValueError('Created Executor volume ownership could not be verified')
+    helper='mcp-recovery-seed-'+nonce[:16]
+    executor=manifest['images']['executor'];reference=executor['repository']+'@'+executor['digest']
+    created=run(['docker','create','--name',helper,'--mount','type=volume,source='+volume+',target=/app/data,volume-nocopy','--entrypoint','/bin/true',reference]).decode().strip()
+    try:
+        state=json.loads(run(['docker','inspect',created]))[0]['State']
+        if state.get('Running') is not False:raise ValueError('Executor seed helper unexpectedly started')
+        run(['docker','cp','--archive',str(info['root']/'executor-data')+'/.',created+':/app/data'])
+    finally:
+        # The stopped helper is owned by this activation. Keep the named volume intact.
+        run(['docker','rm',created])
+    return {'executor_volume_seeded':True,'helper_started':False,'volume':volume}
+
+
+def activation_identity(expected_identity,activation_id):
+    marker=_activation_marker(activation_id)
+    if marker['expected_identity']!=expected_identity:raise ValueError('Activation identity does not match its private operation marker')
+    actual=identity(NAMES['kamal']['executor'])
+    if actual!=expected_identity:raise ValueError('Recovered Executor identity did not match the captured identity')
+    return {'identity_preserved':True}
+
+
+def activation_cleanup(activation_id,attempted_services):
+    marker=_activation_marker(activation_id,allow_completed=True)
+    if (not isinstance(attempted_services,list)
+            or any(service not in NAMES['kamal'] for service in attempted_services)):
+        raise ValueError('Activation cleanup service set is invalid')
+    allowed=set(marker['started_services'])|set(attempted_services)
+    rows=_activation_container_rows()
+    selected=[]
+    for row in rows:
+        name=row.get('Name','').lstrip('/')
+        service=next((key for key,value in NAMES['kamal'].items() if value==name),None)
+        if service in allowed:
+            if row.get('Config',{}).get('Labels',{}).get('service')!=name:
+                raise ValueError('Activation cleanup refused a container with foreign ownership')
+            selected.append(row)
+        elif _is_control_plane_container(row):
+            raise ValueError('Activation cleanup found a foreign control-plane container')
+    for row in reversed(selected):
+        cid=row['Id']
+        if row['State'].get('Running') or row['State'].get('Paused'):run(['docker','stop',cid])
+        run(['docker','rm',cid])
+    marker['status']='failed-cleanup-complete';write(STORE/'activation-in-progress.json',marker)
+    return {'new_accessories_removed':len(selected),'recovered_state_preserved':True,'executor_volume_preserved':True}
+
+
 def wait_service(owner,name):
     deadline=time.monotonic()+180
     while time.monotonic()<deadline:
@@ -233,9 +591,60 @@ def wait_service(owner,name):
     raise ValueError('Managed service health deadline failed: '+name)
 
 
+def snapshot_databases(directory, archive_name):
+    """Create SQLite-consistent CAS copies and a relocatable source-path map."""
+    databases=directory/archive_name
+    databases.mkdir(mode=0o700)
+    mapping=[]
+    for source in (STATE/'cas/runtime').rglob('*.db'):
+        if source.name not in ('server.db','workitems.db'):continue
+        relative=source.relative_to(STATE).as_posix()
+        target=databases/(hashlib.sha256(relative.encode()).hexdigest()[:12]+'-'+source.name)
+        with sqlite3.connect('file:'+str(source)+'?mode=ro',uri=True) as original,sqlite3.connect(target) as copy:
+            original.backup(copy)
+        target.chmod(0o600)
+        mapping.append({'relative_path':relative,'snapshot':target.name})
+    metadata=databases/'manifest.json'
+    metadata.write_text(json.dumps({'schema_version':1,'databases':mapping},sort_keys=True)+'\n')
+    metadata.chmod(0o600)
+    return databases
+
+
+def recorded_runtime_source_sha():
+    """Require the clean VM checkout to be the source revision in its ledger."""
+    current=json.loads(private(STORE/'current.json'))
+    expected=current.get('source_sha') if isinstance(current,dict) else None
+    if not isinstance(expected,str) or not re.fullmatch('[a-f0-9]{40}',expected):
+        raise ValueError('Recorded deployment source revision is invalid')
+    status=run(['git','-C',str(ROOT),'status','--porcelain']).decode().strip()
+    actual=run(['git','-C',str(ROOT),'rev-parse','HEAD']).decode().strip()
+    if status:raise ValueError('Runtime source checkout has uncommitted changes; backup refused')
+    if actual!=expected:raise ValueError('Runtime source checkout differs from the recorded deployment; backup refused')
+    return expected
+
+
+def create_runtime_source_bundle(directory,expected_sha):
+    bundle=directory/'runtime-source.bundle'
+    run(['git','-C',str(ROOT),'bundle','create',str(bundle),'HEAD'])
+    bundle.chmod(0o600)
+    info=bundle.lstat()
+    if not stat.S_ISREG(info.st_mode) or info.st_uid!=os.getuid() or info.st_mode&0o777!=0o600:
+        raise ValueError('Runtime source bundle ownership or mode mismatch')
+    heads=run(['git','-C',str(ROOT),'bundle','list-heads',str(bundle)]).decode().splitlines()
+    listed=[]
+    for line in heads:
+        fields=line.split()
+        if len(fields)==2 and fields[1]=='HEAD':listed.append(fields[0])
+    if listed!=[expected_sha]:raise ValueError('Runtime source bundle does not match the recorded deployment')
+    return bundle
+
+
 def backup():
+    validate_profile()
+    source_sha=recorded_runtime_source_sha()
     owner,groups,_=inspect();cid=groups[owner]['executor']['Id']
     directory=STORE/'backups'/str(time.time_ns());directory.mkdir(mode=0o700,parents=True)
+    create_runtime_source_bundle(directory,source_sha)
     guard=subprocess.Popen(['python3','-c','import subprocess,time;time.sleep(40);subprocess.run(["docker","unpause",'+repr(cid)+'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)'],start_new_session=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
     try:
         run(['docker','pause',cid]);path=directory/'executor.tar'
@@ -246,18 +655,27 @@ def backup():
         path.chmod(0o600)
     finally:
         run(['docker','unpause',cid]);guard.terminate();guard.wait(timeout=5)
-    databases=directory/'cas-databases';databases.mkdir(mode=0o700)
-    for source in (STATE/'cas/runtime').rglob('*.db'):
-        if source.name not in ('server.db','workitems.db'):continue
-        target=databases/(hashlib.sha256(str(source).encode()).hexdigest()[:12]+'-'+source.name)
-        with sqlite3.connect('file:'+str(source)+'?mode=ro',uri=True) as original,sqlite3.connect(target) as copy:
-            original.backup(copy)
-        target.chmod(0o600)
+    databases=snapshot_databases(directory,'cas-databases')
     with (directory/'essential.tar').open('xb') as output:
         with tarfile.open(fileobj=output,mode='w') as archive:
             for rel in ('secrets','bootstrap','cas-targets.json','cas/dynamic-targets.json','owner-devsy-scope','ror','devsy-bridge/scoped-jobs','devsy-bridge/creation-receipts'):
                 f=STATE/rel
                 if f.exists(): archive.add(f,arcname=rel)
+            required_sources=(
+                (STATE/'cas/receipts','cas/receipts'),
+                (NATIVE_SSH,'native-ssh'),
+                (Path(DEVSY['config_source']),'devsy-operator/config.yaml'),
+                (Path(DEVSY['context_dir']),'devsy-operator/contexts/'+DEVSY['context']),
+                (Path(DEVSY['kubeconfig_source']),'devsy-operator/operator-kubeconfig.json'),
+                (STATE/'start-host-devsy.py','start-host-devsy.py'),
+            )
+            for source,arcname in required_sources:
+                if not source.exists():raise ValueError('Required recovery input is missing: '+arcname)
+                archive.add(source,arcname=arcname)
+            for source,arcname in ((STORE/'current.json','deployment/current.json'),(STORE/'previous.json','deployment/previous.json')):
+                if source.exists():
+                    private(source)
+                    archive.add(source,arcname=arcname)
             archive.add(ROOT/'.env',arcname='compose.env')
             archive.add(databases,arcname='cas-databases')
     (directory/'essential.tar').chmod(0o600)
@@ -266,12 +684,7 @@ def backup():
 
 def backup_cas():
     directory=STORE/'backups'/('cas-'+str(time.time_ns()));directory.mkdir(mode=0o700,parents=True)
-    databases=directory/'databases';databases.mkdir(mode=0o700)
-    for source in (STATE/'cas/runtime').rglob('*.db'):
-        if source.name not in ('server.db','workitems.db'):continue
-        target=databases/(hashlib.sha256(str(source).encode()).hexdigest()[:12]+'-'+source.name)
-        with sqlite3.connect('file:'+str(source)+'?mode=ro',uri=True) as original,sqlite3.connect(target) as copy:original.backup(copy)
-        target.chmod(0o600)
+    databases=snapshot_databases(directory,'databases')
     archive=directory/'cas-essential.tar'
     with tarfile.open(archive,'x') as output:
         for relative in ('cas-targets.json','cas/dynamic-targets.json','owner-devsy-scope','devsy-bridge/scoped-jobs','devsy-bridge/creation-receipts'):
@@ -286,7 +699,7 @@ def smoke():
     os.environ.update(EXECUTOR_URL='http://127.0.0.1:4312',EXECUTOR_PAT_FILE=str(STATE/'secrets/executor-pat'))
     sys.path.insert(0,str(ROOT/'scripts'));import compose_control as c
     _,m=c.executor_session();c.verify_compact(m)
-    payload={'target':'local','cwd':'/home/kdlocpanda/second_brain/Resources/codex-memory-lab/mcp-tunnel-kit','thread_id':'01a12bba-9641-79c1-9b29-93136f976fa6','include_turns':False}
+    payload={'target':'local','cwd':str(ROOT),'thread_id':'01a12bba-9641-79c1-9b29-93136f976fa6','include_turns':False}
     r=c.execution(m.call('tools/call',{'name':'execute','arguments':{'code':'return await tools.codex.read_thread('+json.dumps({'payload':payload})+');'}}))
     v=r['execution']['value']['structuredContent']
     if not r['execution']['ok'] or v.get('error') is not None: raise ValueError('Native exact-thread read failed')
@@ -303,15 +716,61 @@ def compose_start():
     return {'compose_started':True}
 
 
+def invocation_profile(argv=None):
+    """Load a local operator profile or decode the controller's SSH payload."""
+    argv=list(sys.argv if argv is None else argv)
+    if argv and argv[0]=='-c':
+        if len(argv)!=3:raise ValueError('Remote invocation requires an encoded instance profile')
+        return argv[1],decode(argv[2])
+    parser=argparse.ArgumentParser(description='Private control-plane VM operations')
+    parser.add_argument('action')
+    parser.add_argument('--instance-profile',help='Absolute path to an owned mode-0600 private instance profile')
+    args=parser.parse_args(argv[1:])
+    return args.action,load_instance_profile(args.instance_profile)
+
+
 def main():
-    os.umask(0o077);STORE.mkdir(mode=0o700,exist_ok=True)
-    action=sys.argv[1];data=json.load(sys.stdin) if action in ('images','image-check','network','network-check','wait','commit','baseline','set-current','rollback-commit','restart-local') else {}
-    if action=='lock':
+    action,instance=invocation_profile()
+    configure_profile(instance)
+    os.umask(0o077)
+    if action=='lock':_ensure_private_state_store()
+    elif action!='activation-plan' and action.startswith('activation-'):
+        _verify_private_directory(STATE);_verify_private_directory(STORE)
+    elif action!='activation-plan':STORE.mkdir(mode=0o700,exist_ok=True)
+    data=json.load(sys.stdin) if action in ('images','image-check','network','network-check','wait','commit','baseline','set-current','rollback-commit','restart-local','activation-plan','activation-preflight','activation-begin','activation-pull-images','activation-install','activation-track','activation-seed','activation-network','activation-identity','activation-cleanup','activation-record') else {}
+    if action=='activation-plan':result=activation_plan(data['generation_dir'])
+    elif action=='activation-preflight':
+        info=_ensure_empty_activation_target(data['generation_dir'],allow_lock=True)
+        result={'ready':True,'expected_identity':info['expected_identity'],'prepared_manifest_sha256':info['manifest_sha256']}
+    elif action=='activation-begin':
+        result=activation_begin(data['generation_dir'],data['prepared_manifest_sha256'],data['expected_identity'],data['activation_id'],data['original_stopped_attested'])
+    elif action=='activation-pull-images':
+        _activation_marker(data['activation_id']);result=activation_pull_images(data['manifest'])
+    elif action=='activation-install':result=activation_install(data['generation_dir'],data['prepared_manifest_sha256'],data['activation_id'])
+    elif action=='activation-track':result=activation_track(data['activation_id'],data['service'])
+    elif action=='activation-seed':result=activation_seed(data['generation_dir'],data['prepared_manifest_sha256'],data['manifest'],data['activation_id'])
+    elif action=='activation-network':result=activation_network(data['activation_id'])
+    elif action=='activation-identity':result=activation_identity(data['expected_identity'],data['activation_id'])
+    elif action=='activation-cleanup':result=activation_cleanup(data['activation_id'],data['attempted_services'])
+    elif action=='activation-record':
+        marker=_activation_marker(data.get('activation_id'))
+        if (set(data)!={'activation_id','source_sha','expected_identity','identity_preserved','original_stopped_attested'}
+                or data['identity_preserved'] is not True or data['original_stopped_attested'] is not True
+                or not re.fullmatch('[a-f0-9]{40}',data['source_sha'])
+                or not isinstance(data['expected_identity'],str)
+                or data['source_sha']!=marker['source_sha'] or data['expected_identity']!=marker['expected_identity']):
+            raise ValueError('Activation receipt input is invalid')
+        marker['status']='activated';write(STORE/'activation-in-progress.json',marker)
+        receipt={**data,'schema_version':1,'recorded_at_ns':time.time_ns()}
+        if (STORE/'recovery-activation.json').exists():raise ValueError('Activation receipt already exists')
+        write(STORE/'recovery-activation.json',receipt)
+        result={'activation_recorded':True}
+    elif action=='lock':
         fd=os.open(STORE/'deploy.lock',os.O_CREAT|os.O_RDWR|os.O_NOFOLLOW,0o600)
         s=os.fstat(fd)
         if s.st_uid!=os.getuid() or s.st_mode&0o777!=0o600:raise ValueError('Unsafe deployment lock')
         fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB);print('LOCKED',flush=True);sys.stdin.read();return
-    if action=='snapshot':result=snapshot()
+    elif action=='snapshot':result=snapshot()
     elif action=='status':result=status()
     elif action=='lifecycle-check':result=lifecycle_check()
     elif action=='identity-check':
@@ -343,7 +802,7 @@ def main():
                 run(['docker','rm',r['Id']])
         result={'kamal_containers_removed':True}
     elif action=='remove-network':
-        ids=run(['docker','network','ls','--filter','name=^mcp-control-plane$','-q']).decode().split()
+        ids=run(['docker','network','ls','--filter','name=^'+re.escape(NETWORK['name'])+'$','-q']).decode().split()
         if ids:
             r=json.loads(run(['docker','network','inspect',*ids]))[0]
             if r.get('Labels',{}).get('mcp-control-plane.owner')=='kamal' and not r.get('Containers'):run(['docker','network','rm',r['Id']])

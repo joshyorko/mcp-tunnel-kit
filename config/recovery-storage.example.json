@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "mc_config_dir": "/home/operator/.config/mc-recovery",
+  "minio_alias": "recovery-minio",
+  "bucket": "control-plane-recovery",
+  "removable_directory": "/run/media/operator/recovery-drive/mcp-control-plane-recovery",
+  "recovery_identity": "/home/operator/.local/state/mcp-control-plane-recovery/keys/recovery-identity.txt",
+  "unlock_identity": "/home/operator/.local/state/mcp-control-plane-recovery/keys/unlock-identity.txt"
+}

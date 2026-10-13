@@ -3,10 +3,12 @@
 import json
 import os
 import sqlite3
+import subprocess
 import sys
 import tarfile
 from contextlib import nullcontext
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import call, patch
 
 import pytest
@@ -16,6 +18,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import compose_control as c
 import deploy_control_plane as d
 import vm_deploy_host as h
+from instance_profile import encode
 
 
 def generation(authority="kamal", source_sha="a" * 40):
@@ -39,6 +42,28 @@ def args(operation, *, approve=False):
         "cas_revision": "",
         "approve_full_stack": approve,
     })()
+
+
+def runtime_repo(tmp_path):
+    repo=tmp_path/"runtime-source";repo.mkdir()
+    real_run=subprocess.run
+    for command in (["git","init","--quiet",str(repo)],
+                    ["git","-C",str(repo),"config","user.name","fixture"],
+                    ["git","-C",str(repo),"config","user.email","fixture@example.invalid"]):
+        real_run(command,check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+    (repo/".gitignore").write_text(".env\n")
+    (repo/"runtime.py").write_text("runtime fixture\n")
+    real_run(["git","-C",str(repo),"add",".gitignore","runtime.py"],check=True,stdout=subprocess.DEVNULL)
+    real_run(["git","-C",str(repo),"commit","--quiet","-m","fixture"],check=True,stdout=subprocess.DEVNULL)
+    source_sha=real_run(["git","-C",str(repo),"rev-parse","HEAD"],check=True,capture_output=True,text=True).stdout.strip()
+    profile=json.loads((ROOT/"config/instance.example.json").read_text())
+    state=tmp_path/"state";state.mkdir(mode=0o700)
+    deployment=state/"deployment";deployment.mkdir(mode=0o700)
+    current=deployment/"current.json";current.write_text(json.dumps({"authority":"kamal","source_sha":source_sha})+"\n");current.chmod(0o600)
+    parent=tmp_path/"native-state";parent.mkdir(mode=0o700)
+    profile["vm"].update(repo_dir=str(repo),state_dir=str(state),native_ssh_dir=str(parent/"native-ssh"))
+    h.configure_profile(profile)
+    return repo,source_sha
 
 
 def test_cas_failure_restores_only_cas_and_uses_cas_backup():
@@ -70,6 +95,7 @@ def test_cas_failure_restores_only_cas_and_uses_cas_backup():
     kamal_calls = []
     with patch.object(d, "trusted_context"), patch.object(d, "lock", return_value=nullcontext()), \
          patch.object(d, "remote", side_effect=remote), \
+             patch.object(d, "prove_images", return_value={}), \
          patch.object(d, "kamal", side_effect=lambda config, operation, name: kamal_calls.append((operation, name))), \
          patch.object(d, "sync_source") as sync_source, \
          patch.dict(os.environ, {"GITHUB_SHA": "b" * 40}):
@@ -101,6 +127,7 @@ def test_source_sync_failure_is_inside_protected_deployment_path(rollback_fails)
 
     with patch.object(d, "trusted_context"), patch.object(d, "lock", return_value=nullcontext()), \
          patch.object(d, "remote", side_effect=remote), \
+         patch.object(d, "prove_images", return_value={}), \
          patch.object(d, "sync_source", side_effect=RuntimeError("secret-source-detail")), \
          patch.object(d, "restore", side_effect=RuntimeError("secret-rollback-detail") if rollback_fails else None) as restore, patch.dict(os.environ, {"GITHUB_SHA": "b" * 40}):
         with pytest.raises(RuntimeError, match="Deployment failed at source-sync") as error:
@@ -130,6 +157,7 @@ def test_adoption_network_conflict_is_rejected_before_stopping_compose():
 
     with patch.object(d, "trusted_context"), patch.object(d, "lock", return_value=nullcontext()), \
          patch.object(d, "remote", side_effect=remote), \
+         patch.object(d, "prove_images", return_value={}), \
          patch.object(d, "sync_source"), patch.object(d, "restore"), \
          patch.dict(os.environ, {"GITHUB_SHA": "b" * 40}):
         with pytest.raises(ValueError, match="foreign network conflict"):
@@ -158,7 +186,8 @@ def test_adoption_network_check_precedes_compose_stop():
 
     with patch.object(d, "trusted_context"), patch.object(d, "lock", return_value=nullcontext()), \
          patch.object(d, "remote", side_effect=remote), patch.object(d, "sync_source"), \
-         patch.object(d, "kamal"), patch.dict(os.environ, {"GITHUB_SHA": "b" * 40}):
+         patch.object(d, "prove_images", return_value={}), patch.object(d, "kamal"), \
+         patch.dict(os.environ, {"GITHUB_SHA": "b" * 40}):
         d.execute(args("adopt", approve=True))
 
     assert calls.index("network-check") < calls.index("compose-stop")
@@ -240,14 +269,114 @@ def test_cas_backup_does_not_pause_or_copy_executor(tmp_path):
     assert result["executor_untouched"] is True
     with tarfile.open(Path(result["cas_backup"]) / "cas-essential.tar") as archive:
         members = {member.name for member in archive.getmembers()}
+        mapping = json.load(archive.extractfile("databases/manifest.json"))
     assert "cas-targets.json" in members
     assert any(name.startswith("databases/") for name in members)
+    assert mapping["databases"] == [{"relative_path": "cas/runtime/server.db", "snapshot": mapping["databases"][0]["snapshot"]}]
     assert not any("executor" in name or "tunnel" in name for name in members)
 
 
+def test_full_backup_captures_recovery_inputs_and_consistent_database_map(tmp_path):
+    instance=json.loads((ROOT / "config/instance.example.json").read_text())
+    state=tmp_path/"state";repo=tmp_path/"repo";native=tmp_path/"native-ssh"
+    devsy=tmp_path/"devsy";context=devsy/"contexts/default"
+    for directory in (state/"cas/runtime",state/"cas",state/"cas/receipts",state/"secrets",
+                      state/"bootstrap",state/"deployment",repo,native,context):directory.mkdir(parents=True,exist_ok=True)
+    real_subprocess_run=subprocess.run
+    for command in (["git","init","--quiet",str(repo)],
+                    ["git","-C",str(repo),"config","user.name","fixture"],
+                    ["git","-C",str(repo),"config","user.email","fixture@example.invalid"]):
+        real_subprocess_run(command,check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+    (repo/".gitignore").write_text(".env\n")
+    (repo/"runtime.py").write_text("runtime fixture\n")
+    real_subprocess_run(["git","-C",str(repo),"add",".gitignore","runtime.py"],check=True,stdout=subprocess.DEVNULL)
+    real_subprocess_run(["git","-C",str(repo),"commit","--quiet","-m","fixture"],check=True,stdout=subprocess.DEVNULL)
+    source_sha=real_subprocess_run(["git","-C",str(repo),"rev-parse","HEAD"],check=True,capture_output=True,text=True).stdout.strip()
+    instance["vm"].update(repo_dir=str(repo),state_dir=str(state),native_ssh_dir=str(native))
+    instance["vm"]["devsy"]={"config_source":str(devsy/"config.yaml"),"context_dir":str(context),
+        "kubeconfig_source":str(devsy/"operator-kubeconfig.json"),"context":"default"}
+    for path in (state/"cas-targets.json",devsy/"config.yaml",devsy/"operator-kubeconfig.json",
+                 context/"connection.json",state/"start-host-devsy.py",repo/".env"):
+        path.parent.mkdir(parents=True,exist_ok=True);path.write_text("fixture\n");path.chmod(0o600)
+    for name in ("ssh_config.native","known_hosts.native","identity"):
+        path=native/name;path.write_text("fixture\n");path.chmod(0o600)
+    current=state/"deployment/current.json";current.write_text(json.dumps({"authority":"kamal","source_sha":source_sha})+"\n");current.chmod(0o600)
+    previous=state/"deployment/previous.json";previous.write_text('{"generation":1}\n');previous.chmod(0o600)
+    database=state/"cas/runtime/server.db"
+    with sqlite3.connect(database) as connection:
+        connection.execute("CREATE TABLE proof (value TEXT)")
+        connection.execute("INSERT INTO proof VALUES ('consistent-copy')")
+    h.configure_profile(instance)
+    events=[]
+    class Guard:
+        def terminate(self):events.append("guard-terminate")
+        def wait(self,timeout=None):events.append("guard-wait")
+    def run(command,*args,**kwargs):
+        if command and command[0]=="git":
+            return real_subprocess_run(command,capture_output=True,check=True).stdout
+        events.append(command[1] if command[:1]==["docker"] else "run")
+        return b""
+    def cp(command,stdout=None,**kwargs):
+        events.append("docker-cp")
+        return type("Result",(),{"returncode":0})()
+    with patch.object(h,"inspect",return_value=("kamal",{"kamal":{"executor":{"Id":"executor-id"}}},[])), \
+         patch.object(h,"run",side_effect=run), \
+         patch.object(h,"subprocess",SimpleNamespace(Popen=lambda *args,**kwargs:Guard(),run=cp,DEVNULL=subprocess.DEVNULL)):
+        result=h.backup()
+    assert events.index("pause") < events.index("docker-cp") < events.index("unpause")
+    assert events[-2:]==["guard-terminate","guard-wait"]
+    backup=Path(result["backup"])
+    bundle=backup/"runtime-source.bundle"
+    assert bundle.is_file() and bundle.stat().st_mode&0o777==0o600
+    heads=real_subprocess_run(["git","-C",str(repo),"bundle","list-heads",str(bundle)],check=True,capture_output=True,text=True).stdout.split()
+    assert heads==[source_sha,"HEAD"]
+    with tarfile.open(backup/"essential.tar") as archive:
+        members=set(archive.getnames())
+        mapping=json.load(archive.extractfile("cas-databases/manifest.json"))
+    assert {"native-ssh/identity","devsy-operator/config.yaml",
+            "devsy-operator/contexts/default/connection.json","devsy-operator/operator-kubeconfig.json",
+            "start-host-devsy.py","deployment/current.json","deployment/previous.json",
+            "cas/receipts"} <= members
+    assert mapping["databases"]==[{"relative_path":"cas/runtime/server.db","snapshot":mapping["databases"][0]["snapshot"]}]
+    copied=backup/"cas-databases"/mapping["databases"][0]["snapshot"]
+    with sqlite3.connect(copied) as connection:
+        assert connection.execute("SELECT value FROM proof").fetchone()==("consistent-copy",)
+    assert "cas/runtime/server.db" not in members
+    assert not any("runtime-source.bundle" in name for name in members)
+
+
+def test_runtime_source_bundle_is_clonable_at_the_recorded_clean_revision(tmp_path):
+    repo,source_sha=runtime_repo(tmp_path)
+    directory=tmp_path/"snapshot";directory.mkdir(mode=0o700)
+    assert h.recorded_runtime_source_sha()==source_sha
+    bundle=h.create_runtime_source_bundle(directory,source_sha)
+    clone=tmp_path/"offline-clone"
+    subprocess.run(["git","clone",str(bundle),str(clone)],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+    actual=subprocess.run(["git","-C",str(clone),"rev-parse","HEAD"],check=True,capture_output=True,text=True).stdout.strip()
+    assert actual==source_sha
+    assert subprocess.run(["git","-C",str(clone),"status","--porcelain"],check=True,capture_output=True,text=True).stdout==""
+
+
+@pytest.mark.parametrize("drift",["dirty","head"])
+def test_full_backup_refuses_source_drift_before_inspect_or_snapshot(tmp_path,drift):
+    repo,source_sha=runtime_repo(tmp_path)
+    if drift=="dirty":
+        (repo/"runtime.py").write_text("uncommitted runtime change\n")
+    else:
+        (repo/"runtime.py").write_text("different committed runtime\n")
+        subprocess.run(["git","-C",str(repo),"add","runtime.py"],check=True,stdout=subprocess.DEVNULL)
+        subprocess.run(["git","-C",str(repo),"commit","--quiet","-m","drift"],check=True,stdout=subprocess.DEVNULL)
+    with patch.object(h,"validate_profile"),patch.object(h,"inspect") as inspect:
+        with pytest.raises(ValueError,match="Runtime source checkout"):
+            h.backup()
+    inspect.assert_not_called()
+    assert not (h.STORE/"backups").exists()
+
+
 def test_remove_network_leaves_foreign_network_untouched(tmp_path, monkeypatch):
-    monkeypatch.setattr(h, "STORE", tmp_path / "store")
-    h.STORE.mkdir()
+    instance=json.loads((ROOT / "config/instance.example.json").read_text())
+    instance["vm"]["state_dir"]=str(tmp_path / "state")
+    Path(instance["vm"]["state_dir"]).mkdir()
     foreign = [{"Name": "mcp-control-plane", "Id": "foreign-id", "Labels": {"owner": "someone-else"},
                 "Containers": {}}]
     docker_calls = []
@@ -261,7 +390,7 @@ def test_remove_network_leaves_foreign_network_untouched(tmp_path, monkeypatch):
         raise AssertionError(f"Unexpected host command: {command}")
 
     monkeypatch.setattr(h, "run", run)
-    monkeypatch.setattr(sys, "argv", ["vm_deploy_host.py", "remove-network"])
+    monkeypatch.setattr(sys, "argv", ["-c", "remove-network", encode(instance)])
 
     old_umask = os.umask(0o077)
     try:
@@ -270,6 +399,39 @@ def test_remove_network_leaves_foreign_network_untouched(tmp_path, monkeypatch):
         os.umask(old_umask)
 
     assert not any(command[:3] == ["docker", "network", "rm"] for command in docker_calls)
+
+
+def test_vm_operator_entrypoint_loads_default_and_explicit_profiles(tmp_path):
+    instance=json.loads((ROOT / "config/instance.example.json").read_text())
+    with patch.object(h,"load_instance_profile",return_value=instance) as loader:
+        action,value=h.invocation_profile(["vm_deploy_host.py","status"])
+    assert (action,value)==("status",instance)
+    loader.assert_called_once_with(None)
+
+    profile_path=tmp_path/"instance.json"
+    profile_path.write_text(json.dumps(instance));profile_path.chmod(0o600)
+    with patch.object(h,"load_instance_profile",return_value=instance) as loader:
+        action,value=h.invocation_profile(["vm_deploy_host.py","restart-local","--instance-profile",str(profile_path)])
+    assert (action,value)==("restart-local",instance)
+    loader.assert_called_once_with(str(profile_path))
+
+
+def test_missing_local_profile_fails_before_vm_state_creation(tmp_path,monkeypatch):
+    state=tmp_path/"must-not-create"
+    monkeypatch.setattr(sys,"argv",["vm_deploy_host.py","status","--instance-profile",str(tmp_path/"missing.json")])
+    with patch.object(h,"STORE",state),patch.object(h,"load_instance_profile",side_effect=ValueError("Private instance profile is missing")), \
+         patch.object(h,"configure_profile") as configure:
+        with pytest.raises(ValueError,match="Private instance profile is missing"):
+            h.main()
+    configure.assert_not_called()
+    assert not state.exists()
+
+
+def test_remote_encoded_profile_path_remains_supported():
+    instance=json.loads((ROOT / "config/instance.example.json").read_text())
+    action,value=h.invocation_profile(["-c","status",encode(instance)])
+    assert action=="status"
+    assert value==instance
 
 
 def test_explicit_rollback_recovers_unhealthy_generation_without_healthy_precondition():
