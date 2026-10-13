@@ -15,6 +15,14 @@ auth.json
 *.key
 *.p12
 *.pfx
+# Instance inputs, recovery identities, and encrypted private backup artifacts
+instance.json
+native-ssh.json
+tailnet-requirements.json
+recovery-manifest.json
+recovery-identity*
+unlock-identity*
+*.age
 
 # Python environments and caches
 .venv/

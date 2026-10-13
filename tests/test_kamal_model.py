@@ -50,8 +50,8 @@ def profile(*, identity=None, devsy=None):
         "ssh_config": "/runner/tmp/kamal_ssh_config",
         "state_dir": "/home/kdlocpanda/.local/share/codex-control-plane",
         "repo_dir": "/home/kdlocpanda/Projects/mcp-tunnel-kit",
-        "cas_ssh_config_source": "/home/kdlocpanda/.local/share/issue16-dakota-ssh/ssh_config.native",
-        "cas_ssh_known_hosts_source": "/home/kdlocpanda/.local/share/issue16-dakota-ssh/known_hosts.native",
+        "cas_ssh_config_source": "/home/operator/.local/share/native-codex-ssh/ssh_config.native",
+        "cas_ssh_known_hosts_source": "/home/operator/.local/share/native-codex-ssh/known_hosts.native",
         "cas_identity_source": identity,
         "devsy": devsy,
     }
@@ -185,14 +185,14 @@ def test_cas_uses_host_network_pinned_ssh_and_never_mounts_local_socket():
 def test_optional_cas_identity_mount_exists_only_when_profile_selects_it():
     without_identity = rendered()["accessories"]["cas"]["volumes"]
     with_identity = rendered(
-        profile(identity="/home/kdlocpanda/.local/share/issue16-dakota-ssh/identity")
+        profile(identity="/home/operator/.local/share/native-codex-ssh/identity")
     )["accessories"]["cas"]["volumes"]
 
     assert not any(
         item.endswith(":/run/codex-ssh/identity:ro") for item in without_identity
     )
     assert (
-        "/home/kdlocpanda/.local/share/issue16-dakota-ssh/identity:/run/codex-ssh/identity:ro"
+        "/home/operator/.local/share/native-codex-ssh/identity:/run/codex-ssh/identity:ro"
         in with_identity
     )
 

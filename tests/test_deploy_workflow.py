@@ -55,7 +55,7 @@ class DeployWorkflowTests(unittest.TestCase):
                     deploy.trusted_context({**trusted, key: "untrusted"})
 
     def test_ssh_credentials_use_private_fixed_paths_and_strict_client_options(self):
-        self.assertEqual(str(deploy.SSH), "/home/kdlocpanda/.local/share/mcp-control-plane-deploy/ssh_config")
+        self.assertEqual(deploy.SSH, Path.home() / ".local/share/mcp-control-plane-deploy/ssh_config")
         self.assertEqual(deploy.KEY, deploy.SSH.parent / "identity")
         self.assertEqual(deploy.KNOWN, deploy.SSH.parent / "known_hosts")
         options = deploy.ssh_args("true")

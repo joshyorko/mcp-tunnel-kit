@@ -1,5 +1,6 @@
 import base64
 import hashlib
+import json
 import os
 from pathlib import Path
 import sys
@@ -17,11 +18,13 @@ class LocalKamalConfigTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
-        self.ssh, self.key, self.known, self.env_file, self.vm_pin = self.make_config()
+        self.ssh, self.key, self.known, self.env_file, self.vm_pin, self.profile = self.make_config()
 
     def tearDown(self):
         deploy.SSH, deploy.KEY, deploy.KNOWN = deploy.DEFAULT_SSH, deploy.DEFAULT_KEY, deploy.DEFAULT_KNOWN
         deploy.LOCAL_CONFIGURED = False
+        deploy.INSTANCE = None
+        deploy.HOST = deploy.VMROOT = deploy.VM_HOST_PIN = None
         self.temp.cleanup()
 
     def private(self, path, content):
@@ -38,13 +41,13 @@ class LocalKamalConfigTests(unittest.TestCase):
         fingerprint = "SHA256:" + base64.b64encode(hashlib.sha256(raw_key).digest()).decode().rstrip("=")
         known = self.private(
             directory / "known_hosts",
-            f"kamal-test-deploy,10.10.10.106 ssh-ed25519 {encoded_key}\n",
+            f"vm-test,192.0.2.10 ssh-ed25519 {encoded_key}\n",
         )
         config = self.private(
             directory / "ssh_config",
-            f"""Host kamal-test-deploy
-HostName 10.10.10.106
-User kdlocpanda
+            f"""Host vm-test
+HostName 192.0.2.10
+User testuser
 IdentityFile {key}
 IdentitiesOnly yes
 BatchMode yes
@@ -55,16 +58,26 @@ GlobalKnownHostsFile /dev/null
 PreferredAuthentications publickey
 """,
         )
+        profile = self.private(self.root / "instance.json", json.dumps({
+            "schema_version": 1,
+            "deploy_host": {"alias": "vm-test", "address": "192.0.2.10", "user": "testuser", "host_key_fingerprint": fingerprint},
+            "vm": {
+                "repo_dir": "/home/testuser/project", "state_dir": "/home/testuser/state",
+                "network": {"name": "mcp-test", "subnet": "198.18.0.0/24", "gateway": "198.18.0.1"},
+                "native_ssh_dir": "/home/testuser/native-ssh",
+                "devsy": {"config_source": "/home/testuser/state/devsy/config.yaml", "context_dir": "/home/testuser/state/devsy/context", "kubeconfig_source": "/home/testuser/state/ror/config.json", "context": "default"}
+            }
+        }))
         env_file = self.private(
             self.root / ".env.kamal.local",
-            f"KAMAL_SSH_CONFIG={config}\nKAMAL_SSH_KEY={key}\nKAMAL_KNOWN_HOSTS={known}\n",
+            f"KAMAL_SSH_CONFIG={config}\nKAMAL_SSH_KEY={key}\nKAMAL_KNOWN_HOSTS={known}\nKAMAL_INSTANCE_PROFILE={profile}\n",
         )
-        return config, key, known, env_file, fingerprint
+        return config, key, known, env_file, fingerprint, profile
 
     def configured(self):
         return patch.object(deploy, "VM_HOST_PIN", self.vm_pin)
 
-    def test_loads_only_private_absolute_references_and_keeps_fixed_vm_validation(self):
+    def test_loads_only_private_absolute_references_and_uses_private_vm_profile(self):
         with self.configured():
             result = deploy.configure_local(self.env_file)
         self.assertEqual(result, {
@@ -74,7 +87,13 @@ PreferredAuthentications publickey
         })
         self.assertTrue(deploy.LOCAL_CONFIGURED)
         self.assertEqual((deploy.SSH, deploy.KEY, deploy.KNOWN), (self.ssh, self.key, self.known))
-        self.assertEqual(deploy.HOST, "kamal-test-deploy")
+        self.assertEqual(deploy.HOST, "vm-test")
+
+    def test_existing_three_ssh_references_use_default_private_profile_path(self):
+        config = self.private(self.root / "legacy.env", f"KAMAL_SSH_CONFIG={self.ssh}\nKAMAL_SSH_KEY={self.key}\nKAMAL_KNOWN_HOSTS={self.known}\n")
+        with self.configured(), patch.object(deploy, "DEFAULT_INSTANCE_PROFILE", self.profile):
+            deploy.configure_local(config)
+        self.assertEqual(deploy.HOST, "vm-test")
 
     def test_rejects_non_private_config_symlink_and_invalid_path_references(self):
         self.env_file.chmod(0o644)
@@ -93,7 +112,7 @@ PreferredAuthentications publickey
         self.key.chmod(0o600)
 
         self.env_file.write_text(
-            f"KAMAL_SSH_CONFIG={self.ssh}\nKAMAL_SSH_KEY=relative-key\nKAMAL_KNOWN_HOSTS={self.known}\n"
+            f"KAMAL_SSH_CONFIG={self.ssh}\nKAMAL_SSH_KEY=relative-key\nKAMAL_KNOWN_HOSTS={self.known}\nKAMAL_INSTANCE_PROFILE={self.profile}\n"
         )
         self.env_file.chmod(0o600)
         with self.configured(), self.assertRaisesRegex(ValueError, "absolute paths"):
@@ -101,14 +120,14 @@ PreferredAuthentications publickey
         self.assertFalse(deploy.LOCAL_CONFIGURED)
 
     def test_rejects_wrong_host_user_or_pin(self):
-        self.ssh.write_text(self.ssh.read_text().replace("User kdlocpanda", "User other-user"))
+        self.ssh.write_text(self.ssh.read_text().replace("User testuser", "User other-user"))
         self.ssh.chmod(0o600)
         with self.configured(), self.assertRaisesRegex(ValueError, "not strictly pinned"):
             deploy.configure_local(self.env_file)
 
-        self.ssh.write_text(self.ssh.read_text().replace("User other-user", "User kdlocpanda"))
+        self.ssh.write_text(self.ssh.read_text().replace("User other-user", "User testuser"))
         self.ssh.chmod(0o600)
-        self.known.write_text("kamal-test-deploy,10.10.10.106 ssh-ed25519 " + base64.b64encode(b"wrong").decode() + "\n")
+        self.known.write_text("vm-test,192.0.2.10 ssh-ed25519 " + base64.b64encode(b"wrong").decode() + "\n")
         self.known.chmod(0o600)
         with self.configured(), self.assertRaisesRegex(ValueError, "fingerprint mismatch"):
             deploy.configure_local(self.env_file)
@@ -140,6 +159,7 @@ PreferredAuthentications publickey
                     deploy.trusted_context({**good_ci, "GITHUB_REF": "refs/heads/fork"}, local=False)
 
     def test_existing_pi_break_glass_still_works_without_local_config(self):
+        deploy.configure_instance(self.profile)
         with self.configured(), patch.object(deploy, 'SSH', self.ssh), \
                 patch.object(deploy, 'KEY', self.key), patch.object(deploy, 'KNOWN', self.known), \
                 patch.object(deploy.socket, 'gethostname', return_value='pi5-01'), \

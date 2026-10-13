@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "tailnet_name": "replace-with-your-tailnet",
+  "native_port": 22222,
+  "network_grant_requirement": {
+    "src": ["100.100.100.20"],
+    "dst": ["100.100.100.10"],
+    "ip": ["tcp:22222"]
+  },
+  "interactive_tailscale_ssh_required": false,
+  "complete_tailnet_policy_exported": false
+}

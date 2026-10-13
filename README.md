@@ -39,6 +39,8 @@ PAT, add it to `.env`, and run normal up. See [Compose setup and
 acceptance](docs/COMPOSE.md) for operator paths, credential precedence, rotation,
 and browser acceptance.
 
+[Rebuild a control-plane host](docs/REBUILD.md) · [Capture and stage recovery](docs/RECOVERY.md) · [VM deployment](docs/VM_DEPLOY.md) · [Native SSH](docs/NATIVE_SSH.md)
+
 The stock Executor dashboard is `http://127.0.0.1:4312/`. The tunnel's `main`
 channel uses `http://executor:4312/mcp?elicitation_mode=browser` on Compose DNS.
 Executor advertises only `skills`, `execute`, and `resume`; Codex tools are found

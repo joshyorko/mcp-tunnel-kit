@@ -5,11 +5,6 @@ import re
 import sys
 from pathlib import PurePosixPath
 
-_NETWORK = {
-    "name": "mcp-control-plane",
-    "subnet": "172.30.86.0/24",
-    "gateway": "172.30.86.1",
-}
 _REPOSITORIES = {
     "cas": "ghcr.io/joshyorko/codex-action-server",
     "executor": "ghcr.io/usefulsoftwareco/executor-selfhost:2.0.0-beta.12",
@@ -93,12 +88,20 @@ def validate_manifest(manifest):
 def _validate_profile(profile):
     if not _keys(profile, _PROFILE_KEYS):
         _invalid()
-    if (
-        profile.get("host") != "kamal-test-deploy"
-        or profile.get("ssh_user") != "kdlocpanda"
-    ):
+    if not isinstance(profile.get("host"), str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", profile["host"]):
         _invalid()
-    if not _keys(profile.get("network"), _NETWORK) or profile["network"] != _NETWORK:
+    if not isinstance(profile.get("ssh_user"), str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]{0,63}", profile["ssh_user"]):
+        _invalid()
+    network = profile.get("network")
+    if not _keys(network, {"name", "subnet", "gateway"}) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,63}", str(network.get("name", ""))):
+        _invalid()
+    try:
+        import ipaddress
+        subnet = ipaddress.ip_network(network["subnet"], strict=True)
+        gateway = ipaddress.ip_address(network["gateway"])
+    except (ValueError, TypeError):
+        _invalid()
+    if subnet.version != 4 or gateway.version != 4 or gateway not in subnet or gateway in (subnet.network_address, subnet.broadcast_address):
         _invalid()
     for key in (
         "ssh_key",
@@ -124,11 +127,6 @@ def _validate_profile(profile):
             r"[A-Za-z0-9_.-]{1,128}", devsy["context"]
         ):
             _invalid()
-    state_dir = profile["state_dir"]
-    if state_dir != "/home/kdlocpanda/.local/share/codex-control-plane":
-        _invalid()
-    if profile["repo_dir"] != "/home/kdlocpanda/Projects/mcp-tunnel-kit":
-        _invalid()
     return profile
 
 
