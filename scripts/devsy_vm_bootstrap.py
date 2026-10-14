@@ -26,10 +26,228 @@ UNIT_TEMPLATE_PATH = Path(__file__).resolve().parents[1] / "config/codex-control
 UNIT_PATH = Path("/etc/systemd/system/codex-control-plane-devsy.service")
 MISSING_KUBECTL_REASON = "pinned kubectl is missing; ROR admission preflight was not run"
 KUBECTL_CONFLICT_REASON = "kubectl candidate failed pinned source/hash validation"
+MAX_TAP_RECONCILIATION_BYTES = 512 * 1024 * 1024
+ISSUE27_TAP_RECONCILIATION = {
+    "case_id": "issue-27-tap-523d-to-141f",
+    "failed_run_id": "38586057895",
+    "prior_backup_directory": "1791990283017830779",
+    "prior_backup_manifest_sha256": "8e2c329a6a593fa807e22115db2e937ac227becf979242f2ab4898bf533362e9",
+    "prior_backup_signed": False,
+    "observed_tap_revision": "523d8a0b85db367c34af749eefba81a25dd26768",
+    "upstream_main_revision": "523d8a0b85db367c34af749eefba81a25dd26768",
+    "target_tap_revision": "141faa0977de2c2d840ee847ddfec08da9d5a974",
+}
 
 
 def sha256(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
+
+
+def validate_tap_reconciliation_case(policy: dict) -> dict:
+    if (not isinstance(policy, dict)
+            or ISSUE27_TAP_RECONCILIATION["target_tap_revision"]
+            != policy.get("devsy", {}).get("tap_revision")):
+        raise BootstrapError("incident reconciliation policy mismatch")
+    return dict(ISSUE27_TAP_RECONCILIATION)
+
+
+def validate_tap_reconciliation_manifest(manifest: dict, case: dict, policy: dict) -> dict:
+    files = manifest.get("files") if isinstance(manifest, dict) else None
+    expected_files = {"unit", "starter", "bridge_config", "receipt", "devsy_config", "kubectl"}
+    if (not isinstance(files, dict) or set(files) != expected_files
+            or any(type(present) is not bool for present in files.values())
+            or manifest.get("schema_version") != 1
+            or not re.fullmatch(r"[a-f0-9]{40}", str(manifest.get("source_sha", "")))
+            or manifest.get("tap_was_present") is not False
+            or manifest.get("tap_revision") is not None
+            or manifest.get("unit_active") is not True
+            or manifest.get("unit_enabled") is not True
+            or manifest.get("unit_state") != "legacy"
+            or manifest.get("provider_options") != {}
+            or manifest.get("provider_was_verified") is not True
+            or files.get("unit") is not True
+            or files.get("starter") is not True
+            or files.get("bridge_config") is not True
+            or files.get("receipt") is not False
+            or files.get("devsy_config") is not True
+            or files.get("kubectl") is not False
+            or manifest.get("kubectl_version") is not None
+            or manifest.get("kubectl_sha256") is not None
+            or manifest.get("devsy_version") != policy["devsy"]["legacy_version"]
+            or manifest.get("devsy_sha256") != policy["devsy"]["legacy_sha256"]
+            or case.get("prior_backup_signed") is not False):
+        raise BootstrapError("prior backup is not the expected baseline")
+    return {"source_sha": manifest["source_sha"],
+            "devsy_version": manifest["devsy_version"],
+            "tap_was_present": False,
+            "prior_backup_authenticated": False}
+
+
+def tap_tree_manifest(root: Path, owner_uid: int,
+                      max_bytes: int = MAX_TAP_RECONCILIATION_BYTES) -> dict:
+    root = Path(root)
+    try:
+        root_info = root.lstat()
+    except OSError:
+        raise BootstrapError("tap snapshot root is unavailable") from None
+    if (not stat.S_ISDIR(root_info.st_mode) or stat.S_ISLNK(root_info.st_mode)
+            or root_info.st_uid != owner_uid):
+        raise BootstrapError("unsafe tap snapshot root")
+
+    entries = [{"path": ".", "kind": "directory",
+                "mode": stat.S_IMODE(root_info.st_mode)}]
+    pending = [root]
+    total_bytes = 0
+    file_count = 0
+    while pending:
+        directory = pending.pop()
+        try:
+            children = sorted(directory.iterdir(), key=lambda path: path.name)
+        except OSError:
+            raise BootstrapError("tap snapshot tree changed during inspection") from None
+        for path in children:
+            relative = path.relative_to(root).as_posix()
+            try:
+                before = path.lstat()
+            except OSError:
+                raise BootstrapError("tap snapshot tree changed during inspection") from None
+            if before.st_uid != owner_uid or stat.S_ISLNK(before.st_mode):
+                raise BootstrapError("unsafe tap snapshot path")
+            if stat.S_ISDIR(before.st_mode):
+                entries.append({"path": relative, "kind": "directory",
+                                "mode": stat.S_IMODE(before.st_mode)})
+                pending.append(path)
+                continue
+            if not stat.S_ISREG(before.st_mode):
+                raise BootstrapError("unsupported file in tap snapshot")
+            if total_bytes + before.st_size > max_bytes:
+                raise BootstrapError("tap snapshot exceeds its size limit")
+            digest = hashlib.sha256()
+            size = 0
+            try:
+                descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+                with os.fdopen(descriptor, "rb") as stream:
+                    opened = os.fstat(stream.fileno())
+                    if (not stat.S_ISREG(opened.st_mode) or opened.st_uid != owner_uid
+                            or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)):
+                        raise BootstrapError("tap snapshot path changed during inspection")
+                    while chunk := stream.read(1024 * 1024):
+                        size += len(chunk)
+                        if total_bytes + size > max_bytes:
+                            raise BootstrapError("tap snapshot exceeds its size limit")
+                        digest.update(chunk)
+                    after = os.fstat(stream.fileno())
+            except BootstrapError:
+                raise
+            except OSError:
+                raise BootstrapError("tap snapshot file is unavailable") from None
+            if (size != before.st_size
+                    or (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+                    != (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)):
+                raise BootstrapError("tap snapshot file changed during inspection")
+            total_bytes += size
+            file_count += 1
+            entries.append({"path": relative, "kind": "file",
+                            "mode": stat.S_IMODE(before.st_mode),
+                            "size": size, "sha256": digest.hexdigest()})
+
+    entries.sort(key=lambda entry: entry["path"])
+    encoded = json.dumps(entries, sort_keys=True, separators=(",", ":")).encode()
+    return {"sha256": sha256(encoded), "bytes": total_bytes,
+            "files": file_count, "entries": entries}
+
+
+def copy_tap_tree(source: Path, destination: Path, owner_uid: int,
+                  max_bytes: int = MAX_TAP_RECONCILIATION_BYTES) -> dict:
+    source = Path(source)
+    destination = Path(destination)
+    before = tap_tree_manifest(source, owner_uid, max_bytes)
+    temporary = destination.with_name(destination.name + ".new-" + str(os.getpid()))
+    created = False
+    try:
+        if destination.exists() or destination.is_symlink():
+            raise BootstrapError("tap snapshot destination already exists")
+        parent = destination.parent.lstat()
+        if not stat.S_ISDIR(parent.st_mode) or stat.S_ISLNK(parent.st_mode) or parent.st_uid != owner_uid:
+            raise BootstrapError("tap snapshot destination directory is unsafe")
+        if temporary.exists() or temporary.is_symlink():
+            raise BootstrapError("tap snapshot temporary path already exists")
+        created = True
+        shutil.copytree(source, temporary, copy_function=shutil.copy2, symlinks=True)
+        copied = tap_tree_manifest(temporary, owner_uid, max_bytes)
+        if copied["sha256"] != before["sha256"]:
+            raise BootstrapError("tap snapshot copy did not match its source")
+        os.replace(temporary, destination)
+        return before
+    except BootstrapError:
+        if created and temporary.exists() and not temporary.is_symlink():
+            shutil.rmtree(temporary, ignore_errors=True)
+        raise
+    except OSError:
+        if created and temporary.exists() and not temporary.is_symlink():
+            shutil.rmtree(temporary, ignore_errors=True)
+        raise BootstrapError("tap snapshot copy failed") from None
+
+
+def restore_tap_tree(snapshot: Path, destination: Path, failed_snapshot: Path,
+                     expected_sha256: str, owner_uid: int,
+                     max_bytes: int = MAX_TAP_RECONCILIATION_BYTES) -> dict:
+    snapshot = Path(snapshot)
+    destination = Path(destination)
+    failed_snapshot = Path(failed_snapshot)
+    saved = tap_tree_manifest(snapshot, owner_uid, max_bytes)
+    if saved["sha256"] != expected_sha256:
+        raise BootstrapError("tap recovery snapshot checksum mismatch")
+    if destination.is_symlink() or (destination.exists() and not destination.is_dir()):
+        raise BootstrapError("tap recovery destination is unsafe")
+    if destination.exists():
+        failed = copy_tap_tree(destination, failed_snapshot, owner_uid, max_bytes)
+    else:
+        failed = {"sha256": None, "bytes": 0, "files": 0, "entries": []}
+
+    parent = destination.parent
+    staging = parent / ("." + destination.name + ".restore-" + str(os.getpid()))
+    old = parent / ("." + destination.name + ".old-" + str(os.getpid()))
+    try:
+        if staging.exists() or staging.is_symlink() or old.exists() or old.is_symlink():
+            raise BootstrapError("tap recovery staging path already exists")
+        shutil.copytree(snapshot, staging, copy_function=shutil.copy2, symlinks=True)
+        if tap_tree_manifest(staging, owner_uid, max_bytes)["sha256"] != expected_sha256:
+            raise BootstrapError("tap recovery staging copy checksum mismatch")
+        if destination.exists():
+            os.replace(destination, old)
+        try:
+            os.replace(staging, destination)
+        except OSError:
+            if old.exists() and not destination.exists():
+                os.replace(old, destination)
+            raise
+        restored = tap_tree_manifest(destination, owner_uid, max_bytes)
+        if restored["sha256"] != expected_sha256:
+            bad = parent / ("." + destination.name + ".bad-" + str(os.getpid()))
+            if bad.exists() or bad.is_symlink():
+                raise BootstrapError("tap recovery failed and preserved both trees")
+            os.replace(destination, bad)
+            if old.exists():
+                os.replace(old, destination)
+            raise BootstrapError("tap recovery did not restore the saved tree")
+        if old.exists():
+            shutil.rmtree(old)
+        return {"restored_sha256": restored["sha256"],
+                "failed_sha256": failed["sha256"],
+                "failed_bytes": failed["bytes"], "failed_files": failed["files"]}
+    except BootstrapError:
+        raise
+    except OSError:
+        if old.exists() and not destination.exists():
+            try:
+                os.replace(old, destination)
+            except OSError:
+                pass
+        raise BootstrapError("tap recovery replacement failed") from None
+    finally:
+        if staging.exists() and not staging.is_symlink():
+            shutil.rmtree(staging, ignore_errors=True)
 
 
 def load_policy(path: Path = POLICY_PATH) -> dict:
@@ -848,6 +1066,552 @@ class VMDevsyBootstrap:
         return {"ready": True, "source_sha": source_sha,
                 "devsy_version": snapshot.get("devsy_version"),
                 "provider_was_verified": snapshot.get("provider_was_verified") is True}
+
+    def _issue27_prior_backup(self, case: dict) -> tuple[Path, dict, dict]:
+        uid = int(self.profile["uid"])
+        store = self._store(create=False)
+        parent = store / "devsy-host-backups"
+        validate_private_directory(parent, uid)
+        backup = parent / case["prior_backup_directory"]
+        validate_private_directory(backup, uid)
+        manifest_path = backup / "manifest.json"
+        validate_private_file(manifest_path, uid)
+        signature_path = backup / "manifest.json.sig"
+        if signature_path.exists() or signature_path.is_symlink():
+            raise BootstrapError("prior backup has an unsupported signature file")
+        manifest_bytes = manifest_path.read_bytes()
+        if sha256(manifest_bytes) != case["prior_backup_manifest_sha256"]:
+            raise BootstrapError("prior backup manifest does not match the incident digest")
+        manifest = self._read_json_private(manifest_path, required=True)
+        summary = validate_tap_reconciliation_manifest(manifest, case, self.policy)
+        for name, present in manifest["files"].items():
+            snapshot = backup / (name + ".bin")
+            if present:
+                validate_private_file(snapshot, uid)
+            elif snapshot.exists() or snapshot.is_symlink():
+                raise BootstrapError("prior backup contains a file absent from its manifest")
+        self._verify_restored(manifest, backup)
+
+        receipt_path = store / "devsy-host-current.json"
+        if manifest["files"]["receipt"]:
+            validate_private_file(receipt_path, uid)
+            if receipt_path.read_bytes() != (backup / "receipt.bin").read_bytes():
+                raise BootstrapError("current Devsy receipt differs from the prior backup")
+            receipt = self._read_json_private(receipt_path, required=True)
+            if receipt.get("status") == "applied":
+                raise BootstrapError("a successful Devsy apply receipt already exists")
+        elif receipt_path.exists() or receipt_path.is_symlink():
+            raise BootstrapError("current Devsy receipt is absent from the prior backup")
+
+        repo = Path(self.profile["repo_dir"])
+        source_sha = self._command(["git", "-C", str(repo), "rev-parse", "HEAD"]).stdout.strip()
+        dirty = self._command([
+            "git", "-C", str(repo), "status", "--porcelain", "--untracked-files=all",
+        ]).stdout.strip()
+        if source_sha != manifest["source_sha"] or dirty:
+            raise BootstrapError("VM source checkout differs from the prior backup baseline")
+        return backup, manifest, summary
+
+    def _authenticated_git_env(self) -> dict:
+        result = dict(self.env)
+        for name in tuple(result):
+            if (name.startswith("GIT_") or name in {
+                    "SSL_CERT_FILE", "SSL_CERT_DIR", "CURL_CA_BUNDLE",
+                    "GIT_SSL_NO_VERIFY", "GIT_SSL_CAINFO", "GIT_SSL_CAPATH"}):
+                result.pop(name, None)
+        result["GIT_CONFIG_NOSYSTEM"] = "1"
+        result["GIT_CONFIG_GLOBAL"] = os.devnull
+        result["GIT_TERMINAL_PROMPT"] = "0"
+        return result
+
+    def _issue27_tap_location(self) -> dict:
+        brew = self._brew_path()
+        if brew is None:
+            raise BootstrapError("pinned Homebrew is unavailable for tap reconciliation")
+        prefix = Path(self.policy["homebrew"]["prefix"]).resolve(strict=True)
+        repository_text = self._command([
+            str(brew), "--repository",
+        ], env=self._brew_env()).stdout.strip()
+        repository = Path(repository_text)
+        try:
+            repository.resolve(strict=True).relative_to(prefix)
+        except (OSError, ValueError):
+            raise BootstrapError("Homebrew repository is outside the pinned prefix") from None
+        tap = repository / "Library/Taps/joshyorko/homebrew-tools"
+        for directory in (repository, repository / "Library", repository / "Library/Taps",
+                          repository / "Library/Taps/joshyorko", tap):
+            try:
+                metadata = directory.lstat()
+            except OSError:
+                raise BootstrapError("expected incident tap path is unavailable") from None
+            if (not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode)
+                    or metadata.st_uid != int(self.profile["uid"])):
+                raise BootstrapError("incident tap path ownership or type is unsafe")
+
+        origin = self._command([
+            "git", "-C", str(tap), "remote", "get-url", "origin",
+        ]).stdout.strip()
+        if not tap_origin_matches(origin, self.policy["devsy"]["tap_repository"]):
+            raise BootstrapError("incident tap origin differs from the approved repository")
+        return {"brew": brew, "repository": repository, "tap": tap, "origin": origin}
+
+    def _issue27_tap_state(self, case: dict) -> dict:
+        location = self._issue27_tap_location()
+        brew, repository, tap, origin = (
+            location[name] for name in ("brew", "repository", "tap", "origin"))
+        revision = self._command([
+            "git", "-C", str(tap), "rev-parse", "HEAD",
+        ]).stdout.strip()
+        dirty = self._command([
+            "git", "-C", str(tap), "status", "--porcelain", "--untracked-files=all",
+        ]).stdout.strip()
+        ignored = self._command([
+            "git", "-C", str(tap), "clean", "-ndx",
+        ]).stdout.strip()
+        if dirty or ignored:
+            raise BootstrapError("incident tap worktree is not clean")
+        tree = tap_tree_manifest(tap, int(self.profile["uid"]))
+
+        git_env = self._authenticated_git_env()
+        git_args = ["git", "-c", "http.sslVerify=true", "-c", "core.hooksPath=" + os.devnull,
+                    "-C", str(tap)]
+        upstream = self._command([
+            *git_args, "ls-remote", "--heads", "origin", "refs/heads/main",
+        ], env=git_env, timeout=90).stdout.strip().splitlines()
+        parsed = [line.split() for line in upstream]
+        if (len(parsed) != 1 or len(parsed[0]) != 2
+                or parsed[0][1] != "refs/heads/main"
+                or parsed[0][0] != case["upstream_main_revision"]):
+            raise BootstrapError("authenticated tap upstream head differs from the incident pin")
+        target = case["target_tap_revision"]
+        if self._command([
+                *git_args, "cat-file", "-e", target + "^{commit}"],
+                env=git_env, allow_failure=True).returncode:
+            raise BootstrapError("approved tap pin is unavailable in the authenticated upstream history")
+        if self._command([
+                *git_args, "merge-base", "--is-ancestor", target,
+                case["upstream_main_revision"]],
+                env=git_env, allow_failure=True).returncode:
+            raise BootstrapError("approved tap pin is not an ancestor of the authenticated upstream head")
+        formula = self._command([
+            *git_args, "show", target + ":" + self.policy["devsy"]["formula_path"],
+        ], env=git_env).stdout.encode()
+        verify_formula(formula, self.policy)
+        return {"brew": brew, "repository": repository, "tap": tap,
+                "origin": origin, "revision": revision, "tree": tree,
+                "upstream_main_revision": parsed[0][0],
+                "formula_sha256": sha256(formula),
+                "git_args": git_args, "git_env": git_env}
+
+    def _issue27_receipts(self, case: dict) -> tuple[Path, list[dict]]:
+        store = self._store(create=False)
+        parent = store / "devsy-tap-reconciliations"
+        root = parent / case["case_id"]
+        if parent.exists() or parent.is_symlink():
+            validate_private_directory(parent, int(self.profile["uid"]))
+        if not root.exists() and not root.is_symlink():
+            return root, []
+        validate_private_directory(root, int(self.profile["uid"]))
+        receipts = []
+        for run_dir in sorted(root.iterdir(), key=lambda path: path.name):
+            validate_private_directory(run_dir, int(self.profile["uid"]))
+            match = re.fullmatch(r"([0-9]{1,20})-([0-9]{1,3})", run_dir.name)
+            if not match:
+                raise BootstrapError("incident tap receipt directory identity is invalid")
+            allowed = {"before.json", "after.json", "rollback.json", "tap-before",
+                       "tap-before-manifest.json", "tap-after-manifest.json",
+                       "tap-failed", "tap-failed-manifest.json"}
+            if not {entry.name for entry in run_dir.iterdir()} <= allowed:
+                raise BootstrapError("incident tap receipt contains an unknown artifact")
+            before = self._read_json_private(run_dir / "before.json", required=True)
+            after = self._read_json_private(run_dir / "after.json")
+            rollback = self._read_json_private(run_dir / "rollback.json")
+            if (before.get("schema_version") != 1
+                    or before.get("case_id") != case["case_id"]
+                    or before.get("github_run_id") != match.group(1)
+                    or before.get("github_run_attempt") != match.group(2)
+                    or before.get("tap_snapshot") != "tap-before"
+                    or before.get("prior_backup_manifest_sha256")
+                    != case["prior_backup_manifest_sha256"]
+                    or before.get("prior_backup_authenticated") is not False
+                    or before.get("receipt_signature_status") != "unsigned"
+                    or before.get("status") != "started"
+                    or not re.fullmatch(r"[a-f0-9]{40}", str(before.get("source_sha", "")))
+                    or before.get("tap_before_revision") != case["observed_tap_revision"]
+                    or not re.fullmatch(r"[a-f0-9]{64}",
+                                        str(before.get("tap_before_sha256", "")))):
+                raise BootstrapError("prior tap reconciliation receipt identity mismatch")
+            before_manifest_path = run_dir / "tap-before-manifest.json"
+            before_manifest = self._read_json_private(before_manifest_path, required=True)
+            snapshot = run_dir / "tap-before"
+            actual_before = tap_tree_manifest(snapshot, int(self.profile["uid"]))
+            if (actual_before != before_manifest
+                    or before.get("tap_before_manifest_sha256")
+                    != sha256(before_manifest_path.read_bytes())
+                    or actual_before["sha256"] != before["tap_before_sha256"]):
+                raise BootstrapError("tap reconciliation snapshot differs from its before receipt")
+            if after is not None:
+                after_manifest = self._read_json_private(
+                    run_dir / "tap-after-manifest.json", required=True)
+                if (after.get("status") != "completed"
+                        or after.get("case_id") != case["case_id"]
+                        or after.get("github_run_id") != match.group(1)
+                        or after.get("github_run_attempt") != match.group(2)
+                        or after.get("source_sha") != before.get("source_sha")
+                        or after.get("tap_before_revision") != before.get("tap_before_revision")
+                        or after.get("tap_before_sha256") != before.get("tap_before_sha256")
+                        or after.get("tap_after_revision") != case["target_tap_revision"]
+                        or after_manifest.get("sha256") != after.get("tap_after_sha256")
+                        or after.get("tap_after_manifest_sha256")
+                        != sha256((run_dir / "tap-after-manifest.json").read_bytes())):
+                    raise BootstrapError("tap reconciliation after receipt is invalid")
+                if (not re.fullmatch(r"[a-f0-9]{40}", str(before.get("source_sha", "")))
+                        or not re.fullmatch(r"[a-f0-9]{64}",
+                                            str(after.get("tap_after_sha256", "")))):
+                    raise BootstrapError("tap reconciliation receipt digest is invalid")
+            else:
+                after_manifest = None
+            if rollback is not None and rollback.get("status") not in ("restored", "failed"):
+                raise BootstrapError("tap reconciliation rollback receipt is invalid")
+            if rollback is not None and rollback.get("status") == "restored":
+                if (rollback.get("case_id") != case["case_id"]
+                        or rollback.get("github_run_id") != match.group(1)
+                        or rollback.get("github_run_attempt") != match.group(2)
+                        or rollback.get("tap_revision") != case["observed_tap_revision"]
+                        or rollback.get("restored_tap_sha256") != before["tap_before_sha256"]
+                        or rollback.get("receipt_signature_status") != "unsigned"):
+                    raise BootstrapError("tap reconciliation rollback receipt is invalid")
+                if rollback.get("failed_tree") == "tap-failed":
+                    failed_manifest = self._read_json_private(
+                        run_dir / "tap-failed-manifest.json", required=True)
+                    actual_failed = tap_tree_manifest(run_dir / "tap-failed", int(self.profile["uid"]))
+                    if (actual_failed != failed_manifest
+                            or actual_failed["sha256"] != rollback.get("failed_tap_sha256")):
+                        raise BootstrapError("failed tap snapshot differs from its rollback receipt")
+            receipts.append({"directory": run_dir, "before": before,
+                             "after": after, "after_manifest": after_manifest,
+                             "rollback": rollback})
+        return root, receipts
+
+    def _issue27_reconciliation_state(self) -> dict:
+        case = validate_tap_reconciliation_case(self.policy)
+        backup, prior_manifest, prior_summary = self._issue27_prior_backup(case)
+        tap_state = self._issue27_tap_state(case)
+        receipt_root, receipts = self._issue27_receipts(case)
+        if len(receipts) > 1:
+            raise BootstrapError("multiple incident tap reconciliation attempts require operator review")
+        if receipts:
+            receipt = receipts[0]
+            if receipt["rollback"] is not None:
+                raise BootstrapError("incident tap reconciliation was already rolled back")
+            if receipt["after"] is None:
+                raise BootstrapError("an interrupted incident tap reconciliation requires protected rollback")
+            after = receipt["after"]
+            if (after.get("status") != "completed"
+                    or after.get("tap_after_revision") != case["target_tap_revision"]
+                    or tap_state["revision"] != case["target_tap_revision"]
+                    or tap_state["tree"] != receipt["after_manifest"]
+                    or tap_state["tree"]["sha256"] != after.get("tap_after_sha256")):
+                raise BootstrapError("completed incident reconciliation receipt differs from the live tap")
+            return {"case": case, "backup": backup, "prior_manifest": prior_manifest,
+                    "prior_summary": prior_summary, "tap_state": tap_state,
+                    "receipt_root": receipt_root, "receipts": receipts,
+                    "already_reconciled": True}
+        if tap_state["revision"] != case["observed_tap_revision"]:
+            raise BootstrapError("live tap revision differs from the one-time incident observation")
+        return {"case": case, "backup": backup, "prior_manifest": prior_manifest,
+                "prior_summary": prior_summary, "tap_state": tap_state,
+                "receipt_root": receipt_root, "receipts": receipts,
+                "already_reconciled": False}
+
+    def tap_reconciliation_plan(self) -> dict:
+        try:
+            state = self._issue27_reconciliation_state()
+        except BootstrapError as error:
+            return {"operation": "devsy-tap-reconcile-plan", "ready": False,
+                    "status": "blocked", "reason": str(error),
+                    "prior_backup_authenticated": False, "mutated": False}
+        case = state["case"]
+        tap = state["tap_state"]
+        return {"operation": "devsy-tap-reconcile-plan", "ready": True,
+                "status": "already-reconciled" if state["already_reconciled"] else "ready",
+                "case_id": case["case_id"], "failed_run_id": case["failed_run_id"],
+                "prior_backup_manifest_sha256": case["prior_backup_manifest_sha256"],
+                "prior_backup_authenticated": False,
+                "current_tap_revision": tap["revision"],
+                "upstream_main_revision": tap["upstream_main_revision"],
+                "target_tap_revision": case["target_tap_revision"],
+                "tap_tree_sha256": tap["tree"]["sha256"],
+                "tap_tree_bytes": tap["tree"]["bytes"],
+                "current_tap_origin": tap["origin"],
+                "prior_backup_status": "digest-matched-unauthenticated",
+                "provider_service_unchanged": True,
+                "mutated": False}
+
+    @staticmethod
+    def _issue27_run_key(github_run_id: str, github_run_attempt: str) -> str:
+        if (not isinstance(github_run_id, str)
+                or not re.fullmatch(r"[0-9]{1,20}", github_run_id)
+                or not isinstance(github_run_attempt, str)
+                or not re.fullmatch(r"[0-9]{1,3}", github_run_attempt)):
+            raise BootstrapError("protected GitHub run identity is invalid")
+        return github_run_id + "-" + github_run_attempt
+
+    @staticmethod
+    def _issue27_manifest_bytes(manifest: dict) -> bytes:
+        return (json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n").encode()
+
+    def _write_issue27_receipt(self, run_dir: Path, name: str, receipt: dict) -> None:
+        self._write_private(run_dir / name, (json.dumps(receipt, sort_keys=True) + "\n").encode())
+
+    def _issue27_prepare_receipt_directory(self, root: Path, run_key: str) -> Path:
+        uid = int(self.profile["uid"])
+        parent = root.parent
+        if not parent.exists():
+            parent.mkdir(mode=0o700)
+        validate_private_directory(parent, uid)
+        if not root.exists():
+            root.mkdir(mode=0o700)
+        validate_private_directory(root, uid)
+        run_dir = root / run_key
+        try:
+            run_dir.mkdir(mode=0o700)
+        except FileExistsError:
+            raise BootstrapError("protected GitHub run already has a tap reconciliation receipt") from None
+        validate_private_directory(run_dir, uid)
+        return run_dir
+
+    def _issue27_restore_receipted_tap(self, case: dict, run_dir: Path,
+                                       before: dict, *, reason: str) -> dict:
+        uid = int(self.profile["uid"])
+        location = self._issue27_tap_location()
+        tap = location["tap"]
+        failed_snapshot = run_dir / "tap-failed"
+        restored = restore_tap_tree(
+            run_dir / before["tap_snapshot"], tap, failed_snapshot,
+            before["tap_before_sha256"], uid,
+        )
+        restored_tree = tap_tree_manifest(tap, uid)
+        restored_revision = self._command([
+            "git", "-C", str(tap), "rev-parse", "HEAD",
+        ]).stdout.strip()
+        if (restored_revision != case["observed_tap_revision"]
+                or restored_tree["sha256"] != before["tap_before_sha256"]):
+            raise BootstrapError("tap rollback readback differs from the before receipt")
+        failed_manifest = None
+        if failed_snapshot.exists():
+            failed_manifest = tap_tree_manifest(failed_snapshot, uid)
+            self._write_private(run_dir / "tap-failed-manifest.json",
+                                self._issue27_manifest_bytes(failed_manifest))
+        receipt = {
+            "schema_version": 1, "case_id": case["case_id"],
+            "github_run_id": before["github_run_id"],
+            "github_run_attempt": before["github_run_attempt"],
+            "status": "restored", "reason": reason,
+            "prior_backup_authenticated": False,
+            "receipt_signature_status": "unsigned",
+            "tap_revision": restored_revision,
+            "restored_tap_sha256": restored_tree["sha256"],
+            "failed_tap_sha256": failed_manifest["sha256"] if failed_manifest else None,
+            "failed_tree": "tap-failed" if failed_manifest else None,
+            "recorded_at_ns": time.time_ns(),
+        }
+        self._write_issue27_receipt(run_dir, "rollback.json", receipt)
+        return {"restored_sha256": restored_tree["sha256"],
+                "failed_sha256": restored.get("failed_sha256"),
+                "receipt": receipt}
+
+    def reconcile_tap(self, *, approved: bool, source_sha: str,
+                      github_run_id: str, github_run_attempt: str) -> dict:
+        if approved is not True:
+            raise BootstrapError("explicit tap reconciliation approval is required")
+        if not re.fullmatch(r"[a-f0-9]{40}", source_sha or ""):
+            raise BootstrapError("protected source revision is invalid")
+        run_key = self._issue27_run_key(github_run_id, github_run_attempt)
+        state = self._issue27_reconciliation_state()
+        if state["already_reconciled"]:
+            after = state["receipts"][0]["after"]
+            return {"operation": "devsy-tap-reconcile", "status": "already-reconciled",
+                    "changed": False, "prior_backup_authenticated": False,
+                    "tap_before_revision": after["tap_before_revision"],
+                    "tap_after_revision": after["tap_after_revision"],
+                    "tap_before_sha256": after["tap_before_sha256"],
+                    "tap_after_sha256": after["tap_after_sha256"]}
+        if state["receipts"]:
+            raise BootstrapError("an incident tap reconciliation receipt already exists")
+
+        case = state["case"]
+        run_dir = self._issue27_prepare_receipt_directory(state["receipt_root"], run_key)
+        snapshot_path = run_dir / "tap-before"
+        before_written = False
+        phase = "tap-snapshot"
+        try:
+            snapshot_manifest = copy_tap_tree(
+                state["tap_state"]["tap"], snapshot_path, int(self.profile["uid"]),
+            )
+            if snapshot_manifest["sha256"] != state["tap_state"]["tree"]["sha256"]:
+                raise BootstrapError("tap changed while its rollback snapshot was copied")
+            snapshot_payload = self._issue27_manifest_bytes(snapshot_manifest)
+            self._write_private(run_dir / "tap-before-manifest.json", snapshot_payload)
+            before = {
+                "schema_version": 1, "case_id": case["case_id"],
+                "github_run_id": github_run_id, "github_run_attempt": github_run_attempt,
+                "status": "started",
+                "source_sha": source_sha,
+                "prior_backup_manifest_sha256": case["prior_backup_manifest_sha256"],
+                "prior_backup_authenticated": False,
+                "receipt_signature_status": "unsigned",
+                "tap_snapshot": "tap-before",
+                "tap_before_revision": state["tap_state"]["revision"],
+                "tap_before_origin": state["tap_state"]["origin"],
+                "tap_before_upstream_main_revision": state["tap_state"]["upstream_main_revision"],
+                "tap_before_sha256": snapshot_manifest["sha256"],
+                "tap_before_manifest_sha256": sha256(snapshot_payload),
+                "tap_before_bytes": snapshot_manifest["bytes"],
+                "tap_before_files": snapshot_manifest["files"],
+                "target_tap_revision": case["target_tap_revision"],
+                "recorded_at_ns": time.time_ns(),
+            }
+            self._write_issue27_receipt(run_dir, "before.json", before)
+            before_written = True
+
+            phase = "baseline-revalidation"
+            confirmed = self._issue27_tap_state(case)
+            if (confirmed["origin"] != state["tap_state"]["origin"]
+                    or confirmed["revision"] != state["tap_state"]["revision"]
+                    or confirmed["upstream_main_revision"] != state["tap_state"]["upstream_main_revision"]
+                    or confirmed["tree"]["sha256"] != snapshot_manifest["sha256"]):
+                raise BootstrapError("tap baseline changed after the protected plan")
+
+            phase = "checkout-pinned-revision"
+            self._command([
+                *confirmed["git_args"], "checkout", "--detach", case["target_tap_revision"],
+            ], env=confirmed["git_env"], timeout=120)
+
+            phase = "post-checkout-verification"
+            after_state = self._issue27_tap_state(case)
+            if after_state["revision"] != case["target_tap_revision"]:
+                raise BootstrapError("tap checkout did not reach the approved revision")
+            formula_path = after_state["tap"] / self.policy["devsy"]["formula_path"]
+            try:
+                formula_bytes = formula_path.read_bytes()
+            except OSError:
+                raise BootstrapError("approved Devsy formula is missing after tap checkout") from None
+            if sha256(formula_bytes) != after_state["formula_sha256"]:
+                raise BootstrapError("checked-out Devsy formula differs from its pinned commit")
+            after_manifest = after_state["tree"]
+            after_payload = self._issue27_manifest_bytes(after_manifest)
+            self._write_private(run_dir / "tap-after-manifest.json", after_payload)
+            after = {
+                "schema_version": 1, "case_id": case["case_id"],
+                "github_run_id": github_run_id, "github_run_attempt": github_run_attempt,
+                "source_sha": source_sha, "status": "completed",
+                "receipt_signature_status": "unsigned",
+                "prior_backup_authenticated": False,
+                "tap_before_revision": before["tap_before_revision"],
+                "tap_before_sha256": before["tap_before_sha256"],
+                "tap_after_revision": after_state["revision"],
+                "tap_after_origin": after_state["origin"],
+                "tap_after_upstream_main_revision": after_state["upstream_main_revision"],
+                "tap_after_sha256": after_manifest["sha256"],
+                "tap_after_manifest_sha256": sha256(after_payload),
+                "tap_after_bytes": after_manifest["bytes"],
+                "tap_after_files": after_manifest["files"],
+                "formula_sha256": after_state["formula_sha256"],
+                "recorded_at_ns": time.time_ns(),
+            }
+            phase = "after-receipt"
+            self._write_issue27_receipt(run_dir, "after.json", after)
+            return {"operation": "devsy-tap-reconcile", "status": "completed",
+                    "changed": True, "case_id": case["case_id"],
+                    "prior_backup_authenticated": False,
+                    "tap_before_revision": before["tap_before_revision"],
+                    "tap_before_sha256": before["tap_before_sha256"],
+                    "tap_after_revision": after_state["revision"],
+                    "tap_after_sha256": after_manifest["sha256"],
+                    "provider_service_untouched": True, "rollback_ready": True}
+        except Exception as error:
+            failure = (str(error) if isinstance(error, BootstrapError)
+                       else type(error).__name__)
+            if not before_written:
+                shutil.rmtree(run_dir, ignore_errors=True)
+                raise BootstrapError("tap snapshot failed before reconciliation; the live tap was not changed: "
+                                     + failure) from None
+            try:
+                self._issue27_restore_receipted_tap(
+                    case, run_dir, before, reason="automatic rollback after " + phase,
+                )
+            except Exception:
+                raise BootstrapError("Devsy tap reconciliation failed at " + phase
+                                     + "; automatic rollback FAILED; operator recovery required") from None
+            raise BootstrapError("Devsy tap reconciliation failed at " + phase + ": " + failure
+                                 + "; automatic rollback restored the original tap") from None
+
+    def tap_reconciliation_rollback_plan(self, *, github_run_id: str,
+                                         github_run_attempt: str) -> dict:
+        try:
+            run_key = self._issue27_run_key(github_run_id, github_run_attempt)
+            case = validate_tap_reconciliation_case(self.policy)
+            self._issue27_prior_backup(case)
+            _root, receipts = self._issue27_receipts(case)
+            matches = [receipt for receipt in receipts
+                       if receipt["directory"].name == run_key]
+            if len(matches) != 1:
+                raise BootstrapError("protected tap rollback receipt is unavailable")
+            receipt = matches[0]
+            if receipt["rollback"] is not None:
+                raise BootstrapError("incident tap reconciliation was already rolled back")
+            location = self._issue27_tap_location()
+            current_tree = tap_tree_manifest(location["tap"], int(self.profile["uid"]))
+            current_revision = self._command([
+                "git", "-C", str(location["tap"]), "rev-parse", "HEAD",
+            ]).stdout.strip()
+            after = receipt["after"]
+            if after is not None:
+                state = self._issue27_tap_state(case)
+                if (state["revision"] != after["tap_after_revision"]
+                        or state["tree"] != receipt["after_manifest"]
+                        or state["tree"]["sha256"] != after["tap_after_sha256"]):
+                    raise BootstrapError("live tap differs from the completed reconciliation receipt")
+            return {"operation": "devsy-tap-rollback-plan", "ready": True,
+                    "status": "ready", "case_id": case["case_id"],
+                    "github_run_id": github_run_id,
+                    "github_run_attempt": github_run_attempt,
+                    "tap_current_revision": current_revision,
+                    "tap_current_sha256": current_tree["sha256"],
+                    "tap_restore_revision": receipt["before"]["tap_before_revision"],
+                    "tap_restore_sha256": receipt["before"]["tap_before_sha256"],
+                    "prior_backup_authenticated": False, "mutated": False}
+        except BootstrapError as error:
+            return {"operation": "devsy-tap-rollback-plan", "ready": False,
+                    "status": "blocked", "reason": str(error),
+                    "prior_backup_authenticated": False, "mutated": False}
+
+    def rollback_tap_reconciliation(self, *, approved: bool,
+                                   github_run_id: str, github_run_attempt: str) -> dict:
+        if approved is not True:
+            raise BootstrapError("explicit tap reconciliation rollback approval is required")
+        plan = self.tap_reconciliation_rollback_plan(
+            github_run_id=github_run_id, github_run_attempt=github_run_attempt,
+        )
+        if plan.get("ready") is not True:
+            raise BootstrapError("tap reconciliation rollback is blocked: " + plan.get("reason", "unknown gate"))
+        case = validate_tap_reconciliation_case(self.policy)
+        run_key = self._issue27_run_key(github_run_id, github_run_attempt)
+        root, receipts = self._issue27_receipts(case)
+        receipt = next(item for item in receipts if item["directory"].name == run_key)
+        try:
+            restored = self._issue27_restore_receipted_tap(
+                case, receipt["directory"], receipt["before"],
+                reason="explicit protected tap rollback",
+            )
+        except Exception:
+            raise BootstrapError("Devsy tap rollback failed; operator recovery required") from None
+        return {"operation": "devsy-tap-rollback", "restored": True,
+                "case_id": case["case_id"], "tap_revision": case["observed_tap_revision"],
+                "tap_sha256": restored["restored_sha256"],
+                "failed_tap_sha256": restored["failed_sha256"],
+                "provider_service_untouched": True}
 
     def _verify_restored(self, manifest: dict, directory: Path) -> None:
         state_dir = Path(self.profile["state_dir"])

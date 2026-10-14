@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import shlex
 import sys
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import patch
 import pytest
@@ -95,6 +96,63 @@ def test_protected_workflow_has_separate_host_devsy_plan_and_approved_apply():
     assert "args+=(--approve-host-devsy-apply)" in workflow
     assert "HOST_DEVSY_ROLLBACK_APPROVAL: ${{ inputs.approve_host_devsy_rollback }}" in workflow
     assert "args+=(--approve-host-devsy-rollback)" in workflow
+
+
+def test_protected_workflow_has_one_time_tap_reconciliation_and_rollback_approvals():
+    workflow = (ROOT / ".github/workflows/deploy-control-plane.yml").read_text()
+    for operation in (
+        "devsy-tap-reconcile-check", "devsy-tap-reconcile",
+        "devsy-tap-rollback-check", "devsy-tap-rollback",
+    ):
+        assert operation in workflow
+    assert "approve_host_tap_reconciliation:" in workflow
+    assert "approve_host_tap_rollback:" in workflow
+    assert "HOST_TAP_RECONCILIATION_APPROVAL: ${{ inputs.approve_host_tap_reconciliation }}" in workflow
+    assert "HOST_TAP_ROLLBACK_APPROVAL: ${{ inputs.approve_host_tap_rollback }}" in workflow
+    assert "args+=(--approve-host-tap-reconciliation)" in workflow
+    assert "args+=(--approve-host-tap-rollback)" in workflow
+
+
+def test_tap_reconciliation_requires_approval_and_native_tuple_before_vm_operations():
+    instance = json.loads((ROOT / "config/instance.example.json").read_text())
+    args = SimpleNamespace(
+        operation="devsy-tap-reconcile", local=False, cas_digest="", cas_revision="",
+        approve_full_stack=False, approve_host_tap_reconciliation=False,
+        approve_host_tap_rollback=False, native_target="local",
+        native_cwd="/home/operator/mcp-tunnel-kit",
+        native_thread_id="12345678-1234-5678-9abc-def012345678",
+    )
+    with patch.object(d, "INSTANCE", instance), patch.object(d, "trusted_context"), \
+            patch.object(d, "lock", return_value=nullcontext()), \
+            patch.object(d, "remote") as remote, \
+            patch.dict(os.environ, {"GITHUB_SHA": "b" * 40}):
+        with pytest.raises(ValueError, match="explicit Homebrew tap reconciliation approval"):
+            d.execute(args)
+    remote.assert_not_called()
+
+
+def test_tap_reconciliation_dispatch_uses_current_sha_and_exact_native_tuple():
+    instance = json.loads((ROOT / "config/instance.example.json").read_text())
+    args = SimpleNamespace(
+        operation="devsy-tap-reconcile", local=False, cas_digest="", cas_revision="",
+        approve_full_stack=False, approve_host_tap_reconciliation=True,
+        approve_host_tap_rollback=False, native_target="local",
+        native_cwd="/home/operator/mcp-tunnel-kit",
+        native_thread_id="12345678-1234-5678-9abc-def012345678",
+    )
+    expected_native = {
+        "target": "local", "cwd": "/home/operator/mcp-tunnel-kit",
+        "thread_id": "12345678-1234-5678-9abc-def012345678",
+    }
+    with patch.object(d, "INSTANCE", instance), patch.object(d, "trusted_context"), \
+            patch.object(d, "lock", return_value=nullcontext()), \
+            patch.object(d, "_reconcile_host_tap", return_value={"operation": "devsy-tap-reconcile"}) as reconcile, \
+            patch.dict(os.environ, {"GITHUB_SHA": "b" * 40, "GITHUB_RUN_ID": "38610000005",
+                                    "GITHUB_RUN_ATTEMPT": "2"}):
+        result = d.execute(args)
+
+    assert result == {"operation": "devsy-tap-reconcile"}
+    reconcile.assert_called_once_with(expected_native, "b" * 40, "38610000005", "2")
 
 
 def test_remote_source_receives_only_validated_profile_over_pinned_alias():

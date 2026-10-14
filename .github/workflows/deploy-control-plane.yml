@@ -6,7 +6,7 @@ on:
         description: Controlled operation (adopt is one-time Compose to Kamal handoff)
         type: choice
         default: preflight
-        options: [preflight, status, devsy-check, devsy-apply, devsy-rollback, adopt, cas, deploy, rollback]
+        options: [preflight, status, devsy-check, devsy-apply, devsy-rollback, devsy-tap-reconcile-check, devsy-tap-reconcile, devsy-tap-rollback-check, devsy-tap-rollback, adopt, cas, deploy, rollback]
         required: true
       cas_digest:
         description: Optional approved CAS sha256 digest; revision must also be supplied
@@ -40,6 +40,22 @@ on:
         description: Explicitly approve rollback of the last VM-host Devsy bootstrap/provider apply
         type: boolean
         default: false
+      approve_host_tap_reconciliation:
+        description: Explicitly approve the one-time incident Homebrew tap reconciliation
+        type: boolean
+        default: false
+      approve_host_tap_rollback:
+        description: Explicitly approve rollback of a receipted incident tap reconciliation
+        type: boolean
+        default: false
+      tap_reconciliation_run_id:
+        description: Original GitHub run ID for a prior protected tap reconciliation rollback
+        type: string
+        required: false
+      tap_reconciliation_run_attempt:
+        description: Original GitHub run attempt for a prior protected tap reconciliation rollback
+        type: string
+        required: false
 permissions:
   contents: read
 concurrency:
@@ -86,12 +102,20 @@ jobs:
           FULL_APPROVAL: ${{ inputs.approve_full_stack }}
           HOST_DEVSY_APPLY_APPROVAL: ${{ inputs.approve_host_devsy_apply }}
           HOST_DEVSY_ROLLBACK_APPROVAL: ${{ inputs.approve_host_devsy_rollback }}
+          HOST_TAP_RECONCILIATION_APPROVAL: ${{ inputs.approve_host_tap_reconciliation }}
+          HOST_TAP_ROLLBACK_APPROVAL: ${{ inputs.approve_host_tap_rollback }}
+          TAP_RECONCILIATION_RUN_ID: ${{ inputs.tap_reconciliation_run_id }}
+          TAP_RECONCILIATION_RUN_ATTEMPT: ${{ inputs.tap_reconciliation_run_attempt }}
         run: |
           set -euo pipefail
           args=("$OPERATION" --cas-digest "$CAS_DIGEST" --cas-revision "$CAS_REVISION")
           if [ "$FULL_APPROVAL" = true ]; then args+=(--approve-full-stack); fi
           if [ "$HOST_DEVSY_APPLY_APPROVAL" = true ]; then args+=(--approve-host-devsy-apply); fi
           if [ "$HOST_DEVSY_ROLLBACK_APPROVAL" = true ]; then args+=(--approve-host-devsy-rollback); fi
+          if [ "$HOST_TAP_RECONCILIATION_APPROVAL" = true ]; then args+=(--approve-host-tap-reconciliation); fi
+          if [ "$HOST_TAP_ROLLBACK_APPROVAL" = true ]; then args+=(--approve-host-tap-rollback); fi
+          if [ -n "$TAP_RECONCILIATION_RUN_ID" ]; then args+=(--tap-reconciliation-run-id "$TAP_RECONCILIATION_RUN_ID"); fi
+          if [ -n "$TAP_RECONCILIATION_RUN_ATTEMPT" ]; then args+=(--tap-reconciliation-run-attempt "$TAP_RECONCILIATION_RUN_ATTEMPT"); fi
           python3 scripts/deploy_control_plane.py "${args[@]}" | tee "$RUNNER_TEMP/control-plane-receipt.json"
           {
             printf '### Control-plane operation: %s\n\n' "$OPERATION"
