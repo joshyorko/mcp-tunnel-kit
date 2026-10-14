@@ -65,6 +65,64 @@ def verify_records(scoped, legacy):
         raise RebindError('Existing legacy creation is unresolved.')
 
 
+def proven_absent(record):
+    proof = record.get('reconciliation', {})
+    return (record.get('operation') == 'create' and record.get('status') in {'retired', 'failed'}
+            and record.get('new_request_allowed') is True and proof.get('kind') == 'absent'
+            and proof.get('namespace') == 'devsy' and proof.get('kubernetes_context') == 'ror'
+            and isinstance(proof.get('namespace_uid'), str) and bool(proof['namespace_uid'])
+            and all(proof.get(key) is True for key in
+                    ('workspace_absent', 'provider_resources_absent', 'lifecycle_processes_absent')))
+
+
+def current_records(entries, names, entry_digests, approved_history):
+    """Operator snapshots are history only when a canonical archive proves absence."""
+    current, seen = [], set()
+    for filename, record in entries.items():
+        if filename in {name + '.json' for name in names}:
+            current.append(record)
+        elif filename.startswith(('history-', 'identity-')):
+            operation = record.get('operation_id')
+            if not isinstance(operation, str) or not operation or record.get('name') not in names:
+                raise RebindError('Unknown history or identity pin.')
+            key = digest(operation.encode())
+            if filename.startswith('history-'):
+                if filename != 'history-' + key + '.json' or not proven_absent(record):
+                    raise RebindError('Historical receipt is not canonical and reconciled.')
+            else:
+                reference = entries.get('history-' + key + '.json', {})
+                primary = entries.get(record['name'] + '.json', {})
+                if primary.get('operation_id') == operation:
+                    reference = primary
+                if (filename != 'identity-' + key + '.json'
+                        or set(record) != {'name', 'operation_id', 'workspace_uid'}
+                        or not isinstance(record.get('workspace_uid'), str) or not record['workspace_uid']
+                        or any(reference.get(k) != record.get(k) for k in record)
+                        or not proven_absent(reference)):
+                    raise RebindError('Historical identity pin lacks its reconciled owner receipt.')
+        else:
+            snapshot_digest = entry_digests[filename]
+            operation = record.get('operation_id')
+            request = record.get('request_id')
+            if (not filename.startswith(('legacy-original-', 'operator-native-ready-'))
+                    or record.get('status') != 'outcome_unknown'
+                    or record.get('name') not in names or not isinstance(operation, str)
+                    or not operation or not isinstance(request, str) or not request):
+                raise RebindError('Unrecognized lifecycle metadata; no history was ignored.')
+            archive = 'history-' + digest(operation.encode()) + '.json'
+            archived = entries.get(archive, {})
+            if (snapshot_digest not in approved_history
+                    or entry_digests.get(archive) != approved_history[snapshot_digest]
+                    or any(archived.get(key) != record.get(key) for key in
+                    ('name', 'operation_id', 'request_id', 'operation'))
+                    or not proven_absent(archived)):
+                raise RebindError('Historical snapshot lacks its exact reconciled absence archive.')
+            seen.add(snapshot_digest)
+    if seen != set(approved_history):
+        raise RebindError('An approved historical snapshot is missing.')
+    return current
+
+
 def atomic_private(path, content):
     with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as stream:
         temporary = Path(stream.name)
@@ -111,15 +169,19 @@ class ScopeBindingRebind:
             raise RebindError('Host apply receipt, backup or protected mapping changed.')
         snapshots = {}
         records, legacy = [], []
+        scoped_entries = {}
         for directory, output in ((self.state / 'devsy-bridge/scoped-jobs', records),
                                   (self.state / 'devsy-bridge/creation-receipts', legacy)):
             for path in directory.glob('*.json'):
                 content = private_bytes(path)
                 snapshots[path] = digest(content)
-                # Histories and identity pins remain byte-bound but are not current jobs.
-                if directory.name == 'scoped-jobs' and (path.name.startswith(('history-', 'identity-'))):
+                if directory.name == 'scoped-jobs':
+                    scoped_entries[path.name] = json.loads(content)
                     continue
                 output.append(json.loads(content))
+        records = current_records(scoped_entries, scope['allowed_new_names'],
+            {p.name: want for p, want in snapshots.items() if p.parent.name == 'scoped-jobs'},
+            a['historical_snapshots'])
         verify_records(records, legacy)
         tokens = []
         for path in scope_path.parent.iterdir():
@@ -131,6 +193,7 @@ class ScopeBindingRebind:
         if len(tokens) != 1:
             raise RebindError('Owner capability identity is ambiguous.')
         b.assert_current()  # Includes canonical ROR resources, namespace, selector and admission.
+        self.prove_absence(config, json.loads(replacement), records)
         process = json.loads(private_bytes(self.state / 'devsy-bridge/process.json'))
         if not b.process_probe(config, process) or not b.health_probe(config):
             raise RebindError('Managed Devsy bridge is not healthy.')
@@ -148,6 +211,31 @@ class ScopeBindingRebind:
                 'provider_after_sha256': self.approval['provider_after_sha256'],
                 'other_bindings_unchanged': True, 'records_reconciled': True,
                 'owner_capability_verified': True, 'mutated': False}
+
+    def prove_absence(self, config, scope, records):
+        """Use the existing full read-only absence verifier with the approved candidate."""
+        spec = importlib.util.spec_from_file_location('rebind_absence',
+            Path(self.bootstrap.profile['repo_dir']) / 'scripts/devsy_reconciliation.py')
+        module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+        profile = self.bootstrap.profile
+        env = dict(os.environ, HOME=profile['home'], DEVSY_HOME=config['home'],
+                   DEVSY_CONFIG=profile['devsy']['config_source'],
+                   KUBECONFIG=profile['devsy']['kubeconfig_source'])
+        env['PATH'] = str(self.bootstrap._kubectl_install_path().parent) + os.pathsep + env.get('PATH', '')
+        try:
+            rows = module._query([scope['binary'], '--context', scope['context'],
+                '--result-format', 'json', 'workspace', 'list', '--skip-pro'], config['cwd'], env)
+            if rows != []:
+                raise RebindError('Existing workspace inventory blocks this one-time repair.')
+            for name in scope['allowed_new_names']:
+                record = next((r for r in records if r.get('name') == name), {})
+                cutoffs = [record.get(k) for k in ('accepted_at', 'started_at', 'grant_issued_at', 'recovery_cutoff')]
+                cutoffs = [v for v in cutoffs if isinstance(v, (int, float)) and not isinstance(v, bool)
+                           and math.isfinite(v) and 0 < v <= time.time()]
+                module.absence_proof(scope['binary'], config['cwd'], env,
+                    {**scope, 'recovery_cutoff': min(cutoffs) if cutoffs else None}, name)
+        except module.ReconciliationError as error:
+            raise RebindError('Live absence proof refused at ' + error.phase + '.') from None
 
     def authenticate(self, value):
         spec = importlib.util.spec_from_file_location('scope_rebind_native',
