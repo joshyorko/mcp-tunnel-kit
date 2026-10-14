@@ -876,3 +876,96 @@ def test_explicit_rollback_recovers_unhealthy_generation_without_healthy_precond
     assert result['identity_preserved'] is True
     restore.assert_called_once()
     assert 'snapshot' not in calls and 'rollback-commit' in calls
+
+
+@pytest.mark.parametrize(("failure", "expected_stage"), [
+    ("source-restore", "source-restore"),
+    ("host-devsy-restore", "host-devsy-restore"),
+    ("control-plane-snapshot", "control-plane-snapshot"),
+    ("control-plane-snapshot-invalid", "control-plane-snapshot"),
+    ("devsy-plan", "devsy-plan"),
+    ("generation-commit", "generation-commit"),
+    ("source-and-plan", "source-restore,devsy-plan"),
+    ("snapshot-and-plan", "control-plane-snapshot,devsy-plan"),
+    ("source-snapshot-plan",
+     "source-restore,control-plane-snapshot,devsy-plan"),
+])
+def test_host_devsy_apply_reports_outer_rollback_stage_without_remote_details(
+        failure, expected_stage):
+    before = generation(source_sha="a" * 40)
+    before.update(authority="kamal", tunnel_count=1)
+    current = {**before, "publication_proof": {}}
+    plan = missing_pinned_kubectl_plan()
+    calls = []
+    snapshot_count = 0
+    plan_count = 0
+    sync_count = 0
+
+    def remote(action, data=None):
+        nonlocal snapshot_count, plan_count
+        calls.append(action)
+        if action == "snapshot":
+            snapshot_count += 1
+            if failure == "control-plane-snapshot" and snapshot_count == 2:
+                raise RuntimeError("secret-snapshot-detail")
+            if failure in {
+                    "control-plane-snapshot-invalid", "snapshot-and-plan",
+                    "source-snapshot-plan"} and snapshot_count == 2:
+                return None
+            return before
+        if action == "lifecycle-check":
+            return {"healthy": True}
+        if action == "current":
+            return current
+        if action == "previous":
+            return None
+        if action == "devsy-plan":
+            plan_count += 1
+            if failure in {
+                    "devsy-plan", "source-and-plan", "snapshot-and-plan",
+                    "source-snapshot-plan"} and plan_count == 2:
+                raise RuntimeError("secret-plan-detail")
+            return plan
+        if action == "devsy-apply":
+            if failure == "host-devsy-restore":
+                return {"operation": "apply", "changed": True}
+            raise RuntimeError("secret-apply-detail")
+        if action == "devsy-check":
+            raise RuntimeError("secret-drift-detail")
+        if action == "devsy-rollback":
+            if failure == "host-devsy-restore":
+                raise RuntimeError("secret-host-rollback-detail")
+            return {"restored": True}
+        if action == "rollback-commit":
+            if failure == "generation-commit":
+                raise RuntimeError("secret-generation-detail")
+            return {"rollback_committed": True}
+        raise AssertionError(f"unexpected VM action: {action}")
+
+    def sync_source(_sha):
+        nonlocal sync_count
+        sync_count += 1
+        if failure in {
+                "source-restore", "source-and-plan", "source-snapshot-plan"} \
+                and sync_count == 2:
+            raise RuntimeError("secret-source-detail")
+
+    instance = json.loads((ROOT / "config/instance.example.json").read_text())
+    previous = (d.INSTANCE, d.HOST, d.VMROOT, d.VM_HOST_PIN)
+    d.configure_instance(instance)
+    try:
+        with patch.object(d, "remote", side_effect=remote), \
+             patch.object(d, "sync_source", side_effect=sync_source), \
+             patch.object(d, "smoke", return_value={}):
+            with pytest.raises(RuntimeError, match="automatic rollback FAILED") as error:
+                d._apply_host_devsy(
+                    {"target": "local", "cwd": "/work/mcp-tunnel-kit",
+                     "thread_id": "12345678-1234-5678-9abc-def012345678"},
+                    "b" * 40,
+                )
+    finally:
+        d.INSTANCE, d.HOST, d.VMROOT, d.VM_HOST_PIN = previous
+
+    assert f"automatic rollback FAILED at {expected_stage}" in str(error.value)
+    assert "secret-" not in str(error.value)
+    assert calls[0] == "snapshot"
