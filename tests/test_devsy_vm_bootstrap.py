@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 
 import pytest
@@ -30,6 +31,19 @@ def bootstrap_class(module):
     result = getattr(module, "VMDevsyBootstrap", None)
     assert result is not None, "the VM Devsy bootstrap coordinator is missing"
     return result
+
+
+def test_tap_origin_matches_optional_git_suffix_without_changing_repository_identity():
+    module = bootstrap_module()
+
+    assert module.tap_origin_matches(
+        "https://github.com/joshyorko/homebrew-tools",
+        "https://github.com/joshyorko/homebrew-tools.git",
+    )
+    assert not module.tap_origin_matches(
+        "https://github.com/other/homebrew-tools",
+        "https://github.com/joshyorko/homebrew-tools.git",
+    )
 
 
 def private_profile(tmp_path):
@@ -61,6 +75,125 @@ def private_profile(tmp_path):
         "service_group": "fixture",
         "uid": os.getuid(),
     }
+
+
+def tap_rollback_fixture(tmp_path, *, origin, status="", revision="d" * 40):
+    module = bootstrap_module()
+    profile = private_profile(tmp_path)
+    prefix = tmp_path / "linuxbrew/.linuxbrew"
+    brew = prefix / "bin/brew"
+    brew.parent.mkdir(parents=True, mode=0o700)
+    brew.write_text("fixture brew")
+    brew.chmod(0o755)
+    repository = prefix / "Homebrew"
+    tap = repository / "Library/Taps/joshyorko/homebrew-tools"
+    tap.mkdir(parents=True, mode=0o700)
+    configured = policy()
+    configured["homebrew"]["prefix"] = str(prefix)
+    profile["brew_path"] = str(brew)
+    calls = []
+
+    def command(args, **_kwargs):
+        args = [str(value) for value in args]
+        calls.append(args)
+        output = ""
+        if args[0] == str(brew) and args[1:] == ["--repository"]:
+            output = str(repository)
+        elif args[0] == str(brew) and args[1:] == ["untap", configured["devsy"]["tap"]]:
+            shutil.rmtree(tap)
+        elif args[0] == "git" and args[-2:] == ["get-url", "origin"]:
+            output = origin
+        elif args[0] == "git" and args[-2:] == ["rev-parse", "HEAD"]:
+            output = revision
+        elif args[0] == "git" and "status" in args:
+            output = status
+        return subprocess.CompletedProcess(args, 0, output, "")
+
+    bootstrap = bootstrap_class(module)(
+        profile, configured,
+        unit_template=(ROOT / "config/codex-control-plane-devsy.service.in").read_text(),
+        system="Linux", machine="aarch64",
+        unit_path=tmp_path / "systemd/codex-control-plane-devsy.service",
+        runner=command,
+    )
+    return module, bootstrap, tap, calls, configured
+
+
+def test_restore_preserves_a_tap_with_unexpected_origin_or_local_edits(tmp_path):
+    expected = policy()["devsy"]["tap_repository"]
+    cases = (("https://github.com/other/homebrew-tools", ""),
+             (expected, " M Formula/devsy.rb\n"))
+
+    for index, (origin, status) in enumerate(cases):
+        fixture = tmp_path / f"case-{index}"
+        fixture.mkdir()
+        module, bootstrap, tap, calls, configured = tap_rollback_fixture(
+            fixture, origin=origin, status=status,
+        )
+        manifest = {"tap_was_present": False, "files": {},
+                    "unit_active": False, "unit_enabled": False,
+                    "provider_was_verified": False}
+        backup = Path(configured["homebrew"]["prefix"]) / "backup"
+        backup.mkdir(mode=0o700)
+
+        with pytest.raises(module.BootstrapError, match="rollback refused to remove"):
+            bootstrap._restore(manifest, backup)
+
+        assert tap.is_dir()
+        brew = Path(configured["homebrew"]["prefix"]) / "bin/brew"
+        assert not any(call[:2] == [str(brew), "untap"] for call in calls)
+
+
+def test_restore_removes_a_clean_tap_missing_from_backup(tmp_path):
+    origin = policy()["devsy"]["tap_repository"].removesuffix(".git")
+    module, bootstrap, tap, calls, configured = tap_rollback_fixture(
+        tmp_path, origin=origin,
+    )
+    manifest = {"tap_was_present": False, "files": {},
+                "unit_active": False, "unit_enabled": False,
+                "provider_was_verified": False}
+    backup = Path(configured["homebrew"]["prefix"]) / "backup"
+    backup.mkdir(mode=0o700)
+
+    bootstrap._restore(manifest, backup)
+
+    assert not tap.exists()
+    brew = Path(configured["homebrew"]["prefix"]) / "bin/brew"
+    assert [call for call in calls if call[:2] == [str(brew), "untap"]] == [
+        [str(brew), "untap", configured["devsy"]["tap"]],
+    ]
+
+
+def test_restore_fails_closed_when_the_tap_remains_without_homebrew(tmp_path):
+    origin = policy()["devsy"]["tap_repository"].removesuffix(".git")
+    module, bootstrap, tap, _calls, configured = tap_rollback_fixture(
+        tmp_path, origin=origin,
+    )
+    brew = Path(configured["homebrew"]["prefix"]) / "bin/brew"
+    brew.unlink()
+    bootstrap.env["PATH"] = ""
+    manifest = {"tap_was_present": False, "files": {},
+                "unit_active": False, "unit_enabled": False,
+                "provider_was_verified": False}
+    backup = Path(configured["homebrew"]["prefix"]) / "backup"
+    backup.mkdir(mode=0o700)
+
+    with pytest.raises(module.BootstrapError, match="cannot verify transaction-created tap"):
+        bootstrap._restore(manifest, backup)
+
+    assert tap.is_dir()
+
+
+def test_tap_state_still_rejects_an_unreceipted_revision(tmp_path):
+    expected = policy()["devsy"]["tap_repository"]
+    module, bootstrap, tap, _calls, configured = tap_rollback_fixture(
+        tmp_path, origin=expected.removesuffix(".git"), revision="d" * 40,
+    )
+    brew = Path(configured["homebrew"]["prefix"]) / "bin/brew"
+    repository = Path(configured["homebrew"]["prefix"]) / "Homebrew"
+
+    with pytest.raises(module.BootstrapError, match="conflicting Josh tools tap state"):
+        bootstrap._tap_state(brew, repository, receipt=None)
 
 
 def test_provider_options_bound_main_and_init_containers_to_ror_worker_nodes():
@@ -145,6 +278,7 @@ def test_rollback_restores_provider_with_the_previous_verified_cli(tmp_path, mon
         profile, configured,
         unit_template=(ROOT / "config/codex-control-plane-devsy.service.in").read_text(),
         system="Linux", machine="aarch64", unit_path=unit_path,
+        env={"PATH": ""},
     )
     def command(args, **_kwargs):
         output = "v1.23.0\n" if args[0] == str(old_binary) and args[1:] == ["--version"] else ""
