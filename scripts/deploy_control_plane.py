@@ -348,33 +348,30 @@ def _apply_host_devsy(native_tuple, source_sha):
         rollback_stage = "source-restore"
         rollback_failures = []
         try:
-            source_restored = True
             try:
                 sync_source(old_source_sha)
             except Exception:
-                source_restored = False
                 rollback_failures.append("source-restore")
             if changed:
                 rollback_stage = "host-devsy-restore"
                 remote("devsy-rollback", payload)
             rollback_stage = "control-plane-snapshot"
             restored = remote("snapshot")
-            rollback_stage = "devsy-plan"
-            plan_restored = remote("devsy-plan", payload)
-            if not source_restored:
-                rollback_stage = "source-restore"
-                raise RuntimeError("runtime source did not return to its prior revision")
             if (not isinstance(restored, dict)
                     or restored.get("source_sha") != old_source_sha
                     or restored.get("identity") != before.get("identity")
                     or restored.get("inventory") != before.get("inventory")
                     or restored.get("tunnel_count") != 1):
-                rollback_stage = "control-plane-snapshot"
-                raise RuntimeError("control-plane snapshot differed from the prior state")
-            if (_devsy_plan_fingerprint(plan_restored)
+                rollback_failures.append("control-plane-snapshot")
+            rollback_stage = "devsy-plan"
+            plan_restored = remote("devsy-plan", payload)
+            if (not isinstance(plan_restored, dict)
+                    or _devsy_plan_fingerprint(plan_restored)
                     != _devsy_plan_fingerprint(plan_before)):
-                rollback_stage = "devsy-plan"
-                raise RuntimeError("Devsy plan differed from the prior state")
+                rollback_failures.append("devsy-plan")
+            if rollback_failures:
+                rollback_stage = rollback_failures[-1]
+                raise RuntimeError("rollback verification differed from the prior state")
             rollback_stage = "generation-commit"
             remote("rollback-commit", {"current": current, "previous": previous})
         except Exception:

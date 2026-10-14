@@ -886,6 +886,9 @@ def test_explicit_rollback_recovers_unhealthy_generation_without_healthy_precond
     ("devsy-plan", "devsy-plan"),
     ("generation-commit", "generation-commit"),
     ("source-and-plan", "source-restore,devsy-plan"),
+    ("snapshot-and-plan", "control-plane-snapshot,devsy-plan"),
+    ("source-snapshot-plan",
+     "source-restore,control-plane-snapshot,devsy-plan"),
 ])
 def test_host_devsy_apply_reports_outer_rollback_stage_without_remote_details(
         failure, expected_stage):
@@ -905,7 +908,9 @@ def test_host_devsy_apply_reports_outer_rollback_stage_without_remote_details(
             snapshot_count += 1
             if failure == "control-plane-snapshot" and snapshot_count == 2:
                 raise RuntimeError("secret-snapshot-detail")
-            if failure == "control-plane-snapshot-invalid" and snapshot_count == 2:
+            if failure in {
+                    "control-plane-snapshot-invalid", "snapshot-and-plan",
+                    "source-snapshot-plan"} and snapshot_count == 2:
                 return None
             return before
         if action == "lifecycle-check":
@@ -916,7 +921,9 @@ def test_host_devsy_apply_reports_outer_rollback_stage_without_remote_details(
             return None
         if action == "devsy-plan":
             plan_count += 1
-            if failure in {"devsy-plan", "source-and-plan"} and plan_count == 2:
+            if failure in {
+                    "devsy-plan", "source-and-plan", "snapshot-and-plan",
+                    "source-snapshot-plan"} and plan_count == 2:
                 raise RuntimeError("secret-plan-detail")
             return plan
         if action == "devsy-apply":
@@ -938,7 +945,9 @@ def test_host_devsy_apply_reports_outer_rollback_stage_without_remote_details(
     def sync_source(_sha):
         nonlocal sync_count
         sync_count += 1
-        if failure in {"source-restore", "source-and-plan"} and sync_count == 2:
+        if failure in {
+                "source-restore", "source-and-plan", "source-snapshot-plan"} \
+                and sync_count == 2:
             raise RuntimeError("secret-source-detail")
 
     instance = json.loads((ROOT / "config/instance.example.json").read_text())
