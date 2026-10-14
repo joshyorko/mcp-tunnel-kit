@@ -19,10 +19,15 @@ THREAD_ID = "12345678-1234-5678-9abc-def012345678"
 
 class FakeSession:
     def __init__(self, *, expected_cwd=DAKOTA_CWD, expected_thread=THREAD_ID,
-                 read_error=None):
+                 read_error=None, active_flags=None, unknown_active_flags=False,
+                 native_state_authoritative=True, thread_status="notLoaded"):
         self.expected_cwd = expected_cwd
         self.expected_thread = expected_thread
         self.read_error = read_error
+        self.active_flags = active_flags or []
+        self.unknown_active_flags = unknown_active_flags
+        self.native_state_authoritative = native_state_authoritative
+        self.thread_status = thread_status
         self.calls = []
 
     def call(self, _method, request):
@@ -33,34 +38,18 @@ class FakeSession:
         arguments = json.loads(raw_arguments)
         self.calls.append((name, arguments))
         payload = arguments.get("payload", {})
-        if name == "list_targets":
-            content = {"result": {"targets": [{"name": "local"}]}, "error": None}
-        elif name == "discover_threads":
-            content = {
-                "result": {
-                    "operation": "thread/list",
-                    "connection": {"target": "local"},
-                    "result": {"data": [{"id": self.expected_thread,
-                                           "cwd": self.expected_cwd}]},
-                },
-                "error": None,
-            }
-        elif name == "read_thread":
+        if name == "get_thread_snapshot":
             if self.read_error:
                 content = {"result": None, "error": self.read_error}
-            elif (payload.get("cwd"), payload.get("thread_id")) != (
-                    self.expected_cwd, self.expected_thread):
-                content = {
-                    "result": None,
-                    "error": "Stored thread id/cwd does not match the requested workstream",
-                }
             else:
                 content = {
                     "result": {
-                        "operation": "thread/read",
-                        "connection": {"target": "local"},
-                        "result": {"thread": {"id": self.expected_thread,
-                                               "cwd": self.expected_cwd}},
+                        "target": "local", "cwd": self.expected_cwd,
+                        "thread_id": self.expected_thread,
+                        "source": "native-app-server", "thread_status": self.thread_status,
+                        "active_flags": self.active_flags,
+                        "unknown_active_flags": self.unknown_active_flags,
+                        "native_state_authoritative": self.native_state_authoritative,
                     },
                     "error": None,
                 }
@@ -112,14 +101,10 @@ def test_smoke_reads_explicit_dakota_tuple_and_not_vm_checkout(tmp_path, monkeyp
 
     assert result["native_read"]["status"] == "PASS"
     assert result["devsy_reads"] == "PASS"
-    discovery = next(args["payload"] for name, args in session.calls
-                     if name == "discover_threads")
     exact_read = next(args["payload"] for name, args in session.calls
-                      if name == "read_thread")
-    assert discovery["cwd"] == DAKOTA_CWD
-    assert discovery["limit"] <= 100
+                      if name == "get_thread_snapshot")
     assert exact_read == {"target": "local", "cwd": DAKOTA_CWD,
-                          "thread_id": THREAD_ID, "include_turns": False}
+                          "thread_id": THREAD_ID}
     assert all(VM_CWD not in json.dumps(args) for _, args in session.calls)
 
 
@@ -136,10 +121,10 @@ def test_non_strict_smoke_reports_redacted_thread_mismatch_after_devsy_reads(
 
     assert devsy_reads == ["checked"]
     assert result["native_read"] == {
-        "status": "FAIL", "error_code": "NATIVE_THREAD_NOT_DISCOVERED",
+        "status": "FAIL", "error_code": "NATIVE_THREAD_IDENTITY_MISMATCH",
     }
     assert "home/" not in json.dumps(result)
-    assert not any(name == "read_thread" for name, _ in session.calls)
+    assert any(name == "get_thread_snapshot" for name, _ in session.calls)
 
 
 def test_non_strict_smoke_redacts_structured_thread_error(tmp_path, monkeypatch):
@@ -158,6 +143,21 @@ def test_non_strict_smoke_redacts_structured_thread_error(tmp_path, monkeypatch)
         "status": "FAIL", "error_code": "THREAD_WORKSTREAM_MISMATCH",
     }
     assert "Stored thread" not in json.dumps(result)
+    assert any(name == "get_thread_snapshot" for name, _ in session.calls)
+
+
+def test_native_snapshot_rejects_active_unknown_or_unverified_state(tmp_path, monkeypatch):
+    for index, session in enumerate((
+            FakeSession(active_flags=["turn"]),
+            FakeSession(unknown_active_flags=True),
+            FakeSession(native_state_authoritative=False),
+            FakeSession(thread_status="unknown"))):
+        fake = configured_host(tmp_path / str(index), monkeypatch, session=session)
+        fake.read_devsy = lambda _session, _profile: None
+        result = host.smoke({"native_codex": {
+            "target": "local", "cwd": DAKOTA_CWD, "thread_id": THREAD_ID,
+        }, "require_native": False})
+        assert result["native_read"]["status"] == "FAIL"
 
 
 def test_strict_smoke_fails_closed_when_native_tuple_is_missing(tmp_path, monkeypatch):
@@ -174,7 +174,7 @@ def test_strict_smoke_fails_closed_when_native_tuple_is_missing(tmp_path, monkey
         raise AssertionError("strict smoke accepted an unconfigured native tuple")
 
     assert devsy_reads == ["checked"]
-    assert not any(name == "read_thread" for name, _ in session.calls)
+    assert not any(name == "get_thread_snapshot" for name, _ in session.calls)
 
 
 def test_host_devsy_bootstrap_adapter_uses_validated_vm_paths(tmp_path, monkeypatch):
