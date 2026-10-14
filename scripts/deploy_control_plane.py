@@ -364,7 +364,8 @@ def _apply_host_devsy(native_tuple, source_sha):
             if not source_restored:
                 rollback_stage = "source-restore"
                 raise RuntimeError("runtime source did not return to its prior revision")
-            if (restored.get("source_sha") != old_source_sha
+            if (not isinstance(restored, dict)
+                    or restored.get("source_sha") != old_source_sha
                     or restored.get("identity") != before.get("identity")
                     or restored.get("inventory") != before.get("inventory")
                     or restored.get("tunnel_count") != 1):

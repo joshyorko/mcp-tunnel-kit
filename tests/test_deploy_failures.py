@@ -882,6 +882,7 @@ def test_explicit_rollback_recovers_unhealthy_generation_without_healthy_precond
     ("source-restore", "source-restore"),
     ("host-devsy-restore", "host-devsy-restore"),
     ("control-plane-snapshot", "control-plane-snapshot"),
+    ("control-plane-snapshot-invalid", "control-plane-snapshot"),
     ("devsy-plan", "devsy-plan"),
     ("generation-commit", "generation-commit"),
     ("source-and-plan", "source-restore,devsy-plan"),
@@ -904,6 +905,8 @@ def test_host_devsy_apply_reports_outer_rollback_stage_without_remote_details(
             snapshot_count += 1
             if failure == "control-plane-snapshot" and snapshot_count == 2:
                 raise RuntimeError("secret-snapshot-detail")
+            if failure == "control-plane-snapshot-invalid" and snapshot_count == 2:
+                return None
             return before
         if action == "lifecycle-check":
             return {"healthy": True}
