@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -583,7 +584,15 @@ def _fetch_bounded(url: str, max_bytes: int) -> bytes:
         if len(content) > max_bytes:
             raise BootstrapError("pinned Kubernetes kubectl exceeds its size limit")
         return content
-    except (OSError, TimeoutError, ValueError):
+    except BootstrapError:
+        raise
+    except (OSError, TimeoutError) as error:
+        reason = getattr(error, "reason", error)
+        if (isinstance(reason, TimeoutError)
+                or getattr(reason, "errno", None) == errno.ETIMEDOUT):
+            raise BootstrapError("pinned Kubernetes kubectl download timed out") from None
+        raise BootstrapError("pinned Kubernetes kubectl source is unavailable") from None
+    except ValueError:
         raise BootstrapError("pinned Kubernetes kubectl source is unavailable") from None
 
 
@@ -633,13 +642,38 @@ class VMDevsyBootstrap:
         self.starter_source = starter_source
 
     def _command(self, arguments: list[str], *, timeout: int = 60,
-                 env: dict | None = None, allow_failure: bool = False) -> subprocess.CompletedProcess:
+                 env: dict | None = None, allow_failure: bool = False,
+                 kubectl_preflight: bool = False) -> subprocess.CompletedProcess:
         try:
             result = self.runner(arguments, capture_output=True, text=True,
                                  timeout=timeout, env=env or self.env)
-        except (OSError, subprocess.TimeoutExpired):
+        except subprocess.TimeoutExpired:
+            if kubectl_preflight:
+                raise BootstrapError("ROR Kubernetes connection timed out") from None
+            raise BootstrapError("VM Devsy bootstrap command failed or timed out") from None
+        except OSError:
+            if kubectl_preflight:
+                raise BootstrapError("ROR Kubernetes connection failed") from None
             raise BootstrapError("VM Devsy bootstrap command failed or timed out") from None
         if result.returncode and not allow_failure:
+            if kubectl_preflight:
+                stderr = result.stderr if isinstance(result.stderr, str) else ""
+                detail = stderr.casefold()
+                if (("admission webhook" in detail or "admission controller" in detail)
+                        and ("denied" in detail or "reject" in detail)):
+                    raise BootstrapError("ROR Kubernetes admission request rejected") from None
+                if any(marker in detail for marker in (
+                        "unauthorized", "authentication required", "provide credentials",
+                        "you must be logged in", "invalid bearer token")):
+                    raise BootstrapError("ROR Kubernetes authentication failed") from None
+                if any(marker in detail for marker in (
+                        "forbidden", "cannot get ", "cannot list ", "cannot watch ")):
+                    raise BootstrapError("ROR Kubernetes authorization failed") from None
+                if any(marker in detail for marker in (
+                        "unable to connect", "connection refused", "no route to host",
+                        "i/o timeout", "context deadline exceeded", "tls handshake timeout")):
+                    raise BootstrapError("ROR Kubernetes connection failed") from None
+                raise BootstrapError("ROR Kubernetes command failed; raw output withheld") from None
             raise BootstrapError("VM Devsy bootstrap command failed; raw output withheld")
         return result
 
@@ -966,7 +1000,8 @@ class VMDevsyBootstrap:
 
         def get(*args):
             result = self._command([kubectl, "--kubeconfig", str(kubeconfig), "--context",
-                                    "ror", *args, "-o", "json"], env=env, timeout=60)
+                                    "ror", *args, "-o", "json"], env=env, timeout=60,
+                                   kubectl_preflight=True)
             try:
                 return json.loads(result.stdout)
             except (TypeError, json.JSONDecodeError):

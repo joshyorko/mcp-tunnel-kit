@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import urllib.error
 
 import pytest
 
@@ -1293,6 +1294,121 @@ def test_kubectl_policy_matches_the_verified_cas_release_pin():
     assert configured["install_location"] == "private-devsy-state/bin/kubectl"
 
 
+@pytest.mark.parametrize(("failure", "expected"), [
+    (TimeoutError("private timeout detail"), "pinned Kubernetes kubectl download timed out"),
+    (urllib.error.URLError(TimeoutError("private wrapped timeout")),
+     "pinned Kubernetes kubectl download timed out"),
+    (OSError("/private/source token=secret"), "pinned Kubernetes kubectl source is unavailable"),
+])
+def test_kubectl_download_failure_is_classified_without_remote_details(
+        monkeypatch, failure, expected):
+    module = bootstrap_module()
+
+    def fail_fetch(*_args, **_kwargs):
+        raise failure
+
+    monkeypatch.setattr(module.urllib.request, "urlopen", fail_fetch)
+
+    with pytest.raises(module.BootstrapError) as error:
+        module._fetch_bounded("https://dl.k8s.io/pinned/kubectl", 1024)
+
+    assert str(error.value) == expected
+    assert "private" not in str(error.value)
+    assert "secret" not in str(error.value)
+
+
+def test_kubectl_download_size_limit_keeps_its_safe_failure_category(monkeypatch):
+    module = bootstrap_module()
+
+    class OversizedResponse:
+        headers = {"Content-Length": "1025"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(module.urllib.request, "urlopen", lambda *_args, **_kwargs: OversizedResponse())
+
+    with pytest.raises(module.BootstrapError) as error:
+        module._fetch_bounded("https://dl.k8s.io/pinned/kubectl", 1024)
+
+    assert str(error.value) == "pinned Kubernetes kubectl exceeds its size limit"
+
+
+@pytest.mark.parametrize(("stderr", "expected", "timed_out"), [
+    ("Error from server (Unauthorized): token=private-token /private/kubeconfig",
+     "ROR Kubernetes authentication failed", False),
+    ("Error from server (Forbidden): private-user cannot list pods",
+     "ROR Kubernetes authorization failed", False),
+    ("Unable to connect to the server: private endpoint connection refused",
+     "ROR Kubernetes connection failed", False),
+    ("admission webhook 'private-policy' denied the request token=secret",
+     "ROR Kubernetes admission request rejected", False),
+    ("private path /secret token=credential", "ROR Kubernetes command failed; raw output withheld", False),
+    ("private timeout detail", "ROR Kubernetes connection timed out", True),
+])
+def test_cluster_preflight_classifies_kubectl_failures_without_output(
+        tmp_path, stderr, expected, timed_out):
+    module = bootstrap_module()
+    profile = private_profile(tmp_path)
+    configured = policy()
+    artifact = b"fixture pinned kubectl"
+    digest = hashlib.sha256(artifact).hexdigest()
+    configured["kubectl"]["artifact_sha256"] = {"x86_64": digest, "aarch64": digest}
+    kubectl_bin = Path(profile["state_dir"]) / "bin/kubectl"
+    kubectl_bin.parent.mkdir(mode=0o700)
+    kubectl_bin.write_bytes(artifact)
+    kubectl_bin.chmod(0o755)
+
+    def runner(arguments, **kwargs):
+        if timed_out:
+            raise subprocess.TimeoutExpired(arguments, kwargs["timeout"], stderr=stderr)
+        return subprocess.CompletedProcess(arguments, 1, "", stderr)
+
+    bootstrap = bootstrap_class(module)(
+        profile, configured,
+        unit_template=(ROOT / "config/codex-control-plane-devsy.service.in").read_text(),
+        system="Linux", machine="x86_64", runner=runner, env={"PATH": ""},
+    )
+
+    with pytest.raises(module.BootstrapError) as error:
+        bootstrap._cluster_admission(Path(profile["devsy"]["kubeconfig_source"]))
+
+    assert str(error.value) == expected
+    assert "/private" not in str(error.value)
+    assert "/secret" not in str(error.value)
+    assert "token=" not in str(error.value)
+    assert "credential" not in str(error.value)
+
+
+def test_kubectl_install_reports_installed_path_verification_failure(tmp_path, monkeypatch):
+    module = bootstrap_module()
+    profile = private_profile(tmp_path)
+    artifact = b"fixture pinned kubectl"
+    configured = policy()
+    digest = hashlib.sha256(artifact).hexdigest()
+    configured["kubectl"]["artifact_sha256"] = {"x86_64": digest, "aarch64": digest}
+    bootstrap = bootstrap_class(module)(
+        profile, configured,
+        unit_template=(ROOT / "config/codex-control-plane-devsy.service.in").read_text(),
+        system="Linux", machine="x86_64", env={"PATH": ""},
+        fetcher=lambda _url: artifact,
+    )
+    states = iter((
+        {"status": "missing", "installable": True, "target_sha256": digest},
+        {"status": "untrusted", "path": bootstrap._kubectl_install_path()},
+    ))
+    monkeypatch.setattr(bootstrap, "_kubectl_state", lambda: next(states))
+
+    with pytest.raises(module.BootstrapError) as error:
+        bootstrap._install_kubectl()
+
+    assert str(error.value) == "installed pinned kubectl failed source/hash verification"
+    assert not bootstrap._kubectl_install_path().exists()
+
+
 def test_pinned_kubectl_install_is_private_and_idempotent(tmp_path):
     module = bootstrap_module()
     profile = private_profile(tmp_path)
@@ -1349,8 +1465,9 @@ def test_pinned_kubectl_install_rejects_wrong_sha_without_overwriting(tmp_path):
     assert target.read_bytes() == b"untrusted existing kubectl"
 
 
+@pytest.mark.parametrize("rollback_fails", [False, True])
 def test_apply_rolls_back_staged_kubectl_when_ror_admission_still_blocks(
-        tmp_path, monkeypatch):
+        tmp_path, monkeypatch, rollback_fails):
     module = bootstrap_module()
     profile = private_profile(tmp_path)
     artifact = b"fixture pinned kubectl v1.36.3"
@@ -1388,11 +1505,18 @@ def test_apply_rolls_back_staged_kubectl_when_ror_admission_still_blocks(
     }
     inspections = iter((initial, blocked_after_staging))
     monkeypatch.setattr(bootstrap, "_inspect", lambda: next(inspections))
+    if rollback_fails:
+        def fail_rollback(*_args, **_kwargs):
+            raise RuntimeError("/private/state token=secret")
+        monkeypatch.setattr(bootstrap, "_restore_kubectl_snapshot", fail_rollback)
 
-    with pytest.raises(module.BootstrapError, match="staged kubectl was rolled back"):
+    expected = "staged kubectl rollback failed" if rollback_fails else "staged kubectl was rolled back"
+    with pytest.raises(module.BootstrapError, match=expected) as error:
         bootstrap.apply(approved=True, source_sha="a" * 40)
 
-    assert not target.exists()
+    assert (target.exists()) is rollback_fails
+    assert "secret" not in str(error.value)
+    assert "/private" not in str(error.value)
     assert calls == []
 
 

@@ -879,6 +879,7 @@ def test_explicit_rollback_recovers_unhealthy_generation_without_healthy_precond
 
 
 @pytest.mark.parametrize(("failure", "expected_stage"), [
+    ("host-apply-preflight", "source-restore"),
     ("source-restore", "source-restore"),
     ("host-devsy-restore", "host-devsy-restore"),
     ("control-plane-snapshot", "control-plane-snapshot"),
@@ -930,6 +931,12 @@ def test_host_devsy_apply_reports_outer_rollback_stage_without_remote_details(
                 raise RuntimeError("secret-plan-detail")
             return plan
         if action == "devsy-apply":
+            if failure == "host-apply-preflight":
+                raise RuntimeError(
+                    "VM devsy-apply refused; Deployment boundary refused: "
+                    "Devsy apply stopped before provider or Devsy changes: "
+                    "ROR Kubernetes authentication failed; staged kubectl was rolled back"
+                )
             if failure == "host-devsy-restore":
                 return {"operation": "apply", "changed": True}
             raise RuntimeError("secret-apply-detail")
@@ -949,7 +956,8 @@ def test_host_devsy_apply_reports_outer_rollback_stage_without_remote_details(
         nonlocal sync_count
         sync_count += 1
         if failure in {
-                "source-restore", "source-and-plan", "source-snapshot-plan"} \
+                "host-apply-preflight", "source-restore", "source-and-plan",
+                "source-snapshot-plan"} \
                 and sync_count == 2:
             raise RuntimeError("secret-source-detail")
 
@@ -972,13 +980,72 @@ def test_host_devsy_apply_reports_outer_rollback_stage_without_remote_details(
     assert f"automatic rollback FAILED at {expected_stage}" in str(error.value)
     if failure == "host-devsy-restore":
         assert "host-apply-phase=" not in str(error.value)
+    elif failure == "host-apply-preflight":
+        assert "host-apply-phase=ror-kubectl:authentication" in str(error.value)
     else:
         assert "host-apply-phase=unclassified" in str(error.value)
     assert "secret-" not in str(error.value)
     assert calls[0] == "snapshot"
 
 
-def test_host_devsy_apply_failure_code_preserves_only_allowlisted_phase_and_reason():
+@pytest.mark.parametrize(("detail", "expected"), [
+    ("pinned Kubernetes kubectl source is unavailable", "kubectl-download:source-unavailable"),
+    ("pinned Kubernetes kubectl download timed out", "kubectl-download:timeout"),
+    ("pinned Kubernetes kubectl exceeds its size limit", "kubectl-artifact:size-limit"),
+    ("pinned Kubernetes kubectl checksum mismatch", "kubectl-artifact:checksum-mismatch"),
+    ("kubectl candidate failed pinned source/hash validation", "kubectl-path:untrusted-existing"),
+    ("installed pinned kubectl failed source/hash verification", "kubectl-path:verification-failed"),
+    ("ROR Kubernetes authentication failed", "ror-kubectl:authentication"),
+    ("ROR Kubernetes authorization failed", "ror-kubectl:authorization"),
+    ("ROR Kubernetes connection failed", "ror-kubectl:connection"),
+    ("ROR Kubernetes connection timed out", "ror-kubectl:connection-timeout"),
+    ("ROR Kubernetes admission request rejected", "ror-admission:rejected"),
+    ("ROR Kubernetes command failed; raw output withheld", "ror-kubectl:unclassified"),
+    ("ROR admission preflight remains blocked: ROR has no ready worker node matching the Devsy selector",
+     "ror-admission:no-ready-worker"),
+    ("authorized ROR namespace devsy is unavailable", "ror-admission:namespace-unavailable"),
+    ("ROR devsy quota or LimitRange changed; resource admission needs review",
+     "ror-admission:constraints-changed"),
+    ("ROR has no ready worker node matching the Devsy selector",
+     "ror-admission:no-ready-worker"),
+    ("ROR worker allocatable capacity cannot admit the bounded Devsy request",
+     "ror-admission:capacity-insufficient"),
+    ("ROR default storage class drift; PVC admission needs review",
+     "ror-admission:storage-class-drift"),
+    ("ROR returned invalid Kubernetes inventory", "ror-admission:invalid-inventory"),
+])
+def test_host_devsy_apply_failure_code_classifies_allowlisted_preflight_reasons(detail, expected):
+    error = RuntimeError(
+        "VM devsy-apply refused; Deployment boundary refused: "
+        "Devsy apply stopped before provider or Devsy changes: "
+        f"{detail}; staged kubectl was rolled back"
+    )
+
+    assert d._host_devsy_apply_failure_code(error) == expected
+
+
+def test_host_devsy_apply_failure_code_redacts_unknown_and_secret_like_preflight_errors():
+    error = RuntimeError(
+        "VM devsy-apply refused; Deployment boundary refused: "
+        "Devsy apply stopped before provider or Devsy changes: "
+        "failed at /private/host/kubeconfig token=secret-value; staged kubectl was rolled back"
+    )
+
+    assert d._host_devsy_apply_failure_code(error) == "preflight:unclassified"
+    assert "secret-value" not in d._host_devsy_apply_failure_code(error)
+    assert d._host_devsy_apply_failure_code(RuntimeError("secret remote detail")) == "unclassified"
+
+
+def test_host_devsy_apply_failure_code_labels_staging_rollback_failure():
+    error = RuntimeError(
+        "VM devsy-apply refused; Deployment boundary refused: "
+        "Devsy apply stopped before provider or Devsy changes; staged kubectl rollback failed"
+    )
+
+    assert d._host_devsy_apply_failure_code(error) == "kubectl-staging:rollback-failed"
+
+
+def test_host_devsy_apply_failure_code_preserves_existing_allowlisted_phase():
     error = RuntimeError(
         "VM devsy-apply refused; Deployment boundary refused: "
         "Devsy apply failed at provider-readback: "
@@ -990,3 +1057,66 @@ def test_host_devsy_apply_failure_code_preserves_only_allowlisted_phase_and_reas
         "provider-readback:provider-policy-mismatch"
     )
     assert d._host_devsy_apply_failure_code(RuntimeError("secret remote detail")) == "unclassified"
+
+
+def test_host_devsy_apply_successful_outer_rollback_reports_safe_preflight_code():
+    before = generation(source_sha="a" * 40)
+    before.update(authority="kamal", tunnel_count=1)
+    current = {**before, "publication_proof": {}}
+    plan = missing_pinned_kubectl_plan()
+    calls = []
+    snapshot_count = 0
+    plan_count = 0
+    sync_count = 0
+
+    def remote(action, data=None):
+        nonlocal snapshot_count, plan_count
+        calls.append(action)
+        if action == "snapshot":
+            snapshot_count += 1
+            return before
+        if action == "lifecycle-check":
+            return {"healthy": True}
+        if action == "current":
+            return current
+        if action == "previous":
+            return None
+        if action == "devsy-plan":
+            plan_count += 1
+            return plan
+        if action == "devsy-apply":
+            raise RuntimeError(
+                "VM devsy-apply refused; Deployment boundary refused: "
+                "Devsy apply stopped before provider or Devsy changes: "
+                "ROR Kubernetes authorization failed; staged kubectl was rolled back"
+            )
+        if action == "rollback-commit":
+            return {"rollback_committed": True}
+        raise AssertionError(f"unexpected VM action: {action}")
+
+    def sync_source(_sha):
+        nonlocal sync_count
+        sync_count += 1
+
+    instance = json.loads((ROOT / "config/instance.example.json").read_text())
+    previous = (d.INSTANCE, d.HOST, d.VMROOT, d.VM_HOST_PIN)
+    d.configure_instance(instance)
+    try:
+        with patch.object(d, "remote", side_effect=remote), \
+             patch.object(d, "sync_source", side_effect=sync_source), \
+             patch.object(d, "smoke", return_value={}):
+            with pytest.raises(RuntimeError, match="previous host state restored") as error:
+                d._apply_host_devsy(
+                    {"target": "local", "cwd": "/work/mcp-tunnel-kit",
+                     "thread_id": "12345678-1234-5678-9abc-def012345678"},
+                    "b" * 40,
+                )
+    finally:
+        d.INSTANCE, d.HOST, d.VMROOT, d.VM_HOST_PIN = previous
+
+    assert "host-apply-phase=ror-kubectl:authorization" in str(error.value)
+    assert "secret-" not in str(error.value)
+    assert snapshot_count == 2
+    assert plan_count == 2
+    assert sync_count == 2
+    assert calls[-1] == "rollback-commit"
