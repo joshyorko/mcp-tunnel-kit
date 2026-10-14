@@ -116,7 +116,7 @@ def test_issue27_reconciliation_case_is_exact_and_marks_old_backup_unsigned():
         module.validate_tap_reconciliation_case(changed)
 
 
-def test_issue27_reconciliation_manifest_requires_absent_tap_and_legacy_baseline():
+def test_issue27_reconciliation_manifest_requires_absent_tap_and_pinned_legacy_cli():
     module = bootstrap_module()
     configured = policy()
     case = module.validate_tap_reconciliation_case(configured)
@@ -128,7 +128,8 @@ def test_issue27_reconciliation_manifest_requires_absent_tap_and_legacy_baseline
             "receipt": False, "devsy_config": True, "kubectl": False,
         },
         "unit_active": True, "unit_enabled": True,
-        "unit_state": "legacy", "provider_options": {},
+        "unit_state": "managed",
+        "provider_options": {"KUBERNETES_CONTEXT": "", "NODE_SELECTOR": ""},
         "provider_was_verified": True,
         "tap_was_present": False, "tap_revision": None,
         "devsy_version": "1.23.0",
