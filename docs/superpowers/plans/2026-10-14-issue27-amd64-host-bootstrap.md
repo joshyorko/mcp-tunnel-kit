@@ -53,12 +53,13 @@
 - Modify: `scripts/devsy_vm_bootstrap.py`
 - Test: `tests/test_devsy_vm_bootstrap.py`
 
-- [x] Add `test_brew_path_preserves_trusted_launcher_symlink` and `test_brew_path_rejects_symlinks_outside_pinned_prefix` for an inside-prefix launcher and both symlink escape directions.
-- [x] Run the focused tests; confirm all three cases fail against the current `.resolve()` behavior.
+- [x] Add a trusted-launcher positive and symlink negatives for an outside target, an outside launcher, and an outside `..` traversal that resolves back inside.
+- [x] Run focused tests and confirm the launcher, escape, and traversal regressions fail against the current `.resolve()`/`absolute()` behavior.
 - [x] Return the absolute invocation path without dereferencing it, and require both that path and its resolved target to remain inside the pinned Homebrew prefix.
-- [x] Run the full bootstrap test file; 34 tests pass.
-- [x] Run staged diff, JSON, credential-like literal, and host-private-path checks.
-- [ ] Push a follow-up draft PR and post its URL/SHA/results on issue #27.
+- [x] Run the full bootstrap test file; 35 tests pass.
+- [x] Run the repository suite; 652 pass, 1 skipped, 91 subtests.
+- [ ] Run staged diff, JSON, credential-like literal, and host-private-path checks.
+- [ ] Push the updated commit to the follow-up draft PR and post its SHA/results on issue #27.
 - [ ] Run the repository suite and required review/CI; merge through the normal PR path and post the result to issue #27.
 
 ### Task 3: Qualify the ROR worker gate and delivery

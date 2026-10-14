@@ -457,7 +457,7 @@ class VMDevsyBootstrap:
                            Path(self.profile.get("home", "/nonexistent")) / ".linuxbrew/bin/brew"))
         for candidate in candidates:
             if candidate.is_file() and os.access(candidate, os.X_OK):
-                invocation = candidate.absolute()
+                invocation = Path(os.path.abspath(candidate))
                 try:
                     resolved = candidate.resolve(strict=True)
                 except (OSError, RuntimeError):

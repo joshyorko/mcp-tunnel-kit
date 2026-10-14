@@ -278,7 +278,8 @@ def test_brew_path_preserves_trusted_launcher_symlink(tmp_path):
     assert result.resolve() == target.resolve()
 
 
-@pytest.mark.parametrize("escape", ["target-outside", "launcher-outside"])
+@pytest.mark.parametrize(
+    "escape", ["target-outside", "launcher-outside", "traversal-launcher-inside"])
 def test_brew_path_rejects_symlinks_outside_pinned_prefix(tmp_path, escape):
     module = bootstrap_module()
     prefix = tmp_path / "linuxbrew/.linuxbrew"
@@ -287,16 +288,21 @@ def test_brew_path_rejects_symlinks_outside_pinned_prefix(tmp_path, escape):
     outside_target = outside / "brew"
     target = outside_target if escape == "target-outside" else inside_target
     target.parent.mkdir(parents=True)
+    outside.mkdir(parents=True, exist_ok=True)
     target.write_text("#!/bin/sh\nexit 0\n")
     target.chmod(0o755)
-    launcher = (prefix / "bin/brew" if escape == "target-outside"
-                else outside / "brew-link")
+    if escape == "target-outside":
+        launcher = prefix / "bin/brew"
+    elif escape == "traversal-launcher-inside":
+        launcher = prefix / ".." / ".." / "outside/brew-link"
+    else:
+        launcher = outside / "brew-link"
     launcher.parent.mkdir(parents=True, exist_ok=True)
     launcher.symlink_to(target)
     configured = policy()
     configured["homebrew"]["prefix"] = str(prefix)
     profile = private_profile(tmp_path)
-    if escape == "launcher-outside":
+    if escape != "target-outside":
         profile["brew_path"] = str(launcher)
     bootstrap = bootstrap_class(module)(
         profile, configured, unit_template="", starter_source="",
