@@ -1342,7 +1342,8 @@ def test_kubectl_download_size_limit_keeps_its_safe_failure_category(monkeypatch
      "ROR Kubernetes authentication failed", False),
     ("Error from server (Forbidden): private-user cannot list pods",
      "ROR Kubernetes authorization failed", False),
-    ("Unable to connect to the server: private endpoint connection refused",
+    ("The connection to the server 10.10.40.41:6443 was refused - "
+     "kubeconfig=/private/path token=secret",
      "ROR Kubernetes connection failed", False),
     ("admission webhook 'private-policy' denied the request token=secret",
      "ROR Kubernetes admission request rejected", False),

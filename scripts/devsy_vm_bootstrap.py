@@ -673,6 +673,8 @@ class VMDevsyBootstrap:
                         "unable to connect", "connection refused", "no route to host",
                         "i/o timeout", "context deadline exceeded", "tls handshake timeout")):
                     raise BootstrapError("ROR Kubernetes connection failed") from None
+                if ("connection to the server" in detail and "was refused" in detail):
+                    raise BootstrapError("ROR Kubernetes connection failed") from None
                 raise BootstrapError("ROR Kubernetes command failed; raw output withheld") from None
             raise BootstrapError("VM Devsy bootstrap command failed; raw output withheld")
         return result
