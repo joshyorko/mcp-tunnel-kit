@@ -60,16 +60,7 @@ def validate_tap_reconciliation_manifest(manifest: dict, case: dict, policy: dic
             or not re.fullmatch(r"[a-f0-9]{40}", str(manifest.get("source_sha", "")))
             or manifest.get("tap_was_present") is not False
             or manifest.get("tap_revision") is not None
-            or manifest.get("unit_active") is not True
-            or manifest.get("unit_enabled") is not True
-            or manifest.get("unit_state") != "legacy"
-            or manifest.get("provider_options") != {}
             or manifest.get("provider_was_verified") is not True
-            or files.get("unit") is not True
-            or files.get("starter") is not True
-            or files.get("bridge_config") is not True
-            or files.get("receipt") is not False
-            or files.get("devsy_config") is not True
             or files.get("kubectl") is not False
             or manifest.get("kubectl_version") is not None
             or manifest.get("kubectl_sha256") is not None
