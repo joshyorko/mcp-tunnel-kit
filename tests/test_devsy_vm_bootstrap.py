@@ -197,6 +197,75 @@ def test_bridge_health_response_classifier_returns_redacted_fixed_status(respons
     assert module.classify_bridge_health_response(response, "safe-instance") == expected
 
 
+def test_bridge_health_probe_uses_loopback_source_and_disables_proxy(tmp_path, monkeypatch):
+    import urllib.request
+
+    module = bootstrap_module()
+    profile = private_profile(tmp_path)
+    bridge = Path(profile["state_dir"]) / "devsy-bridge"
+    bridge.mkdir(mode=0o700)
+    bridge.chmod(0o700)
+    process = bridge / "process.json"
+    process.write_text(json.dumps({"instance": "fixture-instance"}))
+    process.chmod(0o600)
+    bootstrap = bootstrap_class(module)(
+        profile, policy(),
+        unit_template=(ROOT / "config/codex-control-plane-devsy.service.in").read_text(),
+        system="Linux", machine="aarch64",
+        unit_path=tmp_path / "systemd/codex-control-plane-devsy.service",
+    )
+    calls = {}
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _limit):
+            return b'{"ready":true,"instance":"fixture-instance"}'
+
+    class FakeOpener:
+        def __init__(self, handlers):
+            self.handlers = handlers
+
+        def open(self, url, timeout):
+            calls["url"] = url
+            calls["timeout"] = timeout
+            handler = next(item for item in self.handlers if hasattr(item, "http_open"))
+            return handler.http_open(urllib.request.Request(url))
+
+    def build_opener(*handlers):
+        calls["proxy_disabled"] = any(
+            isinstance(item, urllib.request.ProxyHandler) and item.proxies == {}
+            for item in handlers
+        )
+        calls["redirects_disabled"] = any(
+            isinstance(item, urllib.request.HTTPRedirectHandler) for item in handlers
+        )
+        return FakeOpener(handlers)
+
+    def do_open(_handler, http_class, _request, **kwargs):
+        calls["http_class"] = http_class.__name__
+        calls["source_address"] = kwargs.get("source_address")
+        return Response()
+
+    monkeypatch.setattr(urllib.request, "urlopen",
+                        lambda *_args, **_kwargs: pytest.fail("default urllib opener was used"))
+    monkeypatch.setattr(urllib.request, "build_opener", build_opener)
+    monkeypatch.setattr(urllib.request.HTTPHandler, "do_open", do_open)
+
+    result = bootstrap._probe_bridge({"gateway": "192.0.2.1", "state": str(bridge)})
+
+    assert result is True
+    assert calls["source_address"] == ("127.0.0.1", 0)
+    assert calls["proxy_disabled"] is True
+    assert calls["redirects_disabled"] is True
+    assert calls["http_class"] == "HTTPConnection"
+    assert bootstrap._last_bridge_health_status == "healthy"
+
+
 def test_tap_reconciliation_plan_blocks_when_expected_backup_is_missing(tmp_path):
     module, bootstrap, tap, calls, _configured = tap_rollback_fixture(
         tmp_path, origin=policy()["devsy"]["tap_repository"].removesuffix(".git"),

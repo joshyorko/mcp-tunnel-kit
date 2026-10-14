@@ -55,6 +55,23 @@ def classify_bridge_health_response(value: object, expected_instance: object) ->
     return "healthy"
 
 
+def host_bridge_health_opener():
+    from http.client import HTTPConnection
+    from urllib.request import HTTPHandler, HTTPRedirectHandler, ProxyHandler, build_opener
+
+    class HostHTTP(HTTPHandler):
+        def http_open(self, request):
+            return self.do_open(HTTPConnection, request,
+                                source_address=("127.0.0.1", 0))
+
+    class NoRedirect(HTTPRedirectHandler):
+        def redirect_request(self, *_args):
+            return None
+
+    # Match devsy_bridge.host_opener for Docker gateway-to-host traffic.
+    return build_opener(ProxyHandler({}), HostHTTP(), NoRedirect())
+
+
 def validate_tap_reconciliation_case(policy: dict) -> dict:
     if (not isinstance(policy, dict)
             or ISSUE27_TAP_RECONCILIATION["target_tap_revision"]
@@ -1817,12 +1834,12 @@ class VMDevsyBootstrap:
                                 + ": " + failure + "; previous host state restored") from None
 
     def _probe_bridge(self, config: dict) -> bool:
-        from urllib.request import Request, urlopen
+        self._last_bridge_health_status = "unavailable"
         try:
-            with urlopen("http://" + config["gateway"] + ":8089/health", timeout=10) as response:
+            with host_bridge_health_opener().open(
+                    "http://" + config["gateway"] + ":8089/health", timeout=10) as response:
                 value = json.loads(response.read(4096))
         except Exception:
-            self._last_bridge_health_status = "unavailable"
             return False
         try:
             receipt = self._read_json_private(Path(config["state"]) / "process.json", required=True)
