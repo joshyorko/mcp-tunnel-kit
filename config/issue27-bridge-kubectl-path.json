@@ -1,0 +1,11 @@
+{
+  "approval_id": "issue27-owner-absence-after-rebind-38641330938",
+  "host_apply_source_sha": "61e26875306bbd7c9e4facd5cccbdc2e7dae0c99",
+  "host_apply_receipt_sha256": "13cd234ae058aa0fcb7a95f3a43e14e05a662e748dc05bd23f3e79d92337a7c8",
+  "scope_rebind_receipt_sha256": "cdacad3c4e04d9cb0b9807f9f72b7950141c8a858db2ee24b3ae8eb9f2dffcc2",
+  "scope_sha256": "5e3644d999d83506be057c2f3d605e08f1a557a3cd525b906076a24232b7fb19",
+  "bridge_path_before_sha256": "28a18d3907e21ba9db4e4a550c9e292e6326935ed95da0c648b952d0281d757f",
+  "unit_sha256": "a0da11bf875262aa8a26bd87ec32c044a7aea3889da2a900d1dcf1faecb0489e",
+  "kubectl_sha256": "ebbd080e7c2e275093b55915722043257eb24004363e20acb3c4d71919f88336",
+  "records_sha256": "16d8218b8e44b49678aa7b6014bb8fbff2f36fa73f015af2148b931a03f52d13"
+}

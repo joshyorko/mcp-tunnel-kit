@@ -6,7 +6,7 @@ on:
         description: Controlled operation (adopt is one-time Compose to Kamal handoff)
         type: choice
         default: preflight
-        options: [devsy-scope-rebind-check, devsy-scope-rebind, preflight, status, devsy-check, devsy-apply, devsy-rollback, devsy-tap-reconcile-check, devsy-tap-reconcile, devsy-tap-rollback-check, devsy-tap-rollback, adopt, cas, deploy, rollback]
+        options: [devsy-bridge-path-check, devsy-bridge-path-apply, devsy-scope-rebind-check, devsy-scope-rebind, preflight, status, devsy-check, devsy-apply, devsy-rollback, devsy-tap-reconcile-check, devsy-tap-reconcile, devsy-tap-rollback-check, devsy-tap-rollback, adopt, cas, deploy, rollback]
         required: true
       cas_digest:
         description: Optional approved CAS sha256 digest; revision must also be supplied
@@ -30,6 +30,10 @@ on:
         required: false
       approve_full_stack:
         description: Explicitly approve bounded downtime for adopt, deploy, or rollback
+        type: boolean
+        default: false
+      approve_bridge_kubectl_path:
+        description: One-time verified kubectl PATH drop-in and Devsy bridge-only restart
         type: boolean
         default: false
       approve_scope_binding_rebind:
@@ -104,6 +108,7 @@ jobs:
           NATIVE_CWD: ${{ inputs.native_cwd }}
           NATIVE_THREAD_ID: ${{ inputs.native_thread_id }}
           FULL_APPROVAL: ${{ inputs.approve_full_stack }}
+          BRIDGE_KUBECTL_PATH_APPROVAL: ${{ inputs.approve_bridge_kubectl_path }}
           SCOPE_BINDING_APPROVAL: ${{ inputs.approve_scope_binding_rebind }}
           HOST_DEVSY_APPLY_APPROVAL: ${{ inputs.approve_host_devsy_apply }}
           HOST_DEVSY_ROLLBACK_APPROVAL: ${{ inputs.approve_host_devsy_rollback }}
@@ -115,6 +120,7 @@ jobs:
           set -euo pipefail
           args=("$OPERATION" --cas-digest "$CAS_DIGEST" --cas-revision "$CAS_REVISION")
           if [ "$FULL_APPROVAL" = true ]; then args+=(--approve-full-stack); fi
+          if [ "$BRIDGE_KUBECTL_PATH_APPROVAL" = true ]; then args+=(--approve-bridge-kubectl-path); fi
           if [ "$SCOPE_BINDING_APPROVAL" = true ]; then args+=(--approve-scope-binding-rebind); fi
           if [ "$HOST_DEVSY_APPLY_APPROVAL" = true ]; then args+=(--approve-host-devsy-apply); fi
           if [ "$HOST_DEVSY_ROLLBACK_APPROVAL" = true ]; then args+=(--approve-host-devsy-rollback); fi

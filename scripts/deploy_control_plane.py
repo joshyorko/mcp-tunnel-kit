@@ -159,7 +159,7 @@ def lock():
 
 def remote_source():
     bootstrap='import sys,types\n'
-    for name in ('instance_profile','prepare_recovery_generation','devsy_vm_bootstrap','scope_binding_rebind'):
+    for name in ('instance_profile','prepare_recovery_generation','devsy_vm_bootstrap','scope_binding_rebind','bridge_kubectl_path'):
         source=(ROOT/'scripts'/(name+'.py')).read_text()
         bootstrap+=('_module=types.ModuleType('+repr(name)+')\n'
                     +'_module.__file__='+repr(str(ROOT/'scripts'/(name+'.py')))+'\n'
@@ -248,9 +248,10 @@ def smoke(native_tuple, *, require_native=False):
     return result
 
 
-def scope_binding_operation(native_tuple, source_sha, *, apply=False):
+def scope_binding_operation(native_tuple, source_sha, *, apply=False, bridge_path=False):
     """Keep the deployed source and all Kamal accessories untouched."""
-    approval = json.loads((ROOT / 'config/issue27-scope-binding-rebind.json').read_text())
+    approval_file = 'config/issue27-bridge-kubectl-path.json' if bridge_path else 'config/issue27-scope-binding-rebind.json'
+    approval = json.loads((ROOT / approval_file).read_text())
     before = remote('snapshot')
     current = remote('current')
     if (before.get('authority') != 'kamal' or before.get('tunnel_count') != 1
@@ -264,7 +265,8 @@ def scope_binding_operation(native_tuple, source_sha, *, apply=False):
     payload = {**devsy_payload(),
                'approval': approval,
                'scope_document': json.loads((ROOT / 'docs/devsy-worker-scope.proposed.json').read_text())}
-    action = 'devsy-scope-rebind' if apply else 'devsy-scope-rebind-check'
+    action = ('devsy-bridge-path-apply' if apply else 'devsy-bridge-path-check') if bridge_path else (
+        'devsy-scope-rebind' if apply else 'devsy-scope-rebind-check')
     if apply:
         payload.update(approved=True, controller_sha=source_sha)
     result = remote(action, payload)
@@ -751,6 +753,13 @@ def execute(args):
     if args.operation in ('adopt','deploy','rollback') and not args.approve_full_stack:raise ValueError('Explicit full-stack approval input required')
     sha=os.environ.get('GITHUB_SHA') or subprocess.check_output(['git','rev-parse','HEAD'],cwd=ROOT,text=True).strip()
     with lock(), tempfile.TemporaryDirectory(prefix='mcp-kamal-') as directory:
+        if args.operation in ('devsy-bridge-path-check', 'devsy-bridge-path-apply'):
+            if native_tuple is None or args.local or LOCAL_CONFIGURED:
+                raise ValueError('Bridge PATH repair requires the protected Pi and exact native tuple')
+            apply = args.operation == 'devsy-bridge-path-apply'
+            if apply and not getattr(args, 'approve_bridge_kubectl_path', False):
+                raise ValueError('Explicit one-time bridge PATH approval is required')
+            return scope_binding_operation(native_tuple, sha, apply=apply, bridge_path=True)
         if args.operation in ('devsy-scope-rebind-check', 'devsy-scope-rebind'):
             if native_tuple is None:
                 raise ValueError('Scope repair requires the exact idle native tuple')
@@ -875,7 +884,7 @@ def execute(args):
 
 
 def main():
-    p=argparse.ArgumentParser();p.add_argument('operation',choices=('devsy-scope-rebind-check','devsy-scope-rebind','preflight','status','adopt','cas','deploy','rollback','devsy-check','devsy-apply','devsy-rollback','devsy-tap-reconcile-check','devsy-tap-reconcile','devsy-tap-rollback-check','devsy-tap-rollback'));p.add_argument('--cas-digest',default='');p.add_argument('--cas-revision',default='');p.add_argument('--approve-scope-binding-rebind',action='store_true');p.add_argument('--approve-full-stack',action='store_true');p.add_argument('--approve-host-devsy-apply',action='store_true');p.add_argument('--approve-host-devsy-rollback',action='store_true');p.add_argument('--approve-host-tap-reconciliation',action='store_true');p.add_argument('--approve-host-tap-rollback',action='store_true');p.add_argument('--tap-reconciliation-run-id',default=os.environ.get('TAP_RECONCILIATION_RUN_ID'));p.add_argument('--tap-reconciliation-run-attempt',default=os.environ.get('TAP_RECONCILIATION_RUN_ATTEMPT'));p.add_argument('--instance-profile',help='Absolute path to an owned mode-0600 private instance profile');p.add_argument('--native-target',default=os.environ.get('NATIVE_TARGET'));p.add_argument('--native-cwd',default=os.environ.get('NATIVE_CWD'));p.add_argument('--native-thread-id',default=os.environ.get('NATIVE_THREAD_ID'));p.add_argument('--local',action='store_true',help='Approved Pi break-glass, or bin/kamal with explicit private local config')
+    p=argparse.ArgumentParser();p.add_argument('operation',choices=('devsy-bridge-path-check','devsy-bridge-path-apply','devsy-scope-rebind-check','devsy-scope-rebind','preflight','status','adopt','cas','deploy','rollback','devsy-check','devsy-apply','devsy-rollback','devsy-tap-reconcile-check','devsy-tap-reconcile','devsy-tap-rollback-check','devsy-tap-rollback'));p.add_argument('--cas-digest',default='');p.add_argument('--cas-revision',default='');p.add_argument('--approve-bridge-kubectl-path',action='store_true');p.add_argument('--approve-scope-binding-rebind',action='store_true');p.add_argument('--approve-full-stack',action='store_true');p.add_argument('--approve-host-devsy-apply',action='store_true');p.add_argument('--approve-host-devsy-rollback',action='store_true');p.add_argument('--approve-host-tap-reconciliation',action='store_true');p.add_argument('--approve-host-tap-rollback',action='store_true');p.add_argument('--tap-reconciliation-run-id',default=os.environ.get('TAP_RECONCILIATION_RUN_ID'));p.add_argument('--tap-reconciliation-run-attempt',default=os.environ.get('TAP_RECONCILIATION_RUN_ATTEMPT'));p.add_argument('--instance-profile',help='Absolute path to an owned mode-0600 private instance profile');p.add_argument('--native-target',default=os.environ.get('NATIVE_TARGET'));p.add_argument('--native-cwd',default=os.environ.get('NATIVE_CWD'));p.add_argument('--native-thread-id',default=os.environ.get('NATIVE_THREAD_ID'));p.add_argument('--local',action='store_true',help='Approved Pi break-glass, or bin/kamal with explicit private local config')
     args=p.parse_args()
     try:print(json.dumps(execute(args),indent=2))
     except Exception as e:print(str(e),file=sys.stderr);sys.exit(1)
