@@ -43,6 +43,18 @@ def sha256(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
+def classify_bridge_health_response(value: object, expected_instance: object) -> str:
+    if not isinstance(value, dict):
+        return "invalid-response"
+    if value.get("ready") is not True:
+        return "not-ready"
+    if value.get("instance") != expected_instance:
+        return "instance-mismatch"
+    if set(value) != {"ready", "instance"}:
+        return "unexpected-response-fields"
+    return "healthy"
+
+
 def validate_tap_reconciliation_case(policy: dict) -> dict:
     if (not isinstance(policy, dict)
             or ISSUE27_TAP_RECONCILIATION["target_tap_revision"]
@@ -583,6 +595,7 @@ class VMDevsyBootstrap:
         self.env = dict(os.environ if env is None else env)
         self.health_probe = health_probe or self._probe_bridge
         self.process_probe = process_probe or self._process_matches
+        self._last_bridge_health_status = "unknown"
         if starter_source is None:
             scripts = Path(profile["repo_dir"]) / "scripts"
             starter_source = (
@@ -1672,7 +1685,11 @@ class VMDevsyBootstrap:
             if not self.process_probe(config, process):
                 raise BootstrapError("restored Host Devsy process identity did not match its receipt")
             if not self.health_probe(config):
-                raise BootstrapError("restored Host Devsy bridge health did not match its identity")
+                status = self._last_bridge_health_status
+                if status not in {"unavailable", "invalid-response", "invalid-process-receipt",
+                                  "not-ready", "instance-mismatch", "unexpected-response-fields"}:
+                    status = "unknown"
+                raise BootstrapError("restored Host Devsy bridge health gate failed: " + status)
 
     def _apply(self, source_sha: str) -> dict:
         state = self._inspect()
@@ -1804,10 +1821,18 @@ class VMDevsyBootstrap:
         try:
             with urlopen("http://" + config["gateway"] + ":8089/health", timeout=10) as response:
                 value = json.loads(response.read(4096))
-            receipt = self._read_json_private(Path(config["state"]) / "process.json", required=True)
-            return value == {"ready": True, "instance": receipt.get("instance")}
         except Exception:
+            self._last_bridge_health_status = "unavailable"
             return False
+        try:
+            receipt = self._read_json_private(Path(config["state"]) / "process.json", required=True)
+        except BootstrapError:
+            self._last_bridge_health_status = "invalid-process-receipt"
+            return False
+        self._last_bridge_health_status = classify_bridge_health_response(
+            value, receipt.get("instance"),
+        )
+        return self._last_bridge_health_status == "healthy"
 
     def _inspect(self, *, include_cluster: bool = True) -> dict:
         home, state_dir, repo, kubeconfig = self._validate_inputs()

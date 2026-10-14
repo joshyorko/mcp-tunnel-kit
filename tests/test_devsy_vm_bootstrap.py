@@ -150,7 +150,7 @@ def test_issue27_reconciliation_manifest_requires_absent_tap_and_pinned_legacy_c
 
 @pytest.mark.parametrize(("process_matches", "health_matches", "expected", "expected_health_calls"), [
     (False, True, "restored Host Devsy process identity did not match its receipt", 0),
-    (True, False, "restored Host Devsy bridge health did not match its identity", 1),
+    (True, False, "restored Host Devsy bridge health gate failed: instance-mismatch", 1),
 ])
 def test_restored_service_baseline_reports_process_and_health_identity_separately(
         tmp_path, process_matches, health_matches, expected, expected_health_calls):
@@ -173,6 +173,7 @@ def test_restored_service_baseline_reports_process_and_health_identity_separatel
     )
     health_calls = []
     bootstrap.process_probe = lambda _config, _process: process_matches
+    bootstrap._last_bridge_health_status = "instance-mismatch"
     bootstrap.health_probe = lambda _config: health_calls.append(True) or health_matches
 
     with pytest.raises(module.BootstrapError, match=expected):
@@ -181,6 +182,19 @@ def test_restored_service_baseline_reports_process_and_health_identity_separatel
         )
 
     assert len(health_calls) == expected_health_calls
+
+
+@pytest.mark.parametrize(("response", "expected"), [
+    ({"ready": True, "instance": "safe-instance"}, "healthy"),
+    (None, "invalid-response"),
+    ({"ready": False, "instance": "safe-instance"}, "not-ready"),
+    ({"ready": True, "instance": "different-instance"}, "instance-mismatch"),
+    ({"ready": True, "instance": "safe-instance", "extra": True}, "unexpected-response-fields"),
+])
+def test_bridge_health_response_classifier_returns_redacted_fixed_status(response, expected):
+    module = bootstrap_module()
+
+    assert module.classify_bridge_health_response(response, "safe-instance") == expected
 
 
 def test_tap_reconciliation_plan_blocks_when_expected_backup_is_missing(tmp_path):
