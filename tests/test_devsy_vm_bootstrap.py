@@ -254,6 +254,59 @@ def test_devsy_policy_pins_both_homebrew_release_artifacts():
     }
 
 
+def test_brew_path_preserves_trusted_launcher_symlink(tmp_path):
+    module = bootstrap_module()
+    prefix = tmp_path / "linuxbrew/.linuxbrew"
+    target = prefix / "Homebrew/bin/brew"
+    target.parent.mkdir(parents=True)
+    target.write_text("#!/bin/sh\nexit 0\n")
+    target.chmod(0o755)
+    launcher = prefix / "bin/brew"
+    launcher.parent.mkdir(parents=True)
+    launcher.symlink_to(target)
+    configured = policy()
+    configured["homebrew"]["prefix"] = str(prefix)
+    bootstrap = bootstrap_class(module)(
+        private_profile(tmp_path), configured, unit_template="", starter_source="",
+        system="Linux", machine="x86_64", env={"PATH": str(tmp_path / "empty-bin")},
+    )
+
+    result = bootstrap._brew_path()
+
+    assert result == launcher.absolute()
+    assert result.is_symlink()
+    assert result.resolve() == target.resolve()
+
+
+@pytest.mark.parametrize("escape", ["target-outside", "launcher-outside"])
+def test_brew_path_rejects_symlinks_outside_pinned_prefix(tmp_path, escape):
+    module = bootstrap_module()
+    prefix = tmp_path / "linuxbrew/.linuxbrew"
+    outside = tmp_path / "outside"
+    inside_target = prefix / "Homebrew/bin/brew"
+    outside_target = outside / "brew"
+    target = outside_target if escape == "target-outside" else inside_target
+    target.parent.mkdir(parents=True)
+    target.write_text("#!/bin/sh\nexit 0\n")
+    target.chmod(0o755)
+    launcher = (prefix / "bin/brew" if escape == "target-outside"
+                else outside / "brew-link")
+    launcher.parent.mkdir(parents=True, exist_ok=True)
+    launcher.symlink_to(target)
+    configured = policy()
+    configured["homebrew"]["prefix"] = str(prefix)
+    profile = private_profile(tmp_path)
+    if escape == "launcher-outside":
+        profile["brew_path"] = str(launcher)
+    bootstrap = bootstrap_class(module)(
+        profile, configured, unit_template="", starter_source="",
+        system="Linux", machine="x86_64", env={"PATH": str(tmp_path / "empty-bin")},
+    )
+
+    with pytest.raises(module.BootstrapError, match="outside the pinned Homebrew prefix"):
+        bootstrap._brew_path()
+
+
 def test_pinned_formula_rejects_wrong_amd64_artifact_digest():
     module = bootstrap_module()
     formula = b'''class Devsy < Formula
