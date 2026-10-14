@@ -338,6 +338,44 @@ def private_profile(tmp_path):
     }
 
 
+def test_provider_inspection_uses_the_configured_devsy_home(tmp_path):
+    module = bootstrap_module()
+    profile = private_profile(tmp_path)
+    configured = policy()
+    options = configured["provider"]["legacy_options"]
+    listing = {
+        "kubernetes": {
+            "default": True,
+            "state": {"options": {key: {"value": value} for key, value in options.items()}},
+        },
+    }
+    calls = []
+
+    def runner(args, **kwargs):
+        calls.append((args, kwargs.get("env", {})))
+        return subprocess.CompletedProcess(args, 0, json.dumps(listing), "")
+
+    bootstrap = bootstrap_class(module)(
+        profile, configured, unit_template="", runner=runner,
+        system="Linux", machine="x86_64",
+    )
+    config_home = Path(profile["devsy"]["config_source"]).parent
+    home, _state, _repo, kubeconfig = bootstrap._validate_inputs()
+
+    binary = Path(tmp_path / "devsy")
+    provider = bootstrap._provider_state(binary, home, kubeconfig)
+    bootstrap._set_provider_options(
+        binary, home, kubeconfig, module.provider_options(configured, str(kubeconfig)),
+    )
+
+    assert home == config_home
+    assert home != Path(profile["home"])
+    assert calls[0][1]["DEVSY_HOME"] == str(config_home)
+    assert provider["name"] == "kubernetes"
+    assert calls[1][0][1:3] == ["--home", str(config_home)]
+    assert calls[1][1]["DEVSY_HOME"] == str(config_home)
+
+
 def tap_rollback_fixture(tmp_path, *, origin, status="", revision="d" * 40):
     module = bootstrap_module()
     profile = private_profile(tmp_path)
