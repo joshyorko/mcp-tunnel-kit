@@ -871,7 +871,7 @@ def main():
                         'devsy-tap-reconcile-plan','devsy-tap-reconcile',
                         'devsy-tap-rollback-plan','devsy-tap-rollback'):
         STORE.mkdir(mode=0o700,exist_ok=True)
-    data=json.load(sys.stdin) if action in ('images','image-check','network','network-check','wait','commit','baseline','set-current','rollback-commit','restart-local','activation-plan','activation-preflight','activation-begin','activation-pull-images','activation-install','activation-track','activation-seed','activation-network','activation-identity','activation-cleanup','activation-record','smoke','devsy-plan','devsy-check','devsy-rollback-plan','devsy-apply','devsy-rollback','devsy-tap-reconcile-plan','devsy-tap-reconcile','devsy-tap-rollback-plan','devsy-tap-rollback') else {}
+    data=json.load(sys.stdin) if action in ('images','image-check','network','network-check','wait','commit','baseline','set-current','rollback-commit','restart-local','activation-plan','activation-preflight','activation-begin','activation-pull-images','activation-install','activation-track','activation-seed','activation-network','activation-identity','activation-cleanup','activation-record','smoke','devsy-plan','devsy-check','devsy-rollback-plan','devsy-apply','devsy-rollback','devsy-scope-rebind-check','devsy-scope-rebind','devsy-tap-reconcile-plan','devsy-tap-reconcile','devsy-tap-rollback-plan','devsy-tap-rollback') else {}
     if action=='activation-plan':result=activation_plan(data['generation_dir'])
     elif action=='activation-preflight':
         info=_ensure_empty_activation_target(data['generation_dir'],allow_lock=True)
@@ -945,6 +945,14 @@ def main():
     elif action=='backup':result=backup()
     elif action=='backup-cas':result=backup_cas()
     elif action=='smoke':result=smoke(data)
+    elif action in ('devsy-scope-rebind-check','devsy-scope-rebind'):
+        from scope_binding_rebind import ScopeBindingRebind
+        expected={'policy','unit_template','starter_source','approval','scope_document'}
+        if action=='devsy-scope-rebind':expected|={'approved','controller_sha'}
+        if set(data)!=expected:raise ValueError('Scope binding repair request is invalid')
+        repair=ScopeBindingRebind(_devsy_bootstrap(data),data['approval'],data['scope_document'],snapshot)
+        result=(repair.plan() if action=='devsy-scope-rebind-check' else
+                repair.apply(approved=data['approved'],controller_sha=data['controller_sha']))
     elif action=='devsy-plan':result=_devsy_bootstrap(data).plan()
     elif action=='devsy-check':result=_devsy_bootstrap(data).assert_current()
     elif action=='devsy-rollback-plan':result=_devsy_bootstrap(data).rollback_plan()
