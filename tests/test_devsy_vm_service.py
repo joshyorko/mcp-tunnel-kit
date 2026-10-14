@@ -2,7 +2,10 @@
 
 import importlib.util
 import json
+import os
 from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 
@@ -16,6 +19,29 @@ def service_module():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def test_service_wrapper_imports_through_legacy_runpy_launcher(tmp_path):
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    (scripts / "host_devsy_service.py").write_text(
+        (ROOT / "scripts/host_devsy_service.py").read_text()
+    )
+    (scripts / "devsy_vm_service.py").write_text("def main():\n    return 0\n")
+    launcher = tmp_path / "start-host-devsy.py"
+    launcher.write_text(
+        "import runpy\n"
+        f"runpy.run_path({str(scripts / 'host_devsy_service.py')!r}, run_name='__main__')\n"
+    )
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+
+    result = subprocess.run(
+        [sys.executable, str(launcher)], cwd=tmp_path, env=env,
+        capture_output=True, text=True, check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 def test_bridge_starts_from_explicit_settings_and_writes_identity_receipt(tmp_path):
