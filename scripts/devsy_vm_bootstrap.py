@@ -648,7 +648,7 @@ class VMDevsyBootstrap:
         try:
             devsy = self.profile["devsy"]
             uid = int(self.profile["uid"])
-            home = Path(self.profile.get("home") or Path(devsy["config_source"]).parents[4])
+            home = Path(devsy["config_source"]).parent
             state = Path(self.profile["state_dir"])
             repo = Path(self.profile["repo_dir"])
             config = Path(devsy["config_source"])
