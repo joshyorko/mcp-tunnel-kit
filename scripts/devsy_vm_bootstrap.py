@@ -24,6 +24,8 @@ class BootstrapError(ValueError):
 POLICY_PATH = Path(__file__).resolve().parents[1] / "config/devsy-vm-bootstrap.json"
 UNIT_TEMPLATE_PATH = Path(__file__).resolve().parents[1] / "config/codex-control-plane-devsy.service.in"
 UNIT_PATH = Path("/etc/systemd/system/codex-control-plane-devsy.service")
+MISSING_KUBECTL_REASON = "pinned kubectl is missing; ROR admission preflight was not run"
+KUBECTL_CONFLICT_REASON = "kubectl candidate failed pinned source/hash validation"
 
 
 def sha256(value: bytes) -> str:
@@ -38,9 +40,30 @@ def load_policy(path: Path = POLICY_PATH) -> dict:
     if (not isinstance(value, dict) or value.get("schema_version") != 1
             or not isinstance(value.get("homebrew"), dict)
             or not isinstance(value.get("devsy"), dict)
+            or not isinstance(value.get("kubectl"), dict)
             or not isinstance(value.get("provider"), dict)):
         raise BootstrapError("VM Devsy bootstrap policy schema is unsupported")
+    validate_kubectl_policy(value["kubectl"])
     return value
+
+
+def validate_kubectl_policy(value: dict) -> None:
+    version = value.get("version")
+    architecture = value.get("architecture")
+    artifacts = value.get("artifact_sha256")
+    expected_architecture = {"x86_64": "amd64", "aarch64": "arm64"}
+    if (not isinstance(version, str) or not re.fullmatch(r"\d+\.\d+\.\d+", version)
+            or value.get("source_url") !=
+            f"https://dl.k8s.io/release/v{version}/bin/linux/{{arch}}/kubectl"
+            or architecture != expected_architecture or not isinstance(artifacts, dict)
+            or set(artifacts) != set(expected_architecture)
+            or any(not isinstance(artifacts.get(arch), str)
+                   or not re.fullmatch(r"[a-f0-9]{64}", artifacts[arch])
+                   for arch in expected_architecture)
+            or type(value.get("max_bytes")) is not int
+            or not 1 <= value["max_bytes"] <= 256 * 1024 * 1024
+            or value.get("install_location") != "private-devsy-state/bin/kubectl"):
+        raise BootstrapError("pinned kubectl policy is invalid")
 
 
 def canonical_architecture(machine: str) -> str | None:
@@ -296,6 +319,20 @@ def _fetch(url: str) -> bytes:
         raise BootstrapError("pinned Homebrew or Josh tap source is unavailable") from None
 
 
+def _fetch_bounded(url: str, max_bytes: int) -> bytes:
+    try:
+        with urllib.request.urlopen(url, timeout=60) as response:
+            content_length = response.headers.get("Content-Length")
+            if content_length is not None and int(content_length) > max_bytes:
+                raise BootstrapError("pinned Kubernetes kubectl exceeds its size limit")
+            content = response.read(max_bytes + 1)
+        if len(content) > max_bytes:
+            raise BootstrapError("pinned Kubernetes kubectl exceeds its size limit")
+        return content
+    except (OSError, TimeoutError, ValueError):
+        raise BootstrapError("pinned Kubernetes kubectl source is unavailable") from None
+
+
 def validate_platform_current() -> None:
     validate_platform(platform.system(), platform.machine())
 
@@ -312,6 +349,7 @@ class VMDevsyBootstrap:
         self.profile = profile
         self.policy = policy if policy is not None else load_policy(
             Path(profile["repo_dir"]) / "config/devsy-vm-bootstrap.json")
+        validate_kubectl_policy(self.policy.get("kubectl", {}))
         self.unit_template = unit_template
         if self.unit_template is None:
             template = Path(profile["repo_dir"]) / "config/codex-control-plane-devsy.service.in"
@@ -547,14 +585,128 @@ class VMDevsyBootstrap:
         return {"present": True, "brew": brew, "prefix": prefix,
                 "repository": repository, "tap": tap, "version": version}
 
+    def _kubectl_install_path(self) -> Path:
+        return Path(self.profile["state_dir"]) / "bin/kubectl"
+
+    def _kubectl_state(self) -> dict:
+        configured = self.policy["kubectl"]
+        expected = configured["artifact_sha256"].get(self.machine)
+        if expected is None:
+            raise BootstrapError("pinned kubectl does not support this Linux architecture")
+        path = self._kubectl_install_path()
+        if not path.exists() and not path.is_symlink():
+            return {"status": "missing", "path": path, "version": configured["version"],
+                    "sha256": None, "target_sha256": expected,
+                    "managed_path_present": False, "installable": True}
+        try:
+            validate_private_directory(path.parent, int(self.profile["uid"]))
+            metadata = path.lstat()
+            if (path.is_symlink() or not stat.S_ISREG(metadata.st_mode)
+                    or metadata.st_uid != int(self.profile["uid"])
+                    or stat.S_IMODE(metadata.st_mode) != 0o755
+                    or stat.S_IMODE(path.parent.lstat().st_mode) != 0o700
+                    or not os.access(path, os.X_OK)):
+                raise BootstrapError(KUBECTL_CONFLICT_REASON)
+            actual = sha256(path.read_bytes())
+            if actual != expected:
+                raise BootstrapError(KUBECTL_CONFLICT_REASON)
+            return {"status": "verified", "path": path, "version": configured["version"],
+                    "sha256": actual, "target_sha256": expected,
+                    "managed_path_present": True, "installable": False}
+        except (OSError, BootstrapError):
+            return {"status": "untrusted", "path": path, "version": configured["version"],
+                    "sha256": None, "target_sha256": expected,
+                    "managed_path_present": True, "installable": False}
+
+    def _install_kubectl(self) -> dict:
+        state = self._kubectl_state()
+        if state["status"] == "verified":
+            return state
+        if state["status"] != "missing" or state["installable"] is not True:
+            raise BootstrapError(KUBECTL_CONFLICT_REASON)
+        configured = self.policy["kubectl"]
+        architecture = configured["architecture"].get(self.machine)
+        if architecture is None:
+            raise BootstrapError("pinned kubectl does not support this Linux architecture")
+        url = configured["source_url"].format(arch=architecture)
+        expected_url = (f"https://dl.k8s.io/release/v{configured['version']}"
+                        f"/bin/linux/{architecture}/kubectl")
+        if url != expected_url:
+            raise BootstrapError("pinned kubectl source URL is invalid")
+        if self.fetcher is _fetch:
+            artifact = _fetch_bounded(url, configured["max_bytes"])
+        else:
+            artifact = self.fetcher(url)
+        if (not isinstance(artifact, bytes) or len(artifact) > configured["max_bytes"]
+                or sha256(artifact) != state["target_sha256"]):
+            raise BootstrapError("pinned Kubernetes kubectl checksum mismatch")
+        target = self._kubectl_install_path()
+        if target.exists() or target.is_symlink():
+            raise BootstrapError(KUBECTL_CONFLICT_REASON)
+        self._write_private(target, artifact, 0o755)
+        installed = self._kubectl_state()
+        if installed["status"] != "verified" or installed["path"] != target:
+            self._restore_kubectl_snapshot({"kubectl": False}, Path(self.profile["state_dir"]))
+            raise BootstrapError("installed pinned kubectl failed source/hash verification")
+        return installed
+
+    def _restore_kubectl_snapshot(self, files: dict, directory: Path) -> None:
+        if "kubectl" not in files:
+            return
+        target = self._kubectl_install_path()
+        if files.get("kubectl") is True:
+            backup = directory / "kubectl.bin"
+            data = backup.read_bytes()
+            expected = self.policy["kubectl"]["artifact_sha256"].get(self.machine)
+            if not expected or sha256(data) != expected:
+                raise BootstrapError("pinned kubectl rollback snapshot failed its checksum")
+            if target.is_symlink():
+                raise BootstrapError("refusing to overwrite a kubectl symlink during rollback")
+            if target.exists():
+                metadata = target.lstat()
+                if (not stat.S_ISREG(metadata.st_mode)
+                        or metadata.st_uid != int(self.profile["uid"])):
+                    raise BootstrapError("refusing to overwrite an unsafe kubectl rollback target")
+            self._write_private(target, data, 0o755)
+        elif target.exists() or target.is_symlink():
+            expected = self.policy["kubectl"]["artifact_sha256"].get(self.machine)
+            try:
+                metadata = target.lstat()
+                validate_private_directory(target.parent, int(self.profile["uid"]))
+                if (target.is_symlink() or not stat.S_ISREG(metadata.st_mode)
+                        or metadata.st_uid != int(self.profile["uid"])
+                        or not expected or sha256(target.read_bytes()) != expected):
+                    raise BootstrapError("refusing to remove an unverified kubectl rollback target")
+                target.unlink()
+            except OSError:
+                raise BootstrapError("pinned kubectl rollback failed") from None
+        try:
+            target.parent.rmdir()
+        except OSError:
+            pass
+
+    def _can_stage_missing_kubectl(self, state: dict) -> bool:
+        kubectl = state.get("kubectl", {})
+        expected = self.policy["kubectl"]["artifact_sha256"].get(self.machine)
+        return (
+            state.get("cluster") == {
+                "ready": False, "status": "blocked", "reason": MISSING_KUBECTL_REASON,
+            }
+            and kubectl.get("status") == "missing"
+            and kubectl.get("installable") is True
+            and kubectl.get("target_sha256") == expected
+            and kubectl.get("managed_path_present") is False
+            and kubectl.get("path") == self._kubectl_install_path()
+            and "install-pinned-kubectl" in state.get("changes", [])
+        )
+
     def _cluster_admission(self, kubeconfig: Path) -> dict:
-        kubectl = shutil.which("kubectl", path=self.env.get("PATH"))
-        if kubectl is None:
-            candidate = Path("/usr/bin/kubectl")
-            if candidate.is_file() and os.access(candidate, os.X_OK):
-                kubectl = str(candidate)
-        if kubectl is None:
-            raise BootstrapError("kubectl is required for the ROR admission preflight")
+        kubectl_state = self._kubectl_state()
+        if kubectl_state["status"] == "missing":
+            raise BootstrapError(MISSING_KUBECTL_REASON)
+        if kubectl_state["status"] != "verified":
+            raise BootstrapError(KUBECTL_CONFLICT_REASON)
+        kubectl = str(kubectl_state["path"])
         env = self._command_env(kubeconfig=kubeconfig)
 
         def get(*args):
@@ -662,6 +814,8 @@ class VMDevsyBootstrap:
         receipt["tap_revision"] = snapshot.get("tap_revision")
         receipt["devsy_version"] = snapshot.get("devsy_version")
         receipt["devsy_sha256"] = snapshot.get("devsy_sha256")
+        receipt["kubectl_version"] = snapshot.get("kubectl_version")
+        receipt["kubectl_sha256"] = snapshot.get("kubectl_sha256")
         receipt["rolled_back_source_sha"] = plan["source_sha"]
         receipt["rolled_back_at_ns"] = time.time_ns()
         self._write_private(self._store() / "devsy-host-current.json",
@@ -706,6 +860,22 @@ class VMDevsyBootstrap:
             elif path.exists() or path.is_symlink():
                 raise BootstrapError("unexpected Host Devsy file remains after rollback")
 
+        if "kubectl" in files:
+            path = self._kubectl_install_path()
+            present = files.get("kubectl") is True
+            if present:
+                expected = directory / "kubectl.bin"
+                metadata = path.lstat() if path.exists() else None
+                if (metadata is None or path.is_symlink() or not stat.S_ISREG(metadata.st_mode)
+                        or metadata.st_uid != int(self.profile["uid"])
+                        or stat.S_IMODE(metadata.st_mode) != 0o755
+                        or path.read_bytes() != expected.read_bytes()
+                        or sha256(path.read_bytes())
+                        != self.policy["kubectl"]["artifact_sha256"].get(self.machine)):
+                    raise BootstrapError("restored pinned kubectl differs from its rollback receipt")
+            elif path.exists() or path.is_symlink():
+                raise BootstrapError("unexpected pinned kubectl remains after rollback")
+
         if files.get("unit"):
             service = self._service_properties()
             if (service.get("FragmentPath") != str(self.unit_path)
@@ -741,13 +911,55 @@ class VMDevsyBootstrap:
 
     def _apply(self, source_sha: str) -> dict:
         state = self._inspect()
+        backup = None
+        kubectl_staged = False
         if state["cluster"].get("ready") is not True:
-            reason = state["cluster"].get("reason") or "ROR admission preflight is unavailable"
-            raise BootstrapError("ROR admission preflight is blocked: " + reason)
+            if not self._can_stage_missing_kubectl(state):
+                reason = state["cluster"].get("reason") or "ROR admission preflight is unavailable"
+                raise BootstrapError("ROR admission preflight is blocked: " + reason)
+            backup = self._backup(state, source_sha)
+            try:
+                self._install_kubectl()
+                kubectl_staged = True
+                state = self._inspect()
+                if state["cluster"].get("ready") is not True:
+                    reason = state["cluster"].get("reason") or "ROR admission preflight is unavailable"
+                    raise BootstrapError("ROR admission preflight remains blocked: " + reason)
+            except Exception as error:
+                try:
+                    self._restore_kubectl_snapshot(backup["manifest"]["files"],
+                                                   backup["directory"])
+                except Exception:
+                    raise BootstrapError(
+                        "Devsy apply stopped before provider or Devsy changes; staged kubectl rollback failed"
+                    ) from None
+                failure = str(error) if isinstance(error, BootstrapError) else type(error).__name__
+                raise BootstrapError(
+                    "Devsy apply stopped before provider or Devsy changes: " + failure
+                    + "; staged kubectl was rolled back"
+                ) from None
         if not state["changes"]:
+            if kubectl_staged:
+                configured = self.policy["kubectl"]
+                receipt = {
+                    "schema_version": 1, "status": "applied", "source_sha": source_sha,
+                    "kubectl_version": configured["version"],
+                    "kubectl_sha256": configured["artifact_sha256"][self.machine],
+                    "kubectl_location": configured["install_location"],
+                    "backup_dir": str(backup["directory"]),
+                    "applied_at_ns": time.time_ns(),
+                }
+                self._write_private(self._store() / "devsy-host-current.json",
+                                    (json.dumps(receipt, sort_keys=True) + "\n").encode())
+                return {"operation": "apply", "changed": True,
+                        "kubectl_version": receipt["kubectl_version"],
+                        "kubectl_sha256": receipt["kubectl_sha256"],
+                        "rollback_ready": True, "provider_untouched": True,
+                        "service_untouched": True}
             return {"operation": "apply", "changed": False,
                     **self._public_plan(state)}
-        backup = self._backup(state, source_sha)
+        if backup is None:
+            backup = self._backup(state, source_sha)
         phase = "stop-service"
         try:
             if state["service"]["active"]:
@@ -789,9 +1001,12 @@ class VMDevsyBootstrap:
                 "devsy_source_revision": self.policy["devsy"]["source_revision"],
                 "devsy_version": self.policy["devsy"]["version"],
                 "devsy_sha256": self.policy["devsy"]["artifact_sha256"][self.machine],
+                "kubectl_version": self.policy["kubectl"]["version"],
+                "kubectl_sha256": self.policy["kubectl"]["artifact_sha256"][self.machine],
+                "kubectl_location": self.policy["kubectl"]["install_location"],
                 "tap_revision": self.policy["devsy"]["tap_revision"],
                 "unit_sha256": sha256(desired_unit),
-                "backup_dir": str(backup),
+                "backup_dir": str(backup["directory"]),
                 "applied_at_ns": time.time_ns(),
             }
             phase = "receipt"
@@ -802,6 +1017,8 @@ class VMDevsyBootstrap:
                     "devsy_source_revision": receipt["devsy_source_revision"],
                     "devsy_version": receipt["devsy_version"],
                     "devsy_sha256": receipt["devsy_sha256"],
+                    "kubectl_version": receipt["kubectl_version"],
+                    "kubectl_sha256": receipt["kubectl_sha256"],
                     "provider": "kubernetes", "kubernetes_context": "ror",
                     "namespace": "devsy", "unit_sha256": receipt["unit_sha256"],
                     "rollback_ready": True, "executor_untouched": True,
@@ -854,6 +1071,7 @@ class VMDevsyBootstrap:
             provider_state = None
         else:
             provider_state = devsy_state["provider"]
+        kubectl_state = self._kubectl_state()
         if include_cluster:
             try:
                 cluster = self._cluster_admission(kubeconfig)
@@ -872,6 +1090,8 @@ class VMDevsyBootstrap:
                               and binary.resolve() == brew_bin.resolve())
         if not binary_matches:
             changes.append("install-tap-devsy")
+        if kubectl_state["status"] == "missing":
+            changes.append("install-pinned-kubectl")
         if provider_state is None or provider_state["changes"]:
             changes.append("configure-ror-provider")
         props = service
@@ -891,6 +1111,7 @@ class VMDevsyBootstrap:
                                    ("FragmentPath", "User", "Group", "ExecStart")},
             "unit_sha256": sha256(current_unit) if current_unit is not None else None,
             "brew": brew_state, "formula": formula, "binary": binary,
+            "kubectl": kubectl_state,
             "devsy": devsy_state, "provider": provider_state, "cluster": cluster,
             "home": home, "state_dir": state_dir, "repo": repo,
             "kubeconfig": kubeconfig, "receipt": receipt,
@@ -907,6 +1128,8 @@ class VMDevsyBootstrap:
         service_properties = state.get("service_properties", {})
         template = current_options.get("POD_MANIFEST_TEMPLATE", "")
         formula = state.get("formula")
+        kubectl = state.get("kubectl", {})
+        kubectl_policy = self.policy["kubectl"]
         target_binary = (Path(brew["prefix"]) / "bin/devsy") if brew.get("prefix") else None
         binary_matches = bool(
             devsy and target_binary and devsy["version"] == self.policy["devsy"]["version"]
@@ -947,6 +1170,15 @@ class VMDevsyBootstrap:
                     "matches_pinned_homebrew_binary": binary_matches,
                     "source_revision": (self.policy["devsy"]["source_revision"]
                                         if binary_matches else None),
+                },
+                "kubectl": {
+                    "status": kubectl.get("status", "unknown"),
+                    "platform": self.machine,
+                    "version": kubectl_policy["version"],
+                    "sha256": kubectl.get("sha256"),
+                    "target_sha256": kubectl_policy["artifact_sha256"].get(self.machine),
+                    "install_location": kubectl_policy["install_location"],
+                    "managed_path_present": kubectl.get("managed_path_present", False),
                 },
                 "provider": ({
                     "name": current_provider["name"],
@@ -1156,6 +1388,10 @@ class VMDevsyBootstrap:
 
     def _verify_live(self, brew: Path, binary: Path, desired_unit: bytes,
                      home: Path, kubeconfig: Path) -> None:
+        kubectl = self._kubectl_state()
+        if (kubectl["status"] != "verified"
+                or kubectl["sha256"] != self.policy["kubectl"]["artifact_sha256"].get(self.machine)):
+            raise BootstrapError("running host kubectl failed pinned version/checksum verification")
         current_unit = self._current_unit()
         if current_unit != desired_unit:
             raise BootstrapError("systemd unit readback did not match the managed unit")
@@ -1213,6 +1449,7 @@ class VMDevsyBootstrap:
             "bridge_config": state_dir / "devsy-bridge/config.json",
             "receipt": store / "devsy-host-current.json",
             "devsy_config": Path(self.profile["devsy"]["config_source"]),
+            "kubectl": self._kubectl_install_path(),
         }
         present = {}
         for name, path in targets.items():
@@ -1224,6 +1461,7 @@ class VMDevsyBootstrap:
         keys = provider_options(self.policy, str(state["kubeconfig"])).keys()
         options_before = ({key: state["provider"]["options"].get(key, "") for key in keys}
                           if state["provider"] else {})
+        kubectl_state = state.get("kubectl", {})
         manifest = {
             "schema_version": 1,
             "source_sha": source_sha,
@@ -1238,6 +1476,10 @@ class VMDevsyBootstrap:
             "devsy_version": state["devsy"]["version"] if state["devsy"] else None,
             "devsy_sha256": state["devsy"]["sha256"] if state["devsy"] else None,
             "devsy_path": str(state["binary"]) if state["binary"] else None,
+            "kubectl_version": (kubectl_state.get("version")
+                                if kubectl_state.get("status") == "verified" else None),
+            "kubectl_sha256": (kubectl_state.get("sha256")
+                               if kubectl_state.get("status") == "verified" else None),
         }
         self._write_private(directory / "manifest.json",
                             (json.dumps(manifest, sort_keys=True) + "\n").encode())
@@ -1283,6 +1525,7 @@ class VMDevsyBootstrap:
                 self._write_private(path, backup.read_bytes(), mode)
             else:
                 path.unlink(missing_ok=True)
+        self._restore_kubectl_snapshot(files, directory)
         self._command(["sudo", "-n", "systemctl", "daemon-reload"], allow_failure=True)
         if files.get("unit") and manifest.get("unit_enabled"):
             self._command(["sudo", "-n", "systemctl", "enable", "codex-control-plane-devsy"], allow_failure=True)

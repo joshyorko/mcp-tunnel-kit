@@ -22,6 +22,7 @@ import zlib
 from kamal_model import render,validate_manifest
 from image_provenance import verify as verify_provenance
 from instance_profile import DEFAULT_PATH as DEFAULT_INSTANCE_PROFILE, encode as encode_instance_profile, load as load_instance_profile
+from devsy_vm_bootstrap import MISSING_KUBECTL_REASON
 ROOT=Path(__file__).resolve().parents[1]
 DEFAULT_SSH=Path.home()/'.local/share/mcp-control-plane-deploy/ssh_config'
 DEFAULT_KEY=DEFAULT_SSH.parent/'identity'
@@ -253,6 +254,43 @@ def _devsy_plan_fingerprint(plan):
         "bridge_starter", "service_active", "service_enabled")}
 
 
+def _attested_missing_kubectl_plan(plan, policy):
+    """Allow only the exact pinned-tool absence that apply can safely stage."""
+    if not isinstance(plan, dict) or not isinstance(policy, dict):
+        return False
+    configured = policy.get("kubectl")
+    observation = plan.get("observed")
+    changes = plan.get("changes")
+    if (not isinstance(configured, dict) or not isinstance(observation, dict)
+            or not isinstance(changes, list)):
+        return False
+    observed = observation.get("kubectl")
+    if not isinstance(observed, dict):
+        return False
+    architecture = observed.get("platform")
+    if architecture != "x86_64":
+        return False
+    expected_hash = configured.get("artifact_sha256", {}).get(architecture)
+    if not isinstance(expected_hash, str) or not re.fullmatch(r"[a-f0-9]{64}", expected_hash):
+        return False
+    return (
+        plan.get("ready") is False
+        and plan.get("status") == "blocked"
+        and plan.get("cluster") == {
+            "ready": False, "status": "blocked",
+            "reason": MISSING_KUBECTL_REASON,
+        }
+        and "install-pinned-kubectl" in changes
+        and observed == {
+            "status": "missing", "platform": architecture,
+            "version": configured.get("version"), "sha256": None,
+            "target_sha256": expected_hash,
+            "install_location": configured.get("install_location"),
+            "managed_path_present": False,
+        }
+    )
+
+
 def _apply_host_devsy(native_tuple, source_sha):
     payload = devsy_payload()
     before = remote("snapshot")
@@ -265,7 +303,8 @@ def _apply_host_devsy(native_tuple, source_sha):
         raise ValueError("Host Devsy apply requires the recorded healthy Kamal generation")
     previous = remote("previous")
     plan_before = remote("devsy-plan", payload)
-    if plan_before.get("ready") is not True or plan_before.get("status") == "blocked":
+    if (plan_before.get("ready") is not True or plan_before.get("status") == "blocked") and not (
+            _attested_missing_kubectl_plan(plan_before, payload["policy"])):
         raise ValueError("Host Devsy plan is blocked; no source or host changes were started")
     smoke(native_tuple, require_native=True)
     old_source_sha = before["source_sha"]

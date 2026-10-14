@@ -536,10 +536,18 @@ def test_apply_rejects_blocked_cluster_before_backing_up_or_mutating(tmp_path, m
     assert calls == []
 
 
-def test_cluster_preflight_stops_before_clusterwide_pod_inventory_without_workers(
-        tmp_path, monkeypatch):
+def test_cluster_preflight_stops_before_clusterwide_pod_inventory_without_workers(tmp_path):
     module = bootstrap_module()
     profile = private_profile(tmp_path)
+    configured = policy()
+    kubectl_artifact = b"fixture pinned kubectl"
+    configured["kubectl"]["artifact_sha256"]["aarch64"] = hashlib.sha256(
+        kubectl_artifact
+    ).hexdigest()
+    kubectl_bin = Path(profile["state_dir"]) / "bin/kubectl"
+    kubectl_bin.parent.mkdir(mode=0o700)
+    kubectl_bin.write_bytes(kubectl_artifact)
+    kubectl_bin.chmod(0o755)
     calls = []
 
     def runner(arguments, **_kwargs):
@@ -556,11 +564,10 @@ def test_cluster_preflight_stops_before_clusterwide_pod_inventory_without_worker
             raise AssertionError(f"unexpected cluster inventory query: {resource}")
         return subprocess.CompletedProcess(arguments, 0, output, "")
 
-    monkeypatch.setattr(module.shutil, "which", lambda _name, path=None: "/usr/bin/kubectl")
     bootstrap = bootstrap_class(module)(
-        profile, policy(),
+        profile, configured,
         unit_template=(ROOT / "config/codex-control-plane-devsy.service.in").read_text(),
-        system="Linux", machine="aarch64", runner=runner,
+        system="Linux", machine="aarch64", runner=runner, env={"PATH": ""},
     )
 
     with pytest.raises(module.BootstrapError, match="no ready worker node"):
@@ -588,6 +595,169 @@ def test_supported_pi_platform_and_private_credential_permissions(tmp_path):
     linked.symlink_to(credential)
     with pytest.raises(module.BootstrapError, match="ownership or mode mismatch"):
         module.validate_private_file(linked, os.getuid())
+
+
+def test_read_only_plan_represents_missing_pinned_kubectl_without_readiness(
+        tmp_path):
+    module = bootstrap_module()
+    profile = private_profile(tmp_path)
+    artifact = b"fixture kubectl v1.36.3"
+    digest = hashlib.sha256(artifact).hexdigest()
+    configured = policy()
+    configured["kubectl"]["artifact_sha256"] = {"x86_64": digest, "aarch64": digest}
+    bootstrap = bootstrap_class(module)(
+        profile, configured,
+        unit_template=(ROOT / "config/codex-control-plane-devsy.service.in").read_text(),
+        system="Linux", machine="x86_64", env={"PATH": ""},
+    )
+
+    kubectl = bootstrap._kubectl_state()
+    state = {
+        "changes": ["install-pinned-kubectl"],
+        "brew": {"present": True, "prefix": "/home/linuxbrew/.linuxbrew", "tap": None},
+        "formula": None, "binary": None, "devsy": None, "provider": None,
+        "kubectl": kubectl,
+        "cluster": {"ready": False, "status": "blocked",
+        "reason": "pinned kubectl is missing; ROR admission preflight was not run"},
+        "unit_state": "absent", "starter_state": "absent",
+        "service": {"active": False, "enabled": False},
+        "service_properties": {}, "unit_sha256": None,
+    }
+
+    plan = bootstrap._public_plan(state)
+
+    assert kubectl["status"] == "missing"
+    assert kubectl["target_sha256"] == digest
+    assert plan["ready"] is False
+    assert plan["status"] == "blocked"
+    assert plan["cluster"]["reason"] == (
+        "pinned kubectl is missing; ROR admission preflight was not run"
+    )
+    assert plan["observed"]["kubectl"] == {
+        "status": "missing", "platform": "x86_64", "version": "1.36.3",
+        "sha256": None, "target_sha256": digest,
+        "install_location": "private-devsy-state/bin/kubectl",
+        "managed_path_present": False,
+    }
+
+
+def test_kubectl_policy_matches_the_verified_cas_release_pin():
+    configured = policy()["kubectl"]
+
+    assert configured["version"] == "1.36.3"
+    assert configured["source_url"] == (
+        "https://dl.k8s.io/release/v1.36.3/bin/linux/{arch}/kubectl"
+    )
+    assert configured["artifact_sha256"]["x86_64"] == (
+        "ebbd080e7c2e275093b55915722043257eb24004363e20acb3c4d71919f88336"
+    )
+    assert configured["artifact_sha256"]["aarch64"] == (
+        "3d86f24401c41ae5a46ac50eef8865fe891d3647d324a0836f6c63757a126e62"
+    )
+    assert configured["install_location"] == "private-devsy-state/bin/kubectl"
+
+
+def test_pinned_kubectl_install_is_private_and_idempotent(tmp_path):
+    module = bootstrap_module()
+    profile = private_profile(tmp_path)
+    artifact = b"fixture pinned kubectl v1.36.3"
+    configured = policy()
+    digest = hashlib.sha256(artifact).hexdigest()
+    configured["kubectl"]["artifact_sha256"] = {"x86_64": digest, "aarch64": digest}
+    fetched = []
+    bootstrap = bootstrap_class(module)(
+        profile, configured,
+        unit_template=(ROOT / "config/codex-control-plane-devsy.service.in").read_text(),
+        system="Linux", machine="x86_64", env={"PATH": ""},
+        fetcher=lambda _url: fetched.append(artifact) or artifact,
+    )
+    target = Path(profile["state_dir"]) / "bin/kubectl"
+
+    first = bootstrap._install_kubectl()
+    second = bootstrap._install_kubectl()
+
+    assert first["status"] == second["status"] == "verified"
+    assert first["path"] == second["path"] == target
+    assert fetched == [artifact]
+    assert target.read_bytes() == artifact
+    assert target.stat().st_mode & 0o777 == 0o755
+    assert target.parent.stat().st_mode & 0o777 == 0o700
+    assert target.stat().st_uid == os.getuid()
+
+
+def test_pinned_kubectl_install_rejects_wrong_sha_without_overwriting(tmp_path):
+    module = bootstrap_module()
+    profile = private_profile(tmp_path)
+    configured = policy()
+    configured["kubectl"]["artifact_sha256"] = {
+        "x86_64": hashlib.sha256(b"expected").hexdigest(),
+        "aarch64": hashlib.sha256(b"expected").hexdigest(),
+    }
+    bootstrap = bootstrap_class(module)(
+        profile, configured,
+        unit_template=(ROOT / "config/codex-control-plane-devsy.service.in").read_text(),
+        system="Linux", machine="x86_64", env={"PATH": ""},
+        fetcher=lambda _url: b"wrong artifact",
+    )
+    target = Path(profile["state_dir"]) / "bin/kubectl"
+
+    with pytest.raises(module.BootstrapError, match="kubectl checksum mismatch"):
+        bootstrap._install_kubectl()
+    assert not target.exists()
+
+    target.parent.mkdir(mode=0o700)
+    target.write_bytes(b"untrusted existing kubectl")
+    target.chmod(0o755)
+    with pytest.raises(module.BootstrapError, match="pinned source/hash validation"):
+        bootstrap._install_kubectl()
+    assert target.read_bytes() == b"untrusted existing kubectl"
+
+
+def test_apply_rolls_back_staged_kubectl_when_ror_admission_still_blocks(
+        tmp_path, monkeypatch):
+    module = bootstrap_module()
+    profile = private_profile(tmp_path)
+    artifact = b"fixture pinned kubectl v1.36.3"
+    configured = policy()
+    digest = hashlib.sha256(artifact).hexdigest()
+    configured["kubectl"]["artifact_sha256"] = {"x86_64": digest, "aarch64": digest}
+    calls = []
+    bootstrap = bootstrap_class(module)(
+        profile, configured,
+        unit_template=(ROOT / "config/codex-control-plane-devsy.service.in").read_text(),
+        system="Linux", machine="x86_64", env={"PATH": ""},
+        runner=lambda args, **_kwargs: calls.append(args),
+        fetcher=lambda _url: artifact,
+        unit_path=tmp_path / "systemd/codex-control-plane-devsy.service",
+    )
+    target = Path(profile["state_dir"]) / "bin/kubectl"
+    missing_kubectl = bootstrap._kubectl_state()
+    initial = {
+        "changes": ["install-pinned-kubectl"],
+        "cluster": {"ready": False, "status": "blocked",
+                    "reason": module.MISSING_KUBECTL_REASON},
+        "kubectl": missing_kubectl,
+        "service": {"active": False, "enabled": False},
+        "unit_state": "absent", "provider": None,
+        "brew": {"tap": None}, "devsy": None, "binary": None,
+        "state_dir": Path(profile["state_dir"]),
+        "kubeconfig": Path(profile["devsy"]["kubeconfig_source"]),
+    }
+    blocked_after_staging = {
+        **initial,
+        "changes": [],
+        "cluster": {"ready": False, "status": "blocked",
+                    "reason": "ROR has no ready worker node matching Devsy selector"},
+        "kubectl": {**missing_kubectl, "status": "verified", "sha256": digest},
+    }
+    inspections = iter((initial, blocked_after_staging))
+    monkeypatch.setattr(bootstrap, "_inspect", lambda: next(inspections))
+
+    with pytest.raises(module.BootstrapError, match="staged kubectl was rolled back"):
+        bootstrap.apply(approved=True, source_sha="a" * 40)
+
+    assert not target.exists()
+    assert calls == []
 
 
 def test_rendered_systemd_unit_keeps_the_declared_user_and_binary_identity(tmp_path):
@@ -676,6 +846,11 @@ def test_host_bootstrap_apply_twice_converges_without_reapplying_changes(tmp_pat
     configured["devsy"]["artifact_sha256"] = {
         "aarch64": target_sha, "x86_64": amd64_sha,
     }
+    kubectl_artifact = b"fixture pinned kubectl v1.36.3"
+    kubectl_sha = hashlib.sha256(kubectl_artifact).hexdigest()
+    configured["kubectl"]["artifact_sha256"] = {
+        "aarch64": kubectl_sha, "x86_64": kubectl_sha,
+    }
     formula = (
         'class Devsy < Formula\n  version "1.23.2"\n'
         '  on_linux do\n'
@@ -700,11 +875,7 @@ def test_host_bootstrap_apply_twice_converges_without_reapplying_changes(tmp_pat
     systemd = tmp_path / "systemd"
     systemd.mkdir(mode=0o700)
     unit_path = systemd / "codex-control-plane-devsy.service"
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir(mode=0o700)
-    kubectl_bin = fake_bin / "kubectl"
-    kubectl_bin.write_text("fixture kubectl")
-    kubectl_bin.chmod(0o755)
+    kubectl_bin = Path(profile["state_dir"]) / "bin/kubectl"
     kubeconfig = Path(profile["devsy"]["kubeconfig_source"])
     old_options = dict(configured["provider"]["legacy_options"])
     old_options["KUBERNETES_CONFIG"] = ""
@@ -800,20 +971,33 @@ def test_host_bootstrap_apply_twice_converges_without_reapplying_changes(tmp_pat
             return subprocess.CompletedProcess(args, 0, output + "\n", "")
 
     runner = FixtureRunner()
+    fetched = []
     bootstrap = bootstrap_class(module)(
         profile, configured,
         unit_template=(ROOT / "config/codex-control-plane-devsy.service.in").read_text(),
-        runner=runner, fetcher=lambda _url: formula,
+        runner=runner,
+        fetcher=lambda url: (fetched.append(url) or
+                             (kubectl_artifact if url.endswith("/kubectl") else formula)),
         system="Linux", machine="aarch64", unit_path=unit_path,
-            env={"PATH": str(fake_bin)},
+        env={"PATH": ""},
         process_probe=lambda _config, _receipt: True, health_probe=lambda _config: True,
     )
     planned = bootstrap.plan()
-    assert planned["status"] == "changes-required"
+    assert planned["ready"] is False
+    assert planned["status"] == "blocked"
+    assert planned["observed"]["kubectl"]["status"] == "missing"
+    assert planned["observed"]["kubectl"]["target_sha256"] == kubectl_sha
+    assert "install-pinned-kubectl" in planned["changes"]
     assert not (Path(profile["state_dir"]) / "deployment").exists()
     first = bootstrap.apply(approved=True, source_sha="a" * 40)
     assert first["changed"] is True
     assert first["devsy_version"] == "1.23.2"
+    assert first["kubectl_version"] == "1.36.3"
+    assert first["kubectl_sha256"] == kubectl_sha
+    assert kubectl_bin.read_bytes() == kubectl_artifact
+    assert fetched.count(
+        "https://dl.k8s.io/release/v1.36.3/bin/linux/arm64/kubectl"
+    ) == 1
     assert unit_path.is_file()
     assert runner.options["NODE_SELECTOR"] == "node-role.kubernetes.io/worker=true"
     assert runner.options["KUBERNETES_CONTEXT"] == "ror"
@@ -832,3 +1016,8 @@ def test_host_bootstrap_apply_twice_converges_without_reapplying_changes(tmp_pat
     )
     assert second["changed"] is False
     assert mutations_after_second == mutations_before_second
+
+    rolled_back = bootstrap.rollback()
+    assert rolled_back["restored"] is True
+    assert not kubectl_bin.exists()
+    assert runner.options["NODE_SELECTOR"] == ""
