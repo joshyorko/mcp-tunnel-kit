@@ -753,6 +753,17 @@ def native_thread_read(client, session, supplied):
     })
     if error:
         return {"status": "FAIL", "error_code": error}
+    if not isinstance(snapshot, dict):
+        return {"status": "FAIL", "error_code": "CODEX_RESPONSE_INVALID"}
+    if "error" in snapshot and "result" in snapshot:
+        nested_error = snapshot.get("error")
+        if nested_error:
+            if nested_error == "Stored thread id/cwd does not match the requested workstream":
+                return {"status": "FAIL", "error_code": "THREAD_WORKSTREAM_MISMATCH"}
+            return {"status": "FAIL", "error_code": "CODEX_READ_FAILED"}
+        snapshot = snapshot.get("result")
+    if not isinstance(snapshot, dict):
+        return {"status": "FAIL", "error_code": "CODEX_RESPONSE_INVALID"}
     if (snapshot.get("target") != identity["target"]
             or snapshot.get("cwd") != identity["cwd"]
             or snapshot.get("thread_id") != identity["thread_id"]):
