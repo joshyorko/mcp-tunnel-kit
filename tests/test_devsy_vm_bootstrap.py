@@ -282,6 +282,183 @@ def test_provider_identity_drift_fails_while_approved_resource_drift_is_reported
         )
 
 
+def test_devsy_plan_reports_observed_state_without_private_config_contents(tmp_path):
+    module = bootstrap_module()
+    profile = private_profile(tmp_path)
+    bootstrap = bootstrap_class(module)(
+        profile, policy(),
+        unit_template=(ROOT / "config/codex-control-plane-devsy.service.in").read_text(),
+        system="Linux", machine="aarch64",
+    )
+    template = "spec:\n  privateFixture: do-not-publish\n"
+    formula = b"pinned formula fixture"
+    kubeconfig = "/private/fixture/ror-kubeconfig"
+    binary = "/home/operator/.local/bin/devsy"
+    state = {
+        "changes": ["install-tap-devsy", "configure-ror-provider"],
+        "brew": {"present": True, "prefix": "/home/linuxbrew/.linuxbrew",
+                 "tap": {"present": True, "revision": "b" * 40}},
+        "formula": formula,
+        "devsy": {"version": "1.23.0", "sha256": "a" * 64, "path": binary},
+        "binary": Path(binary),
+        "provider": {"name": "kubernetes", "default": True, "changes": ["RESOURCES"],
+                     "options": {
+                         "KUBERNETES_CONTEXT": "ror", "KUBERNETES_NAMESPACE": "devsy",
+                         "CREATE_NAMESPACE": "true", "NODE_SELECTOR": "",
+                         "RESOURCES": "requests.cpu=8,requests.memory=12Gi,limits.cpu=8,limits.memory=12Gi",
+                         "KUBERNETES_CONFIG": kubeconfig,
+                         "POD_MANIFEST_TEMPLATE": template,
+                     }},
+        "cluster": {"context": "ror", "namespace": "devsy", "ready_worker_nodes": 0},
+        "unit_state": "legacy", "unit_sha256": "c" * 64, "starter_state": "managed",
+        "service": {"active": True, "enabled": True},
+        "service_properties": {
+            "FragmentPath": "/etc/systemd/system/codex-control-plane-devsy.service",
+            "User": "operator", "Group": "operator",
+            "ExecStart": "/usr/bin/python3 /home/operator/state/start-host-devsy.py",
+        },
+    }
+
+    plan = bootstrap._public_plan(state)
+
+    assert plan["source_provenance"] == {
+        "repository": "devsy-org/devsy", "revision": "0f248a8502ca609e494ec58064556342e30441cb",
+        "release": "devsy-1.23.2",
+        "artifact_sha256": "872cd988be2f5c37dc92da684c92fb6e9dd56153963366c1bdb143b78f816ae2",
+    }
+    observed = plan["observed"]
+    assert observed["tap_current_revision"] == "b" * 40
+    assert observed["formula_sha256"] == module.sha256(formula)
+    assert observed["devsy"] == {
+        "binary": binary, "version": "1.23.0", "sha256": "a" * 64,
+        "matches_pinned_homebrew_binary": False, "source_revision": None,
+    }
+    assert observed["provider"] == {
+        "name": "kubernetes", "default": True, "context": "ror", "namespace": "devsy",
+        "create_namespace": "true", "node_selector": "",
+        "resources": "requests.cpu=8,requests.memory=12Gi,limits.cpu=8,limits.memory=12Gi",
+        "kubeconfig_configured": True,
+        "pod_manifest_template_sha256": module.sha256(template.encode()),
+    }
+    assert observed["systemd"] == {
+        "unit_state": "legacy", "unit_sha256": "c" * 64,
+        "bridge_starter": "managed", "active": True,
+        "enabled": True, "fragment_path": "/etc/systemd/system/codex-control-plane-devsy.service",
+        "user": "operator", "group": "operator",
+        "exec_start": "/usr/bin/python3 /home/operator/state/start-host-devsy.py",
+    }
+    assert plan["provider"]["requests"] == {"cpu": "1", "memory": "1Gi"}
+    assert plan["provider"]["limits"] == {"cpu": "2", "memory": "4Gi"}
+    assert kubeconfig not in json.dumps(plan)
+    assert template not in json.dumps(plan)
+
+
+def test_read_only_plan_reports_cluster_admission_blocker_with_observed_provider(
+        tmp_path, monkeypatch):
+    module = bootstrap_module()
+    profile = private_profile(tmp_path)
+    bootstrap = bootstrap_class(module)(
+        profile, policy(),
+        unit_template=(ROOT / "config/codex-control-plane-devsy.service.in").read_text(),
+        system="Linux", machine="aarch64",
+    )
+    home = Path(profile["home"])
+    state_dir = Path(profile["state_dir"])
+    repo = Path(profile["repo_dir"])
+    kubeconfig = Path(profile["devsy"]["kubeconfig_source"])
+    brew = Path("/home/linuxbrew/.linuxbrew/bin/brew")
+    binary = Path("/home/linuxbrew/.linuxbrew/bin/devsy")
+    options = module.provider_options(policy(), str(kubeconfig))
+    provider = {"name": "kubernetes", "default": True, "options": options, "changes": []}
+    devsy = {"version": "1.23.2", "sha256": policy()["devsy"]["artifact_sha256"]["aarch64"],
+             "path": binary, "provider": provider}
+    monkeypatch.setattr(bootstrap, "_validate_inputs", lambda: (home, state_dir, repo, kubeconfig))
+    monkeypatch.setattr(bootstrap, "_receipt", lambda: None)
+    monkeypatch.setattr(bootstrap, "_homebrew_state", lambda _receipt: {
+        "present": True, "brew": str(brew), "prefix": str(brew.parent.parent),
+        "tap": {"present": True, "revision": policy()["devsy"]["tap_revision"]},
+    })
+    monkeypatch.setattr(bootstrap, "_formula_bytes", lambda: b"verified formula")
+    monkeypatch.setattr(bootstrap, "_current_unit", lambda: None)
+    monkeypatch.setattr(bootstrap, "_desired_unit_from_path", lambda *_args: b"unit")
+    monkeypatch.setattr(bootstrap, "_starter_state", lambda _state_dir: "managed")
+    monkeypatch.setattr(bootstrap, "_provider_binary", lambda *_args: (binary, devsy))
+
+    def reject_cluster(_kubeconfig):
+        raise module.BootstrapError("ROR has no ready worker node matching Devsy selector")
+
+    monkeypatch.setattr(bootstrap, "_cluster_admission", reject_cluster)
+
+    plan = bootstrap.plan()
+
+    assert plan["ready"] is False
+    assert plan["status"] == "blocked"
+    assert plan["cluster"] == {
+        "ready": False, "status": "blocked",
+        "reason": "ROR has no ready worker node matching Devsy selector",
+    }
+    assert plan["observed"]["provider"]["context"] == "ror"
+    assert plan["observed"]["provider"]["resources"] == options["RESOURCES"]
+
+
+def test_apply_rejects_blocked_cluster_before_backing_up_or_mutating(tmp_path, monkeypatch):
+    module = bootstrap_module()
+    calls = []
+    bootstrap = bootstrap_class(module)(
+        private_profile(tmp_path), policy(),
+        unit_template=(ROOT / "config/codex-control-plane-devsy.service.in").read_text(),
+        system="Linux", machine="aarch64", runner=lambda *args, **kwargs: calls.append(args),
+    )
+    monkeypatch.setattr(bootstrap, "_inspect", lambda: {
+        "changes": [], "cluster": {"ready": False, "status": "blocked",
+                                   "reason": "ROR has no eligible worker node"},
+    })
+    monkeypatch.setattr(bootstrap, "_public_plan", lambda _state: {"status": "blocked"})
+    backups = []
+    monkeypatch.setattr(bootstrap, "_backup", lambda *_args: backups.append(True))
+
+    with pytest.raises(module.BootstrapError, match="ROR admission preflight is blocked"):
+        bootstrap.apply(approved=True, source_sha="a" * 40)
+
+    assert backups == []
+    assert calls == []
+
+
+def test_cluster_preflight_stops_before_clusterwide_pod_inventory_without_workers(
+        tmp_path, monkeypatch):
+    module = bootstrap_module()
+    profile = private_profile(tmp_path)
+    calls = []
+
+    def runner(arguments, **_kwargs):
+        calls.append(arguments)
+        get_index = arguments.index("get")
+        resource = arguments[get_index + 1]
+        if resource == "namespace":
+            output = json.dumps({"metadata": {"name": "devsy"}})
+        elif resource == "resourcequota,limitrange":
+            output = json.dumps({"items": []})
+        elif resource == "nodes":
+            output = json.dumps({"items": []})
+        else:
+            raise AssertionError(f"unexpected cluster inventory query: {resource}")
+        return subprocess.CompletedProcess(arguments, 0, output, "")
+
+    monkeypatch.setattr(module.shutil, "which", lambda _name, path=None: "/usr/bin/kubectl")
+    bootstrap = bootstrap_class(module)(
+        profile, policy(),
+        unit_template=(ROOT / "config/codex-control-plane-devsy.service.in").read_text(),
+        system="Linux", machine="aarch64", runner=runner,
+    )
+
+    with pytest.raises(module.BootstrapError, match="no ready worker node"):
+        bootstrap._cluster_admission(Path(profile["devsy"]["kubeconfig_source"]))
+
+    assert [args[args.index("get") + 1] for args in calls] == [
+        "namespace", "resourcequota,limitrange", "nodes",
+    ]
+
+
 def test_supported_pi_platform_and_private_credential_permissions(tmp_path):
     module = bootstrap_module()
     module.validate_platform("Linux", "aarch64")

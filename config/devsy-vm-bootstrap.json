@@ -8,7 +8,9 @@
   },
   "devsy": {
     "version": "1.23.2",
+    "source_repository": "devsy-org/devsy",
     "source_revision": "0f248a8502ca609e494ec58064556342e30441cb",
+    "release_tag": "devsy-1.23.2",
     "tap": "joshyorko/tools",
     "tap_repository": "https://github.com/joshyorko/homebrew-tools.git",
     "tap_revision": "141faa0977de2c2d840ee847ddfec08da9d5a974",

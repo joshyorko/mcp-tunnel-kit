@@ -265,6 +265,8 @@ def _apply_host_devsy(native_tuple, source_sha):
         raise ValueError("Host Devsy apply requires the recorded healthy Kamal generation")
     previous = remote("previous")
     plan_before = remote("devsy-plan", payload)
+    if plan_before.get("ready") is not True or plan_before.get("status") == "blocked":
+        raise ValueError("Host Devsy plan is blocked; no source or host changes were started")
     smoke(native_tuple, require_native=True)
     old_source_sha = before["source_sha"]
     changed = False

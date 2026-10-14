@@ -28,7 +28,10 @@ Use GitHub Actions → **Deploy VM control plane** on `main`, on the existing
 - `devsy-check` runs a read-only plan. It reports the pinned Homebrew/tap/Devsy
   provenance, existing systemd identity, ROR context/namespace, worker selector,
   and main/init CPU and memory requests/limits. A `changes-required` result is a
-  plan, not an apply.
+  plan, not an apply. A `blocked` result reports an unmet cluster-admission gate
+  and prevents apply. The receipt separates observed state from target policy and
+  includes the active binary/version/hash, current provider resource options,
+  and systemd identity; it omits kubeconfig paths and pod-template contents.
 - `preflight` also reports this Devsy plan. Its native Codex status is separate;
   a stale or missing native thread cannot suppress the non-mutating Devsy plan.
 - `devsy-apply` requires the separate **Approve host Devsy apply** checkbox and

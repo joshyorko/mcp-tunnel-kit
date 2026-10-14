@@ -237,6 +237,50 @@ def test_devsy_apply_requires_explicit_host_apply_approval_before_vm_reads():
     assert calls == []
 
 
+def test_devsy_apply_stops_on_blocked_plan_before_native_read_or_source_sync(tmp_path):
+    before = generation()
+    before.update(authority="kamal", tunnel_count=1, source_sha="b" * 40)
+    current = {**before, "publication_proof": {}}
+    calls = []
+    smoke_calls = []
+    sync = []
+
+    def remote(action, data=None):
+        calls.append(action)
+        if action == "snapshot":
+            return before
+        if action == "lifecycle-check":
+            return {"healthy": True}
+        if action == "current":
+            return current
+        if action == "previous":
+            return None
+        if action == "devsy-plan":
+            return {"ready": False, "status": "blocked",
+                    "cluster": {"reason": "ROR has no eligible worker node"}}
+        raise AssertionError(f"unexpected VM action after blocked plan: {action}")
+
+    instance = json.loads((ROOT / "config/instance.example.json").read_text())
+    previous = (d.INSTANCE, d.HOST, d.VMROOT, d.VM_HOST_PIN)
+    d.configure_instance(instance)
+    native = {"target": "local", "cwd": "/home/operator/worktree/mcp-tunnel-kit",
+              "thread_id": "12345678-1234-5678-9abc-def012345678"}
+    try:
+        with patch.object(d, "trusted_context"), patch.object(d, "lock", return_value=nullcontext()), \
+             patch.object(d, "remote", side_effect=remote), \
+             patch.object(d, "smoke", side_effect=lambda *_args, **_kwargs: smoke_calls.append(True)), \
+             patch.object(d, "sync_source", side_effect=lambda sha: sync.append(sha)), \
+             patch.dict(os.environ, {"GITHUB_SHA": "a" * 40}):
+            with pytest.raises(ValueError, match="Host Devsy plan is blocked"):
+                d.execute(args("devsy-apply", host_approve=True, native=native))
+    finally:
+        d.INSTANCE, d.HOST, d.VMROOT, d.VM_HOST_PIN = previous
+
+    assert calls == ["snapshot", "lifecycle-check", "current", "previous", "devsy-plan"]
+    assert smoke_calls == []
+    assert sync == []
+
+
 def test_devsy_rollback_requires_explicit_approval_before_vm_reads():
     calls = []
 

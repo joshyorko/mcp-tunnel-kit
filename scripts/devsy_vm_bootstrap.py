@@ -532,7 +532,6 @@ class VMDevsyBootstrap:
         selector = self.policy["provider"]["node_selector"]
         selector_text = ",".join(f"{k}={v}" for k, v in sorted(selector.items()))
         nodes = get("get", "nodes", "-l", selector_text)
-        pods = get("get", "pods", "-A")
         selected = {}
         for node in nodes.get("items", []):
             conditions = node.get("status", {}).get("conditions", [])
@@ -547,6 +546,7 @@ class VMDevsyBootstrap:
                               "memory": _memory_bytes(allocatable["memory"])}
         if not selected:
             raise BootstrapError("ROR has no ready worker node matching the Devsy selector")
+        pods = get("get", "pods", "-A")
         used = {name: {"cpu": 0, "memory": 0} for name in selected}
         for pod in pods.get("items", []):
             node = pod.get("spec", {}).get("nodeName")
@@ -570,9 +570,10 @@ class VMDevsyBootstrap:
                                .get("storageclass.kubernetes.io/is-default-class") == "true")]
         if default_classes != ["local-path"]:
             raise BootstrapError("ROR default storage class drift; PVC admission needs review")
-        return {"context": "ror", "namespace": "devsy", "ready_worker_nodes": len(selected),
-                "fitting_worker_nodes": len(fitting), "default_storage_class": "local-path",
-                "resource_quota": "none", "limit_range": "none"}
+        return {"ready": True, "status": "ready", "context": "ror", "namespace": "devsy",
+                "ready_worker_nodes": len(selected), "fitting_worker_nodes": len(fitting),
+                "default_storage_class": "local-path", "resource_quota": "none",
+                "limit_range": "none"}
 
     def apply(self, *, approved: bool, source_sha: str) -> dict:
         if approved is not True:
@@ -586,6 +587,9 @@ class VMDevsyBootstrap:
 
     def assert_current(self) -> dict:
         state = self._inspect()
+        if state["cluster"].get("ready") is not True:
+            reason = state["cluster"].get("reason") or "ROR admission preflight is unavailable"
+            raise BootstrapError("ROR admission preflight is blocked: " + reason)
         if state["changes"]:
             raise BootstrapError("Host Devsy drift detected; use protected plan and explicit apply")
         return self._public_plan(state)
@@ -695,6 +699,9 @@ class VMDevsyBootstrap:
 
     def _apply(self, source_sha: str) -> dict:
         state = self._inspect()
+        if state["cluster"].get("ready") is not True:
+            reason = state["cluster"].get("reason") or "ROR admission preflight is unavailable"
+            raise BootstrapError("ROR admission preflight is blocked: " + reason)
         if not state["changes"]:
             return {"operation": "apply", "changed": False,
                     **self._public_plan(state)}
@@ -736,6 +743,8 @@ class VMDevsyBootstrap:
                 "schema_version": 1,
                 "status": "applied",
                 "source_sha": source_sha,
+                "devsy_source_repository": self.policy["devsy"]["source_repository"],
+                "devsy_source_revision": self.policy["devsy"]["source_revision"],
                 "devsy_version": self.policy["devsy"]["version"],
                 "devsy_sha256": self.policy["devsy"]["artifact_sha256"][self.machine],
                 "tap_revision": self.policy["devsy"]["tap_revision"],
@@ -747,7 +756,10 @@ class VMDevsyBootstrap:
             self._write_private(self._store() / "devsy-host-current.json",
                                 (json.dumps(receipt, sort_keys=True) + "\n").encode())
             return {"operation": "apply", "changed": True,
+                    "devsy_source_repository": receipt["devsy_source_repository"],
+                    "devsy_source_revision": receipt["devsy_source_revision"],
                     "devsy_version": receipt["devsy_version"],
+                    "devsy_sha256": receipt["devsy_sha256"],
                     "provider": "kubernetes", "kubernetes_context": "ror",
                     "namespace": "devsy", "unit_sha256": receipt["unit_sha256"],
                     "rollback_ready": True, "executor_untouched": True,
@@ -800,8 +812,13 @@ class VMDevsyBootstrap:
             provider_state = None
         else:
             provider_state = devsy_state["provider"]
-        cluster = (self._cluster_admission(kubeconfig) if include_cluster
-                   else {"status": "not-queried-for-rollback"})
+        if include_cluster:
+            try:
+                cluster = self._cluster_admission(kubeconfig)
+            except BootstrapError as error:
+                cluster = {"ready": False, "status": "blocked", "reason": str(error)}
+        else:
+            cluster = {"status": "not-queried-for-rollback"}
         changes = []
         if not brew_state["present"]:
             changes.append("install-homebrew")
@@ -828,6 +845,9 @@ class VMDevsyBootstrap:
             "changes": sorted(set(changes)), "unit_state": unit_state,
             "starter_state": starter,
             "desired_unit": desired_unit, "service": {"active": active, "enabled": enabled},
+            "service_properties": {name: service.get(name) for name in
+                                   ("FragmentPath", "User", "Group", "ExecStart")},
+            "unit_sha256": sha256(current_unit) if current_unit is not None else None,
             "brew": brew_state, "formula": formula, "binary": binary,
             "devsy": devsy_state, "provider": provider_state, "cluster": cluster,
             "home": home, "state_dir": state_dir, "repo": repo,
@@ -836,14 +856,38 @@ class VMDevsyBootstrap:
 
     def _public_plan(self, state: dict) -> dict:
         provider = self.policy["provider"]
+        brew = state["brew"]
+        tap = brew.get("tap")
+        devsy = state["devsy"]
+        binary = state["binary"]
+        current_provider = state["provider"]
+        current_options = current_provider.get("options", {}) if current_provider else {}
+        service_properties = state.get("service_properties", {})
+        template = current_options.get("POD_MANIFEST_TEMPLATE", "")
+        formula = state.get("formula")
+        target_binary = (Path(brew["prefix"]) / "bin/devsy") if brew.get("prefix") else None
+        binary_matches = bool(
+            devsy and target_binary and devsy["version"] == self.policy["devsy"]["version"]
+            and devsy["sha256"] == self.policy["devsy"]["artifact_sha256"].get(self.machine)
+            and Path(binary).resolve() == target_binary.resolve()
+        )
+        cluster_ready = state["cluster"].get("ready") is True
+        status = ("blocked" if not cluster_ready else
+                  "current" if not state["changes"] else "changes-required")
         return {
-            "ready": True,
-            "status": "current" if not state["changes"] else "changes-required",
+            "ready": cluster_ready,
+            "status": status,
             "changes": state["changes"],
-            "homebrew_present": state["brew"]["present"],
+            "homebrew_present": brew["present"],
             "tap_revision": self.policy["devsy"]["tap_revision"],
-            "devsy_current_version": state["devsy"]["version"] if state["devsy"] else None,
+            "devsy_current_version": devsy["version"] if devsy else None,
             "devsy_target_version": self.policy["devsy"]["version"],
+            "source_provenance": {
+                "repository": self.policy["devsy"]["source_repository"],
+                "revision": self.policy["devsy"]["source_revision"],
+                "release": self.policy["devsy"]["release_tag"],
+                "artifact_sha256": self.policy["devsy"]["artifact_sha256"].get(self.machine),
+            },
             "provider": {"name": "kubernetes", "default": True,
                          "kubernetes_context": "ror", "namespace": "devsy",
                          "requests": provider["resources"]["requests"],
@@ -851,6 +895,40 @@ class VMDevsyBootstrap:
                          "init_requests": provider["init_resources"]["requests"],
                          "init_limits": provider["init_resources"]["limits"],
                          "node_selector": provider["node_selector"]},
+            "observed": {
+                "tap_current_revision": tap.get("revision") if tap else None,
+                "formula_sha256": sha256(formula) if isinstance(formula, bytes) else None,
+                "devsy": {
+                    "binary": str(binary) if binary else None,
+                    "version": devsy["version"] if devsy else None,
+                    "sha256": devsy["sha256"] if devsy else None,
+                    "matches_pinned_homebrew_binary": binary_matches,
+                    "source_revision": (self.policy["devsy"]["source_revision"]
+                                        if binary_matches else None),
+                },
+                "provider": ({
+                    "name": current_provider["name"],
+                    "default": current_provider["default"],
+                    "context": current_options.get("KUBERNETES_CONTEXT"),
+                    "namespace": current_options.get("KUBERNETES_NAMESPACE"),
+                    "create_namespace": current_options.get("CREATE_NAMESPACE"),
+                    "node_selector": current_options.get("NODE_SELECTOR"),
+                    "resources": current_options.get("RESOURCES"),
+                    "kubeconfig_configured": bool(current_options.get("KUBERNETES_CONFIG")),
+                    "pod_manifest_template_sha256": sha256(template.encode()) if template else None,
+                } if current_provider else None),
+                "systemd": {
+                    "unit_state": state["unit_state"],
+                    "unit_sha256": state.get("unit_sha256"),
+                    "bridge_starter": state["starter_state"],
+                    "active": state["service"]["active"],
+                    "enabled": state["service"]["enabled"],
+                    "fragment_path": service_properties.get("FragmentPath"),
+                    "user": service_properties.get("User"),
+                    "group": service_properties.get("Group"),
+                    "exec_start": service_properties.get("ExecStart"),
+                },
+            },
             "cluster": state["cluster"],
             "systemd_unit": state["unit_state"],
             "bridge_starter": state["starter_state"],
