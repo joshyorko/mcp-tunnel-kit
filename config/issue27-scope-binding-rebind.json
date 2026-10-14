@@ -1,0 +1,9 @@
+{
+  "approval_id": "issue27-host-apply-38637912059",
+  "scope_before_sha256": "d56661ed51f07525c07d8add28f86e814fa854e6b22ed6cb7bc3aff88e58f0aa",
+  "provider_before_sha256": "1982ad2e54266eda8f506e3107ae8ff0d323f365cf7b593a0f8829c10200e18a",
+  "provider_after_sha256": "fc4d012f3d67e877414be194f03ab839e9744879bfdcc8c5d84e139b74562763",
+  "host_apply_receipt_sha256": "13cd234ae058aa0fcb7a95f3a43e14e05a662e748dc05bd23f3e79d92337a7c8",
+  "host_apply_source_sha": "61e26875306bbd7c9e4facd5cccbdc2e7dae0c99",
+  "cas_mapping_sha256": "53eba0473c1bf05f0e5ecb4e107b4f57006a3cf8999bb3087f4623d76cda31d8"
+}
