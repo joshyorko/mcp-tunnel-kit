@@ -267,8 +267,51 @@ def _host_devsy_apply_failure_code(error):
     boundary = "Deployment boundary refused: "
     if boundary in detail:
         detail = detail.split(boundary, 1)[1]
-    if detail.startswith("Devsy apply stopped before provider or Devsy changes:"):
-        return "preflight-blocked"
+    if detail == (
+            "Devsy apply stopped before provider or Devsy changes; "
+            "staged kubectl rollback failed"):
+        return "kubectl-staging:rollback-failed"
+
+    preflight_prefixes = (
+        "Devsy apply stopped before provider or Devsy changes: ",
+        "ROR admission preflight is blocked: ",
+    )
+    preflight_reason = None
+    for prefix in preflight_prefixes:
+        if detail.startswith(prefix):
+            preflight_reason = detail[len(prefix):]
+            break
+    if preflight_reason is not None:
+        if preflight_reason.startswith("ROR admission preflight remains blocked: "):
+            preflight_reason = preflight_reason[
+                len("ROR admission preflight remains blocked: "):]
+        rollback_suffix = "; staged kubectl was rolled back"
+        if preflight_reason.endswith(rollback_suffix):
+            preflight_reason = preflight_reason[:-len(rollback_suffix)]
+        preflight_codes = {
+            "pinned Kubernetes kubectl source is unavailable": "kubectl-download:source-unavailable",
+            "pinned Kubernetes kubectl download timed out": "kubectl-download:timeout",
+            "pinned kubectl source URL is invalid": "kubectl-download:source-policy-invalid",
+            "pinned kubectl does not support this Linux architecture": "kubectl-download:architecture-unsupported",
+            "pinned Kubernetes kubectl exceeds its size limit": "kubectl-artifact:size-limit",
+            "pinned Kubernetes kubectl checksum mismatch": "kubectl-artifact:checksum-mismatch",
+            "kubectl candidate failed pinned source/hash validation": "kubectl-path:untrusted-existing",
+            "installed pinned kubectl failed source/hash verification": "kubectl-path:verification-failed",
+            "pinned kubectl is missing; ROR admission preflight was not run": "kubectl-path:missing-after-staging",
+            "ROR Kubernetes authentication failed": "ror-kubectl:authentication",
+            "ROR Kubernetes authorization failed": "ror-kubectl:authorization",
+            "ROR Kubernetes connection failed": "ror-kubectl:connection",
+            "ROR Kubernetes connection timed out": "ror-kubectl:connection-timeout",
+            "ROR Kubernetes admission request rejected": "ror-admission:rejected",
+            "ROR Kubernetes command failed; raw output withheld": "ror-kubectl:unclassified",
+            "authorized ROR namespace devsy is unavailable": "ror-admission:namespace-unavailable",
+            "ROR devsy quota or LimitRange changed; resource admission needs review": "ror-admission:constraints-changed",
+            "ROR has no ready worker node matching the Devsy selector": "ror-admission:no-ready-worker",
+            "ROR worker allocatable capacity cannot admit the bounded Devsy request": "ror-admission:capacity-insufficient",
+            "ROR default storage class drift; PVC admission needs review": "ror-admission:storage-class-drift",
+            "ROR returned invalid Kubernetes inventory": "ror-admission:invalid-inventory",
+        }
+        return preflight_codes.get(preflight_reason, "preflight:unclassified")
 
     marker = "Devsy apply failed at "
     if not detail.startswith(marker):
