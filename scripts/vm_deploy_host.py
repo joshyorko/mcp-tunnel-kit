@@ -704,16 +704,130 @@ def backup_cas():
     return {'cas_backup':str(directory),'executor_untouched':True}
 
 
-def smoke():
+def _codex_read_payload(value):
+    if not isinstance(value, dict) or set(value) != {"target", "cwd", "thread_id"}:
+        return None
+    target, cwd, thread_id = value["target"], value["cwd"], value["thread_id"]
+    if target != "local" or not isinstance(cwd, str) or not isinstance(thread_id, str):
+        return None
+    path = PurePosixPath(cwd)
+    if (not path.is_absolute() or ".." in path.parts or str(path) != cwd
+            or any(ord(char) < 32 for char in cwd)
+            or not re.fullmatch(r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}", thread_id)):
+        return None
+    return {"target": target, "cwd": cwd, "thread_id": thread_id}
+
+
+def _codex_tool(client, session, name, arguments):
+    code = "return await tools.codex." + name + "(" + json.dumps(arguments) + ");"
+    try:
+        envelope = client.execution(session.call("tools/call", {
+            "name": "execute", "arguments": {"code": code},
+        }))
+    except Exception:
+        return None, "EXECUTOR_UNAVAILABLE"
+    if (envelope.get("status") != "completed"
+            or not envelope.get("execution", {}).get("ok")):
+        return None, "EXECUTOR_CALL_FAILED"
+    value = envelope["execution"].get("value")
+    structured = value.get("structuredContent") if isinstance(value, dict) else None
+    if not isinstance(structured, dict):
+        return None, "CODEX_RESPONSE_INVALID"
+    error = structured.get("error")
+    if error:
+        if error == "Stored thread id/cwd does not match the requested workstream":
+            return None, "THREAD_WORKSTREAM_MISMATCH"
+        return None, "CODEX_READ_FAILED"
+    result = structured.get("result")
+    if not isinstance(result, dict):
+        return None, "CODEX_RESPONSE_INVALID"
+    return result, None
+
+
+def native_thread_read(client, session, supplied):
+    identity = _codex_read_payload(supplied)
+    if identity is None:
+        return {"status": "FAIL", "error_code": "NATIVE_TUPLE_INVALID"}
+    targets, error = _codex_tool(client, session, "list_targets", {})
+    if error:
+        return {"status": "FAIL", "error_code": error}
+    names = targets.get("targets", [])
+    names = [row if isinstance(row, str) else row.get("name")
+             for row in names if isinstance(row, (str, dict))]
+    if identity["target"] not in names:
+        return {"status": "FAIL", "error_code": "NATIVE_TARGET_UNAVAILABLE"}
+
+    discovered, error = _codex_tool(client, session, "discover_threads", {
+        "payload": {"target": identity["target"], "cwd": identity["cwd"], "limit": 100},
+    })
+    if error:
+        return {"status": "FAIL", "error_code": error}
+    rows = discovered.get("result", {}).get("data", [])
+    exact = next((row for row in rows if isinstance(row, dict)
+                  and row.get("id") == identity["thread_id"]
+                  and row.get("cwd") == identity["cwd"]), None)
+    if exact is None:
+        return {"status": "FAIL", "error_code": "NATIVE_THREAD_NOT_DISCOVERED"}
+
+    read, error = _codex_tool(client, session, "read_thread", {
+        "payload": {**identity, "include_turns": False},
+    })
+    if error:
+        return {"status": "FAIL", "error_code": error}
+    connection = read.get("connection", {})
+    thread = read.get("result", {}).get("thread", {})
+    if (connection.get("target") != identity["target"]
+            or thread.get("id") != identity["thread_id"]
+            or thread.get("cwd") != identity["cwd"]):
+        return {"status": "FAIL", "error_code": "NATIVE_THREAD_IDENTITY_MISMATCH"}
+    return {"status": "PASS", "target": identity["target"]}
+
+
+def smoke(request=None):
+    request = request or {}
+    if not isinstance(request, dict):
+        raise ValueError("Smoke request is invalid")
+    require_native = request.get("require_native") is True
     os.environ.update(EXECUTOR_URL='http://127.0.0.1:4312',EXECUTOR_PAT_FILE=str(STATE/'secrets/executor-pat'))
     sys.path.insert(0,str(ROOT/'scripts'));import compose_control as c
     _,m=c.executor_session();c.verify_compact(m)
-    payload={'target':'local','cwd':str(ROOT),'thread_id':'01a12bba-9641-79c1-9b29-93136f976fa6','include_turns':False}
-    r=c.execution(m.call('tools/call',{'name':'execute','arguments':{'code':'return await tools.codex.read_thread('+json.dumps({'payload':payload})+');'}}))
-    v=r['execution']['value']['structuredContent']
-    if not r['execution']['ok'] or v.get('error') is not None: raise ValueError('Native exact-thread read failed')
     profile=json.loads(private(STATE/'bootstrap/devsy-integration.json'))['profile'];c.read_devsy(m,profile)
-    return {'catalog':'PASS','native_read':'PASS','devsy_reads':'PASS'}
+    supplied=request.get("native_codex")
+    if supplied is None:
+        native={"status":"UNCONFIGURED"}
+    else:
+        native=native_thread_read(c,m,supplied)
+    if require_native and native["status"] != "PASS":
+        if native["status"] == "UNCONFIGURED":
+            raise ValueError("qualified Dakota native read is required")
+        raise ValueError("qualified Dakota native read failed: " + native.get("error_code", "UNKNOWN"))
+    return {'catalog':'PASS','native_read':native,'devsy_reads':'PASS'}
+
+
+def _devsy_bootstrap(data):
+    if (not isinstance(data, dict) or not isinstance(data.get("policy"), dict)
+            or not isinstance(data.get("unit_template"), str)
+            or not isinstance(data.get("starter_source"), str)
+            or len(data["unit_template"]) > 32768 or len(data["starter_source"]) > 8192):
+        raise ValueError("Devsy bootstrap request is invalid")
+    import grp
+    import pwd
+    from devsy_vm_bootstrap import VMDevsyBootstrap
+
+    uid = os.getuid()
+    profile = {
+        "repo_dir": str(ROOT),
+        "state_dir": str(STATE),
+        "home": str(Path.home()),
+        "devsy": DEVSY,
+        "service_user": pwd.getpwuid(uid).pw_name,
+        "service_group": grp.getgrgid(os.getgid()).gr_name,
+        "uid": uid,
+    }
+    return VMDevsyBootstrap(
+        profile, data["policy"], unit_template=data["unit_template"],
+        starter_source=data["starter_source"],
+    )
 
 
 def compose_start():
@@ -723,6 +837,12 @@ def compose_start():
     run([str(ROOT/'scripts/control-plane-up')],900,env=env)
     run(['sudo','-n','systemctl','start','codex-control-plane-devsy'])
     return {'compose_started':True}
+
+
+def devsy_start():
+    """Restart the existing host bridge without rewriting bootstrap-managed state."""
+    run(['sudo','-n','systemctl','restart','codex-control-plane-devsy'])
+    return {'devsy':'PASS'}
 
 
 def invocation_profile(argv=None):
@@ -745,8 +865,8 @@ def main():
     if action=='lock':_ensure_private_state_store()
     elif action!='activation-plan' and action.startswith('activation-'):
         _verify_private_directory(STATE);_verify_private_directory(STORE)
-    elif action!='activation-plan':STORE.mkdir(mode=0o700,exist_ok=True)
-    data=json.load(sys.stdin) if action in ('images','image-check','network','network-check','wait','commit','baseline','set-current','rollback-commit','restart-local','activation-plan','activation-preflight','activation-begin','activation-pull-images','activation-install','activation-track','activation-seed','activation-network','activation-identity','activation-cleanup','activation-record') else {}
+    elif action not in ('activation-plan','devsy-plan','devsy-check','devsy-rollback-plan'):STORE.mkdir(mode=0o700,exist_ok=True)
+    data=json.load(sys.stdin) if action in ('images','image-check','network','network-check','wait','commit','baseline','set-current','rollback-commit','restart-local','activation-plan','activation-preflight','activation-begin','activation-pull-images','activation-install','activation-track','activation-seed','activation-network','activation-identity','activation-cleanup','activation-record','smoke','devsy-plan','devsy-check','devsy-rollback-plan','devsy-apply','devsy-rollback') else {}
     if action=='activation-plan':result=activation_plan(data['generation_dir'])
     elif action=='activation-preflight':
         info=_ensure_empty_activation_target(data['generation_dir'],allow_lock=True)
@@ -819,17 +939,21 @@ def main():
     elif action=='wait':wait_service(data['owner'],data['service']);result={'health':'PASS'}
     elif action=='backup':result=backup()
     elif action=='backup-cas':result=backup_cas()
-    elif action=='smoke':result=smoke()
+    elif action=='smoke':result=smoke(data)
+    elif action=='devsy-plan':result=_devsy_bootstrap(data).plan()
+    elif action=='devsy-check':result=_devsy_bootstrap(data).assert_current()
+    elif action=='devsy-rollback-plan':result=_devsy_bootstrap(data).rollback_plan()
+    elif action=='devsy-apply':
+        if set(data) != {"policy", "unit_template", "starter_source", "approved", "source_sha"}:
+            raise ValueError("Devsy apply request is invalid")
+        result=_devsy_bootstrap(data).apply(approved=data["approved"],source_sha=data["source_sha"])
+    elif action=='devsy-rollback':result=_devsy_bootstrap(data).rollback()
     elif action=='compose-stop':
         run(['sudo','-n','systemctl','stop','codex-control-plane-devsy']);run([str(ROOT/'scripts/control-plane-down')]);result={'compose_stopped':True}
     elif action=='compose-start':
         result=compose_start()
     elif action=='devsy-start':
-        helper=ROOT/'scripts/host_devsy_service.py'
-        starter=STATE/'start-host-devsy.py';old=STATE/'deployment/start-host-devsy.before-kamal.py'
-        if not old.exists():old.write_bytes(starter.read_bytes());old.chmod(0o600)
-        starter.write_text('import runpy\nrunpy.run_path('+repr(str(helper))+', run_name="__main__")\n');starter.chmod(0o700)
-        run(['sudo','-n','systemctl','restart','codex-control-plane-devsy']);result={'devsy':'PASS'}
+        result=devsy_start()
     elif action=='devsy-stop':
         run(['sudo','-n','systemctl','stop','codex-control-plane-devsy']);result={'devsy_stopped':True}
     elif action=='devsy-ensure':
@@ -849,7 +973,7 @@ def main():
     elif action=='set-current':write(STORE/'current.json',data);result={'generation_restored':True}
     elif action=='rollback-commit':
         write(STORE/'previous.json',data['previous']);write(STORE/'current.json',data['current']);result={'rollback_committed':True}
-    elif action=='previous':result=json.loads(private(STORE/'previous.json'))
+    elif action=='previous':result=json.loads(private(STORE/'previous.json')) if (STORE/'previous.json').exists() else None
     elif action=='rollback-target':
         path=STORE/'previous.json' if (STORE/'previous.json').exists() else STORE/'current.json'
         result=json.loads(private(path))

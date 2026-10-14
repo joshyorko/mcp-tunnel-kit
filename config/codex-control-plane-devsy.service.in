@@ -1,0 +1,34 @@
+[Unit]
+Description=Host Devsy MCP bridge for the Kamal control plane
+Wants=network-online.target tailscaled.service docker.service
+After=network-online.target tailscaled.service docker.service
+
+[Service]
+Type=forking
+User=@SERVICE_USER@
+Group=@SERVICE_GROUP@
+WorkingDirectory=@REPO_DIR@
+Environment=DEVSY_MCP_ENABLED=true
+Environment=DEVSY_MCP_BIN=@DEVSY_BIN@
+Environment=DEVSY_MCP_CWD=@REPO_DIR@
+Environment=DEVSY_MCP_HOME=@DEVSY_HOME@
+Environment=DEVSY_CONFIG_FILE=@DEVSY_CONFIG@
+Environment=DEVSY_CONTEXT_DIR=@DEVSY_CONTEXT_DIR@
+Environment=DEVSY_KUBECONFIG_FILE=@KUBECONFIG@
+Environment=DEVSY_CONTEXT=default
+Environment=KUBECONFIG=@KUBECONFIG@
+Environment=CONTROL_PLANE_STATE_DIR=@STATE_DIR@
+PIDFile=@STATE_DIR@/devsy-bridge/systemd.pid
+ExecStart=/usr/bin/python3 @STATE_DIR@/start-host-devsy.py
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=120
+TimeoutStopSec=30
+KillMode=control-group
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

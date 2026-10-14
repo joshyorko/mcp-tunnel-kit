@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import shlex
 import sys
+from types import SimpleNamespace
 from unittest.mock import patch
 import pytest
 ROOT=Path(__file__).resolve().parents[1]
@@ -42,6 +43,60 @@ def test_private_profile_drives_rendered_and_remote_paths(tmp_path):
     assert value['cas_identity_source']==str(Path(instance['vm']['native_ssh_dir'])/'identity')
 
 
+def test_native_codex_read_requires_an_explicit_verified_tuple():
+    tuple_value = {
+        "target": "local",
+        "cwd": "/home/operator/worktree/mcp-tunnel-kit",
+        "thread_id": "12345678-1234-5678-9abc-def012345678",
+    }
+    assert d.native_codex_tuple(SimpleNamespace(
+        native_target=tuple_value["target"], native_cwd=tuple_value["cwd"],
+        native_thread_id=tuple_value["thread_id"])) == tuple_value
+    assert d.native_codex_tuple(SimpleNamespace(
+        native_target=None, native_cwd=None, native_thread_id=None)) is None
+    partial = SimpleNamespace(native_target="local", native_cwd=None, native_thread_id=None)
+    assert d.native_codex_tuple(partial, require_valid=False) == {
+        "target": "local", "cwd": None, "thread_id": None,
+    }
+    for values in (
+        {"native_target": "dakota", "native_cwd": tuple_value["cwd"],
+         "native_thread_id": tuple_value["thread_id"]},
+        {"native_target": "local", "native_cwd": "relative/worktree",
+         "native_thread_id": tuple_value["thread_id"]},
+        {"native_target": "local", "native_cwd": tuple_value["cwd"],
+         "native_thread_id": "obsolete-global-id"},
+        {"native_target": "local", "native_cwd": tuple_value["cwd"] + "/../other",
+         "native_thread_id": tuple_value["thread_id"]},
+    ):
+        with pytest.raises(ValueError, match="native Codex tuple"):
+            d.native_codex_tuple(SimpleNamespace(**values))
+
+
+def test_protected_workflow_accepts_operator_native_tuple_without_echoing_it():
+    workflow = (ROOT / ".github/workflows/deploy-control-plane.yml").read_text()
+    assert "native_target:" in workflow
+    assert "native_cwd:" in workflow
+    assert "native_thread_id:" in workflow
+    assert "NATIVE_TARGET: ${{ inputs.native_target }}" in workflow
+    assert "NATIVE_CWD: ${{ inputs.native_cwd }}" in workflow
+    assert "NATIVE_THREAD_ID: ${{ inputs.native_thread_id }}" in workflow
+    assert 'printf \'Native target' not in workflow
+    assert 'printf \'Native CWD' not in workflow
+
+
+def test_protected_workflow_has_separate_host_devsy_plan_and_approved_apply():
+    workflow = (ROOT / ".github/workflows/deploy-control-plane.yml").read_text()
+    assert "devsy-check" in workflow
+    assert "devsy-apply" in workflow
+    assert "devsy-rollback" in workflow
+    assert "approve_host_devsy_apply:" in workflow
+    assert "approve_host_devsy_rollback:" in workflow
+    assert "HOST_DEVSY_APPLY_APPROVAL: ${{ inputs.approve_host_devsy_apply }}" in workflow
+    assert "args+=(--approve-host-devsy-apply)" in workflow
+    assert "HOST_DEVSY_ROLLBACK_APPROVAL: ${{ inputs.approve_host_devsy_rollback }}" in workflow
+    assert "args+=(--approve-host-devsy-rollback)" in workflow
+
+
 def test_remote_source_receives_only_validated_profile_over_pinned_alias():
     from instance_profile import decode
     instance=json.loads((ROOT/'config/instance.example.json').read_text())
@@ -57,16 +112,32 @@ def test_remote_source_receives_only_validated_profile_over_pinned_alias():
 
 
 def test_remote_source_injects_stdlib_generation_validator_without_target_install():
-    names=("instance_profile","prepare_recovery_generation")
+    names=("instance_profile","prepare_recovery_generation","devsy_vm_bootstrap")
     previous={name:sys.modules.get(name) for name in names}
     try:
         namespace={"__name__":"remote_source_test"}
         exec(compile(d.remote_source(),"<remote-source-test>","exec"),namespace)
         assert callable(sys.modules["prepare_recovery_generation"].validate_generation)
+        assert callable(sys.modules["devsy_vm_bootstrap"].VMDevsyBootstrap)
     finally:
         for name,module in previous.items():
             if module is None:sys.modules.pop(name,None)
             else:sys.modules[name]=module
+
+
+def test_devsy_payload_contains_reviewed_nonsecret_inputs_and_vm_starter_path():
+    instance=json.loads((ROOT/'config/instance.example.json').read_text())
+    previous=(d.INSTANCE,d.HOST,d.VMROOT,d.VM_HOST_PIN)
+    d.configure_instance(instance)
+    try:
+        payload=d.devsy_payload()
+    finally:
+        d.INSTANCE,d.HOST,d.VMROOT,d.VM_HOST_PIN=previous
+    assert set(payload)=={"policy","unit_template","starter_source"}
+    assert payload["policy"]["devsy"]["version"]=="1.23.2"
+    assert "@DEVSY_BIN@" in payload["unit_template"]
+    assert str(Path(instance["vm"]["repo_dir"])/"scripts") in payload["starter_source"]
+    assert "kubeconfig" not in payload["starter_source"]
 
 
 def test_bad_cas_digest_revision_and_repository_are_rejected():
@@ -120,10 +191,13 @@ def test_failed_kamal_health_rolls_back_before_accepting():
         if action=='snapshot':return before
         if action=='current':return current
         if action=='image-check':return {'image_ids':{key:'image' for key in ('cas','executor','schema_proxy','tunnel')}}
+        if action=='smoke':return {'native_read':{'status':'PASS'}}
         if action=='wait':raise RuntimeError('health failure')
         return {}
     from contextlib import nullcontext
-    args=type('A',(),{'local':False,'operation':'cas','cas_digest':'','cas_revision':'','approve_full_stack':False})()
+    args=type('A',(),{'local':False,'operation':'cas','cas_digest':'','cas_revision':'','approve_full_stack':False,
+        'native_target':'local','native_cwd':'/home/operator/worktree/mcp-tunnel-kit',
+        'native_thread_id':'12345678-1234-5678-9abc-def012345678'})()
     with patch.object(d,'prove_images',return_value={}),patch.object(d,'trusted_context'),patch.object(d,'lock',return_value=nullcontext()),patch.object(d,'remote',side_effect=remote),patch.object(d,'kamal'),patch.object(d,'sync_source'),patch.object(d,'restore_cas') as restore,patch.dict(os.environ,{'GITHUB_SHA':'b'*40}):
         with pytest.raises(RuntimeError,match='previous generation restored'):d.execute(args)
         restore.assert_called_once()
