@@ -98,6 +98,7 @@ def disk_fixture(tmp_path):
     a['cas_mapping_sha256']=hashlib.sha256(b'protected-mapping').hexdigest()
     receipt=json.dumps({'source_sha':'a'*40,'backup_dir':str(backup)}).encode()
     write(store/'devsy-host-current.json',receipt)
+    a['historical_snapshots']={}
     a.update(host_apply_receipt_sha256=hashlib.sha256(receipt).hexdigest(),host_apply_source_sha='a'*40,approval_id='test-incident')
     commands=[]
     b=SimpleNamespace(profile={'state_dir':str(state),'repo_dir':str(ROOT),'devsy':{'config_source':str(provider)}},
@@ -110,6 +111,7 @@ def disk_fixture(tmp_path):
         manager=worker_scope.WorkerScope(value['scope_path'],jobs,None,None,None)
         manager.authenticate('Bearer '+value['token'])
     repair.authenticate=authenticate
+    repair.prove_absence=lambda *_:None
     return m,repair,scope_path,raw,commands
 
 
@@ -219,3 +221,76 @@ def test_controller_preserves_source_and_all_accessories_without_sync():
     assert smoke.call_count==2
     assert all(c.kwargs.get('require_native') is True for c in smoke.call_args_list)
     sync.assert_not_called()
+
+
+def archival_entries():
+    operation='12345678-1234-5678-9abc-def012345678'
+    original={'name':'cas-worker-01','operation':'create','operation_id':operation,'request_id':'historical-fixture','status':'outcome_unknown'}
+    proof={'kind':'absent','namespace':'devsy','kubernetes_context':'ror','namespace_uid':'fixture-ns','workspace_absent':True,'provider_resources_absent':True,'lifecycle_processes_absent':True}
+    retired={**original,'status':'retired','new_request_allowed':True,'reconciliation':proof}
+    archive='history-'+hashlib.sha256(operation.encode()).hexdigest()+'.json'
+    return {'cas-worker-01.json':retired,archive:retired,'operator-native-ready-fixture.json':original}
+
+
+def test_historical_operator_snapshot_requires_exact_reconciled_archive():
+    m=module();entries=archival_entries()
+    digests,approval=history_digests(entries)
+    current=m.current_records(entries,['cas-worker-01','rcc-worker-01'],digests,approval)
+    assert current==[entries['cas-worker-01.json']]
+    assert entries['operator-native-ready-fixture.json']['status']=='outcome_unknown'
+
+
+@pytest.mark.parametrize('change',['request','operation','name','proof','archive-path','unrecognized'])
+def test_unproven_historical_snapshot_is_never_ignored(change):
+    m=module();entries=archival_entries();digests,approval=history_digests(entries);snapshot=entries['operator-native-ready-fixture.json']
+    if change=='request':snapshot['request_id']='other'
+    if change=='operation':snapshot['operation_id']='other'
+    if change=='name':snapshot['name']='other'
+    archive=next(k for k in entries if k.startswith('history-'))
+    if change=='proof':entries[archive]['reconciliation']['provider_resources_absent']=False
+    if change=='archive-path':entries['history-noncanonical.json']=entries.pop(archive)
+    if change=='unrecognized':entries['unknown.json']={'status':'outcome_unknown'}
+    digests,_=history_digests(entries)
+    with pytest.raises(m.RebindError):m.current_records(entries,['cas-worker-01','rcc-worker-01'],digests,approval)
+
+
+def history_digests(entries):
+    digests={k:hashlib.sha256(json.dumps(v,sort_keys=True).encode()).hexdigest() for k,v in entries.items()}
+    snapshots=[k for k in entries if k.startswith(('legacy-original-','operator-native-ready-'))]
+    approval={digests[k]:digests.get('history-'+hashlib.sha256(entries[k].get('operation_id','').encode()).hexdigest()+'.json') for k in snapshots}
+    return digests,approval
+
+
+def test_forged_snapshot_or_missing_approved_history_refuses():
+    m=module();entries=archival_entries();digests,approval=history_digests(entries)
+    entries['operator-native-ready-fixture.json']['error_code']='forged'
+    digests,_=history_digests(entries)
+    with pytest.raises(m.RebindError):m.current_records(entries,['cas-worker-01'],digests,approval)
+    del entries['operator-native-ready-fixture.json']
+    with pytest.raises(m.RebindError):m.current_records(entries,['cas-worker-01'],digests,approval)
+
+
+def test_live_absence_refusal_prevents_journal_stop_and_write(tmp_path):
+    m,repair,path,raw,commands=disk_fixture(tmp_path)
+    def refuse(*_):raise m.RebindError('Live absence proof refused at inventory.')
+    repair.prove_absence=refuse
+    with pytest.raises(m.RebindError,match='inventory'):repair.apply(approved=True,controller_sha='b'*40)
+    assert path.read_bytes()==raw and not commands and not repair.journal.exists()
+
+
+@pytest.mark.parametrize('kind',['history-unknown.json','identity-unknown.json'])
+def test_unknown_history_or_identity_prefix_never_bypasses_classification(kind):
+    m=module();entries=archival_entries();digests,approval=history_digests(entries)
+    entries[kind]={'status':'outcome_unknown'}
+    digests,_=history_digests(entries)
+    with pytest.raises(m.RebindError):m.current_records(entries,['cas-worker-01'],digests,approval)
+
+
+def test_identity_pin_requires_matching_canonical_reconciled_receipt():
+    m=module();entries=archival_entries();r=entries['cas-worker-01.json'];r['workspace_uid']='fixture-uid'
+    key='identity-'+hashlib.sha256(r['operation_id'].encode()).hexdigest()+'.json'
+    entries[key]={k:r[k] for k in ('name','operation_id','workspace_uid')}
+    digests,approval=history_digests(entries)
+    assert m.current_records(entries,['cas-worker-01'],digests,approval)
+    entries[key]['workspace_uid']='forged'
+    with pytest.raises(m.RebindError):m.current_records(entries,['cas-worker-01'],digests,approval)
