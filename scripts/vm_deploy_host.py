@@ -748,38 +748,23 @@ def native_thread_read(client, session, supplied):
     identity = _codex_read_payload(supplied)
     if identity is None:
         return {"status": "FAIL", "error_code": "NATIVE_TUPLE_INVALID"}
-    targets, error = _codex_tool(client, session, "list_targets", {})
-    if error:
-        return {"status": "FAIL", "error_code": error}
-    names = targets.get("targets", [])
-    names = [row if isinstance(row, str) else row.get("name")
-             for row in names if isinstance(row, (str, dict))]
-    if identity["target"] not in names:
-        return {"status": "FAIL", "error_code": "NATIVE_TARGET_UNAVAILABLE"}
-
-    discovered, error = _codex_tool(client, session, "discover_threads", {
-        "payload": {"target": identity["target"], "cwd": identity["cwd"], "limit": 100},
+    snapshot, error = _codex_tool(client, session, "get_thread_snapshot", {
+        "payload": identity,
     })
     if error:
         return {"status": "FAIL", "error_code": error}
-    rows = discovered.get("result", {}).get("data", [])
-    exact = next((row for row in rows if isinstance(row, dict)
-                  and row.get("id") == identity["thread_id"]
-                  and row.get("cwd") == identity["cwd"]), None)
-    if exact is None:
-        return {"status": "FAIL", "error_code": "NATIVE_THREAD_NOT_DISCOVERED"}
-
-    read, error = _codex_tool(client, session, "read_thread", {
-        "payload": {**identity, "include_turns": False},
-    })
-    if error:
-        return {"status": "FAIL", "error_code": error}
-    connection = read.get("connection", {})
-    thread = read.get("result", {}).get("thread", {})
-    if (connection.get("target") != identity["target"]
-            or thread.get("id") != identity["thread_id"]
-            or thread.get("cwd") != identity["cwd"]):
+    if (snapshot.get("target") != identity["target"]
+            or snapshot.get("cwd") != identity["cwd"]
+            or snapshot.get("thread_id") != identity["thread_id"]):
         return {"status": "FAIL", "error_code": "NATIVE_THREAD_IDENTITY_MISMATCH"}
+    if (snapshot.get("source") != "native-app-server"
+            or snapshot.get("native_state_authoritative") is not True
+            or snapshot.get("thread_status") not in ("loaded", "notLoaded")):
+        return {"status": "FAIL", "error_code": "NATIVE_THREAD_STATE_UNVERIFIED"}
+    active_flags = snapshot.get("active_flags")
+    if (not isinstance(active_flags, list) or active_flags
+            or snapshot.get("unknown_active_flags") is not False):
+        return {"status": "FAIL", "error_code": "NATIVE_THREAD_ACTIVITY_UNKNOWN"}
     return {"status": "PASS", "target": identity["target"]}
 
 
