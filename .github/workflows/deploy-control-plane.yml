@@ -6,7 +6,7 @@ on:
         description: Controlled operation (adopt is one-time Compose to Kamal handoff)
         type: choice
         default: preflight
-        options: [preflight, status, adopt, cas, deploy, rollback]
+        options: [preflight, status, devsy-check, devsy-apply, adopt, cas, deploy, rollback]
         required: true
       cas_digest:
         description: Optional approved CAS sha256 digest; revision must also be supplied
@@ -16,8 +16,24 @@ on:
         description: CAS source commit matching the image OCI revision label
         type: string
         required: false
+      native_target:
+        description: Verified logical Dakota Codex target for full acceptance (local)
+        type: string
+        required: false
+      native_cwd:
+        description: Exact Dakota worktree cwd containing the supplied native thread
+        type: string
+        required: false
+      native_thread_id:
+        description: Operator-verified persistent Dakota thread id for full acceptance
+        type: string
+        required: false
       approve_full_stack:
         description: Explicitly approve bounded downtime for adopt, deploy, or rollback
+        type: boolean
+        default: false
+      approve_host_devsy_apply:
+        description: Explicitly approve the isolated VM-host Devsy bootstrap/provider apply
         type: boolean
         default: false
 permissions:
@@ -60,11 +76,16 @@ jobs:
           OPERATION: ${{ inputs.operation }}
           CAS_DIGEST: ${{ inputs.cas_digest }}
           CAS_REVISION: ${{ inputs.cas_revision }}
+          NATIVE_TARGET: ${{ inputs.native_target }}
+          NATIVE_CWD: ${{ inputs.native_cwd }}
+          NATIVE_THREAD_ID: ${{ inputs.native_thread_id }}
           FULL_APPROVAL: ${{ inputs.approve_full_stack }}
+          HOST_DEVSY_APPLY_APPROVAL: ${{ inputs.approve_host_devsy_apply }}
         run: |
           set -euo pipefail
           args=("$OPERATION" --cas-digest "$CAS_DIGEST" --cas-revision "$CAS_REVISION")
           if [ "$FULL_APPROVAL" = true ]; then args+=(--approve-full-stack); fi
+          if [ "$HOST_DEVSY_APPLY_APPROVAL" = true ]; then args+=(--approve-host-devsy-apply); fi
           python3 scripts/deploy_control_plane.py "${args[@]}" | tee "$RUNNER_TEMP/control-plane-receipt.json"
           {
             printf '### Control-plane operation: %s\n\n' "$OPERATION"

@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "homebrew": {
+    "prefix": "/home/linuxbrew/.linuxbrew",
+    "installer_url": "https://raw.githubusercontent.com/Homebrew/install/7a3f48c7e498d7df3237fd41c30f4d492857edf4/install.sh",
+    "installer_sha256": "5f333bbe53bc490e51e7ccb1df8779b3dd6ee73a1a7379efda216edb08ccb148",
+    "required_commands": ["bash", "curl", "file", "gcc", "git", "make", "ps"]
+  },
+  "devsy": {
+    "version": "1.23.2",
+    "source_revision": "0f248a8502ca609e494ec58064556342e30441cb",
+    "tap": "joshyorko/tools",
+    "tap_repository": "https://github.com/joshyorko/homebrew-tools.git",
+    "tap_revision": "141faa0977de2c2d840ee847ddfec08da9d5a974",
+    "formula_path": "Formula/devsy.rb",
+    "formula_sha256": "3d4b11400c3b384bb1818ebf41d4d4d6d2beea301604ce6512a478a09b5f4412",
+    "artifact_sha256": {
+      "aarch64": "872cd988be2f5c37dc92da684c92fb6e9dd56153963366c1bdb143b78f816ae2"
+    },
+    "legacy_version": "1.23.0",
+    "legacy_sha256": "bf6e00b498a09ed614670ce24bd7cf46830b31218e773961f6c267c1a25b8186",
+    "legacy_unit_sha256": "b377872e9f7e5304dfd9713bdc7f8735a0deb59ad868980a88b655ab8b9017f7"
+  },
+  "provider": {
+    "name": "kubernetes",
+    "default": true,
+    "context": "default",
+    "kubernetes_context": "ror",
+    "namespace": "devsy",
+    "create_namespace": false,
+    "node_selector": {
+      "node-role.kubernetes.io/worker": "true"
+    },
+    "resources": {
+      "requests": {"cpu": "1", "memory": "1Gi"},
+      "limits": {"cpu": "2", "memory": "4Gi"}
+    },
+    "init_container": "devsy-init",
+    "init_resources": {
+      "requests": {"cpu": "250m", "memory": "512Mi"},
+      "limits": {"cpu": "1", "memory": "2Gi"}
+    },
+    "automount_service_account_token": false,
+    "legacy_options": {
+      "CREATE_NAMESPACE": "false",
+      "KUBERNETES_CONTEXT": "ror",
+      "KUBERNETES_NAMESPACE": "devsy",
+      "NODE_SELECTOR": "",
+      "POD_MANIFEST_TEMPLATE": "spec:\n  automountServiceAccountToken: false",
+      "RESOURCES": "requests.cpu=1,requests.memory=1Gi,limits.cpu=2,limits.memory=4Gi"
+    }
+  }
+}

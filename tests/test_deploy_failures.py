@@ -34,13 +34,19 @@ def generation(authority="kamal", source_sha="a" * 40):
     }
 
 
-def args(operation, *, approve=False):
+def args(operation, *, approve=False, host_approve=False, host_rollback=False, native=None):
+    native = native or {}
     return type("Args", (), {
         "local": False,
         "operation": operation,
         "cas_digest": "",
         "cas_revision": "",
         "approve_full_stack": approve,
+        "approve_host_devsy_apply": host_approve,
+        "approve_host_devsy_rollback": host_rollback,
+        "native_target": native.get("target"),
+        "native_cwd": native.get("cwd"),
+        "native_thread_id": native.get("thread_id"),
     })()
 
 
@@ -107,6 +113,310 @@ def test_cas_failure_restores_only_cas_and_uses_cas_backup():
     assert kamal_calls == [("reboot", "cas"), ("reboot", "cas")]
     assert not {"compose-stop", "compose-start", "devsy-start"} & {action for action, _ in calls}
     sync_source.assert_not_called()
+
+
+def test_preflight_returns_devsy_plan_when_native_thread_tuple_is_mismatched(tmp_path):
+    before = generation()
+    calls = []
+
+    def remote(action, data=None):
+        calls.append((action, data))
+        if action == "snapshot":
+            return before
+        if action == "current":
+            return None
+        if action == "image-check":
+            return {"image_ids": {"cas": "image-cas", "schema_proxy": "image-schema-proxy",
+                                  "executor": "image-executor", "tunnel": "image-tunnel"}}
+        if action == "devsy-plan":
+            return {"ready": True, "status": "changes-required", "changes": ["provider"]}
+        if action == "smoke":
+            return {"devsy_reads": "PASS", "native_read": {
+                "status": "FAIL", "error_code": "THREAD_WORKSTREAM_MISMATCH"}}
+        return {}
+
+    instance = json.loads((ROOT / "config/instance.example.json").read_text())
+    previous = (d.INSTANCE, d.HOST, d.VMROOT, d.VM_HOST_PIN)
+    d.configure_instance(instance)
+    try:
+        with patch.object(d, "trusted_context"), patch.object(d, "lock", return_value=nullcontext()), \
+             patch.object(d, "remote", side_effect=remote), \
+             patch.object(d, "prove_images", return_value={}), \
+             patch.object(d, "configuration", return_value=tmp_path / "deploy.yml"), \
+             patch.dict(os.environ, {"GITHUB_SHA": "b" * 40}):
+            result = d.execute(args("preflight"))
+    finally:
+        d.INSTANCE, d.HOST, d.VMROOT, d.VM_HOST_PIN = previous
+
+    assert result["devsy_plan"]["status"] == "changes-required"
+    assert result["smoke"]["native_read"]["error_code"] == "THREAD_WORKSTREAM_MISMATCH"
+    assert ("smoke", {"native_codex": None, "require_native": False}) in calls
+
+
+def test_deploy_fails_closed_on_missing_native_tuple_before_backup_or_reboot(tmp_path):
+    before = generation()
+    calls = []
+
+    def remote(action, data=None):
+        calls.append((action, data))
+        if action == "snapshot":
+            return before
+        if action == "current":
+            return before
+        if action == "image-check":
+            return {"image_ids": {"cas": "image-cas", "schema_proxy": "image-schema-proxy",
+                                  "executor": "image-executor", "tunnel": "image-tunnel"}}
+        if action == "smoke":
+            return {"native_read": {"status": "UNCONFIGURED"}}
+        return {}
+
+    instance = json.loads((ROOT / "config/instance.example.json").read_text())
+    previous = (d.INSTANCE, d.HOST, d.VMROOT, d.VM_HOST_PIN)
+    d.configure_instance(instance)
+    kamal_calls = []
+    try:
+        with patch.object(d, "trusted_context"), patch.object(d, "lock", return_value=nullcontext()), \
+             patch.object(d, "remote", side_effect=remote), \
+             patch.object(d, "prove_images", return_value={}), \
+             patch.object(d, "configuration", return_value=tmp_path / "deploy.yml"), \
+             patch.object(d, "kamal", side_effect=lambda *args: kamal_calls.append(args)), \
+             patch.dict(os.environ, {"GITHUB_SHA": "b" * 40}):
+            with pytest.raises(RuntimeError, match="Qualified Dakota native read failed"):
+                d.execute(args("deploy", approve=True))
+    finally:
+        d.INSTANCE, d.HOST, d.VMROOT, d.VM_HOST_PIN = previous
+
+    assert not any(action in {"backup", "backup-cas", "images"} for action, _ in calls)
+    assert kamal_calls == []
+
+
+def test_devsy_check_only_returns_the_host_plan(tmp_path):
+    calls = []
+
+    def remote(action, data=None):
+        calls.append((action, data))
+        return {"ready": True, "status": "changes-required", "changes": ["install-tap-devsy"]}
+
+    instance = json.loads((ROOT / "config/instance.example.json").read_text())
+    previous = (d.INSTANCE, d.HOST, d.VMROOT, d.VM_HOST_PIN)
+    d.configure_instance(instance)
+    try:
+        with patch.object(d, "trusted_context"), patch.object(d, "lock", return_value=nullcontext()), \
+             patch.object(d, "remote", side_effect=remote):
+            result = d.execute(args("devsy-check"))
+    finally:
+        d.INSTANCE, d.HOST, d.VMROOT, d.VM_HOST_PIN = previous
+
+    assert result["plan"]["changes"] == ["install-tap-devsy"]
+    assert calls == [("devsy-plan", d.devsy_payload())]
+
+
+def test_devsy_apply_requires_explicit_host_apply_approval_before_vm_reads():
+    calls = []
+
+    def remote(action, data=None):
+        calls.append((action, data))
+        return {}
+
+    instance = json.loads((ROOT / "config/instance.example.json").read_text())
+    previous = (d.INSTANCE, d.HOST, d.VMROOT, d.VM_HOST_PIN)
+    d.configure_instance(instance)
+    try:
+        with patch.object(d, "trusted_context"), patch.object(d, "lock", return_value=nullcontext()), \
+             patch.object(d, "remote", side_effect=remote):
+            with pytest.raises(ValueError, match="explicit Host Devsy apply approval"):
+                d.execute(args("devsy-apply"))
+    finally:
+        d.INSTANCE, d.HOST, d.VMROOT, d.VM_HOST_PIN = previous
+
+    assert calls == []
+
+
+def test_devsy_rollback_requires_explicit_approval_before_vm_reads():
+    calls = []
+
+    def remote(action, data=None):
+        calls.append((action, data))
+        return {}
+
+    instance = json.loads((ROOT / "config/instance.example.json").read_text())
+    previous = (d.INSTANCE, d.HOST, d.VMROOT, d.VM_HOST_PIN)
+    d.configure_instance(instance)
+    try:
+        with patch.object(d, "trusted_context"), patch.object(d, "lock", return_value=nullcontext()), \
+             patch.object(d, "remote", side_effect=remote):
+            with pytest.raises(ValueError, match="explicit Host Devsy rollback approval"):
+                d.execute(args("devsy-rollback"))
+    finally:
+        d.INSTANCE, d.HOST, d.VMROOT, d.VM_HOST_PIN = previous
+
+    assert calls == []
+
+
+def test_devsy_rollback_restores_only_host_generation_and_reports_native_status(tmp_path):
+    before = generation()
+    before.update(authority="kamal", tunnel_count=1, source_sha="b" * 40)
+    after = {**before, "source_sha": "a" * 40}
+    current = {**before, "publication_proof": {}}
+    calls = []
+
+    def remote(action, data=None):
+        calls.append((action, data))
+        if action == "snapshot":
+            return before if calls.count(("snapshot", None)) == 1 else after
+        if action == "current":
+            return current
+        if action == "lifecycle-check":
+            return {"healthy": True}
+        if action == "devsy-rollback-plan":
+            return {"ready": True, "source_sha": "a" * 40, "devsy_version": "1.23.0"}
+        if action == "devsy-rollback":
+            return {"restored": True, "source_sha": "a" * 40}
+        if action == "devsy-plan":
+            return {"ready": True, "status": "changes-required", "changes": ["install-tap-devsy"]}
+        if action == "smoke":
+            return {"native_read": {"status": "FAIL", "error_code": "NATIVE_THREAD_NOT_DISCOVERED"}}
+        if action == "commit":
+            return {"generation_committed": True}
+        raise AssertionError(f"unexpected VM action: {action}")
+
+    instance = json.loads((ROOT / "config/instance.example.json").read_text())
+    previous = (d.INSTANCE, d.HOST, d.VMROOT, d.VM_HOST_PIN)
+    d.configure_instance(instance)
+    payload = d.devsy_payload()
+    native = {"target": "local", "cwd": "/home/operator/worktree/mcp-tunnel-kit",
+              "thread_id": "12345678-1234-5678-9abc-def012345678"}
+    sync = []
+    try:
+        with patch.object(d, "trusted_context"), patch.object(d, "lock", return_value=nullcontext()), \
+             patch.object(d, "remote", side_effect=remote), \
+             patch.object(d, "sync_source", side_effect=lambda sha: sync.append(sha)), \
+             patch.object(d, "prove_images", return_value={}), \
+             patch.dict(os.environ, {"GITHUB_SHA": "c" * 40}):
+            result = d.execute(args("devsy-rollback", host_rollback=True, native=native))
+    finally:
+        d.INSTANCE, d.HOST, d.VMROOT, d.VM_HOST_PIN = previous
+
+    assert result["host_devsy"]["restored"] is True
+    assert result["native_read"]["native_read"]["status"] == "FAIL"
+    assert result["identity_preserved"] is True
+    assert sync == ["a" * 40]
+    assert ("devsy-rollback", payload) in calls
+    assert not {"images", "backup", "backup-cas"} & {action for action, _ in calls}
+
+
+def test_devsy_apply_changes_only_host_state_and_records_merged_source(tmp_path):
+    before = generation()
+    before.update(authority="kamal", tunnel_count=1)
+    after = {**before, "source_sha": "b" * 40}
+    current = {**before, "publication_proof": {}}
+    plan = {"ready": True, "status": "changes-required", "changes": ["install-tap-devsy"],
+            "devsy_current_version": "1.23.0", "provider": {"requests": {"cpu": "1"}},
+            "systemd_unit": "legacy", "bridge_starter": "legacy",
+            "service_active": True, "service_enabled": True, "tap_revision": "old"}
+    verified = {**plan, "status": "current", "changes": [], "devsy_current_version": "1.23.2",
+                "systemd_unit": "managed", "bridge_starter": "managed", "tap_revision": "new"}
+    calls = []
+
+    def remote(action, data=None):
+        calls.append((action, data))
+        if action == "snapshot":
+            return before if calls.count(("snapshot", None)) == 1 else after
+        if action == "current":
+            return current
+        if action == "previous":
+            return None
+        if action == "devsy-plan":
+            return plan
+        if action == "devsy-apply":
+            return {"operation": "apply", "changed": True, "rollback_ready": True}
+        if action == "devsy-check":
+            return verified
+        if action == "smoke":
+            return {"native_read": {"status": "PASS"}}
+        if action == "commit":
+            return {"generation_committed": True}
+        if action == "lifecycle-check":
+            return {"healthy": True}
+        raise AssertionError(f"unexpected VM action: {action}")
+
+    instance = json.loads((ROOT / "config/instance.example.json").read_text())
+    previous = (d.INSTANCE, d.HOST, d.VMROOT, d.VM_HOST_PIN)
+    d.configure_instance(instance)
+    native = {"target": "local", "cwd": "/home/operator/worktree/mcp-tunnel-kit",
+              "thread_id": "12345678-1234-5678-9abc-def012345678"}
+    sync = []
+    try:
+        with patch.object(d, "trusted_context"), patch.object(d, "lock", return_value=nullcontext()), \
+             patch.object(d, "remote", side_effect=remote), \
+             patch.object(d, "sync_source", side_effect=lambda sha: sync.append(sha)), \
+             patch.object(d, "prove_images", return_value={}), \
+             patch.dict(os.environ, {"GITHUB_SHA": "b" * 40}):
+            result = d.execute(args("devsy-apply", host_approve=True, native=native))
+    finally:
+        d.INSTANCE, d.HOST, d.VMROOT, d.VM_HOST_PIN = previous
+
+    assert result["identity_preserved"] is True
+    assert result["accessories_unchanged"] is True
+    assert result["native_read"] == "PASS"
+    assert sync == ["b" * 40]
+    assert [action for action, _ in calls].count("commit") == 1
+    assert not {"images", "backup", "backup-cas"} & {action for action, _ in calls}
+
+
+def test_devsy_apply_rolls_back_host_and_source_when_drift_check_fails(tmp_path):
+    before = generation()
+    before.update(authority="kamal", tunnel_count=1)
+    current = {**before, "publication_proof": {}}
+    plan = {"ready": True, "status": "changes-required", "changes": ["install-tap-devsy"],
+            "devsy_current_version": "1.23.0", "provider": {"requests": {"cpu": "1"}},
+            "systemd_unit": "legacy", "bridge_starter": "legacy",
+            "service_active": True, "service_enabled": True, "tap_revision": "old"}
+    calls = []
+
+    def remote(action, data=None):
+        calls.append((action, data))
+        if action == "snapshot":
+            return before
+        if action == "current":
+            return current
+        if action == "previous":
+            return None
+        if action == "devsy-plan":
+            return plan
+        if action == "devsy-apply":
+            return {"operation": "apply", "changed": True, "rollback_ready": True}
+        if action == "devsy-check":
+            return {**plan, "status": "changes-required"}
+        if action == "smoke":
+            return {"native_read": {"status": "PASS"}}
+        if action in {"devsy-rollback", "rollback-commit"}:
+            return {"restored": True}
+        if action == "lifecycle-check":
+            return {"healthy": True}
+        raise AssertionError(f"unexpected VM action: {action}")
+
+    instance = json.loads((ROOT / "config/instance.example.json").read_text())
+    previous = (d.INSTANCE, d.HOST, d.VMROOT, d.VM_HOST_PIN)
+    d.configure_instance(instance)
+    payload = d.devsy_payload()
+    native = {"target": "local", "cwd": "/home/operator/worktree/mcp-tunnel-kit",
+              "thread_id": "12345678-1234-5678-9abc-def012345678"}
+    sync = []
+    try:
+        with patch.object(d, "trusted_context"), patch.object(d, "lock", return_value=nullcontext()), \
+             patch.object(d, "remote", side_effect=remote), \
+             patch.object(d, "sync_source", side_effect=lambda sha: sync.append(sha)), \
+             patch.dict(os.environ, {"GITHUB_SHA": "b" * 40}):
+            with pytest.raises(RuntimeError, match="previous host state restored"):
+                d.execute(args("devsy-apply", host_approve=True, native=native))
+    finally:
+        d.INSTANCE, d.HOST, d.VMROOT, d.VM_HOST_PIN = previous
+
+    assert ("devsy-rollback", payload) in calls
+    assert ("rollback-commit", {"current": current, "previous": None}) in calls
+    assert sync == ["b" * 40, before["source_sha"]]
+    assert "commit" not in [action for action, _ in calls]
 
 
 @pytest.mark.parametrize("rollback_fails", [False, True])

@@ -7,7 +7,7 @@ import copy
 import json
 import hashlib
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import select
 import shlex
@@ -158,7 +158,7 @@ def lock():
 
 def remote_source():
     bootstrap='import sys,types\n'
-    for name in ('instance_profile','prepare_recovery_generation'):
+    for name in ('instance_profile','prepare_recovery_generation','devsy_vm_bootstrap'):
         source=(ROOT/'scripts'/(name+'.py')).read_text()
         bootstrap+=('_module=types.ModuleType('+repr(name)+')\n'
                     +'_module.__file__='+repr(str(ROOT/'scripts'/(name+'.py')))+'\n'
@@ -167,6 +167,23 @@ def remote_source():
     source=bootstrap+(ROOT/'scripts/vm_deploy_host.py').read_text()
     payload=base64.b64encode(zlib.compress(source.encode(),9)).decode()
     return f"import base64,zlib;exec(compile(zlib.decompress(base64.b64decode({payload!r})), '<mcp-private-vm>', 'exec'))"
+
+
+def devsy_payload():
+    """Ship only reviewed nonsecret Devsy policy and source inputs to the VM boundary."""
+    scripts = str(Path(VMROOT) / "scripts")
+    starter = (
+        "#!/usr/bin/env python3\n"
+        "import sys\n"
+        "sys.path.insert(0, " + repr(scripts) + ")\n"
+        "from host_devsy_service import main\n"
+        "raise SystemExit(main())\n"
+    )
+    return {
+        "policy": json.loads((ROOT / "config/devsy-vm-bootstrap.json").read_text()),
+        "unit_template": (ROOT / "config/codex-control-plane-devsy.service.in").read_text(),
+        "starter_source": starter,
+    }
 
 
 def profile():
@@ -200,6 +217,119 @@ def choose_manifest(current, digest, revision):
     return result
 
 
+def native_codex_tuple(args, *, require_valid=True):
+    """Return an explicit operator-supplied Dakota target/thread/worktree tuple."""
+    values = [getattr(args, name, None) for name in (
+        "native_target", "native_cwd", "native_thread_id")]
+    values = [value or None for value in values]
+    if not any(values):
+        return None
+    target, cwd, thread_id = values
+    valid = all(isinstance(value, str) and value for value in values) and target == "local"
+    if valid:
+        path = PurePosixPath(cwd)
+        valid = (path.is_absolute() and ".." not in path.parts and str(path) == cwd
+                 and not any(ord(char) < 32 for char in cwd)
+                 and bool(re.fullmatch(r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}", thread_id)))
+    if not valid and require_valid:
+        raise ValueError("native Codex tuple must explicitly bind target local, cwd, and thread id")
+    return {"target": target, "cwd": cwd, "thread_id": thread_id}
+
+
+def smoke_request(native_tuple, *, require_native=False):
+    return {"native_codex": native_tuple, "require_native": bool(require_native)}
+
+
+def smoke(native_tuple, *, require_native=False):
+    result = remote("smoke", smoke_request(native_tuple, require_native=require_native))
+    if require_native and result.get("native_read", {}).get("status") != "PASS":
+        raise RuntimeError("Qualified Dakota native read failed; production changes were not started")
+    return result
+
+
+def _devsy_plan_fingerprint(plan):
+    return {key: plan.get(key) for key in (
+        "tap_revision", "devsy_current_version", "provider", "systemd_unit",
+        "bridge_starter", "service_active", "service_enabled")}
+
+
+def _apply_host_devsy(native_tuple, source_sha):
+    payload = devsy_payload()
+    before = remote("snapshot")
+    if before.get("authority") != "kamal" or before.get("tunnel_count") != 1:
+        raise ValueError("Host Devsy apply requires the healthy Kamal owner and one tunnel client")
+    remote("lifecycle-check")
+    current = remote("current")
+    if (not isinstance(current, dict) or current.get("authority") != "kamal"
+            or current.get("identity") != before.get("identity")):
+        raise ValueError("Host Devsy apply requires the recorded healthy Kamal generation")
+    previous = remote("previous")
+    plan_before = remote("devsy-plan", payload)
+    smoke(native_tuple, require_native=True)
+    old_source_sha = before["source_sha"]
+    changed = False
+    phase = "source-sync"
+    try:
+        sync_source(source_sha)
+        phase = "host-apply"
+        applied = remote("devsy-apply", {
+            **payload, "approved": True, "source_sha": source_sha,
+        })
+        if applied.get("operation") != "apply" or type(applied.get("changed")) is not bool:
+            raise RuntimeError("Host Devsy apply receipt was invalid")
+        changed = applied["changed"]
+        phase = "drift-check"
+        verified = remote("devsy-check", payload)
+        if verified.get("status") != "current":
+            raise RuntimeError("Host Devsy drift check failed")
+        phase = "control-plane-check"
+        after = remote("snapshot")
+        if (after.get("identity") != before.get("identity")
+                or after.get("inventory") != before.get("inventory")
+                or after.get("tunnel_count") != 1
+                or after.get("authority") != "kamal"):
+            raise RuntimeError("control-plane identity or accessory state changed")
+        phase = "native-acceptance"
+        smoke(native_tuple, require_native=True)
+        generation = dict(current)
+        generation.update(authority="kamal", source_sha=source_sha,
+                          identity=after["identity"])
+        if not generation.get("publication_proof"):
+            generation["publication_proof"] = prove_images(generation["manifest"], generation)
+        phase = "generation-commit"
+        remote("commit", generation)
+        return {"operation": "devsy-apply", "source_sha": source_sha,
+                "host_devsy": applied, "drift_check": "PASS",
+                "native_read": "PASS", "identity_preserved": True,
+                "accessories_unchanged": True,
+                "rollback_ready": bool(applied.get("rollback_ready", not changed))}
+    except Exception:
+        try:
+            source_restored = True
+            try:
+                sync_source(old_source_sha)
+            except Exception:
+                source_restored = False
+            if changed:
+                remote("devsy-rollback", payload)
+            restored = remote("snapshot")
+            plan_restored = remote("devsy-plan", payload)
+            if (not source_restored
+                    or restored.get("source_sha") != old_source_sha
+                    or restored.get("identity") != before.get("identity")
+                    or restored.get("inventory") != before.get("inventory")
+                    or restored.get("tunnel_count") != 1
+                    or _devsy_plan_fingerprint(plan_restored)
+                    != _devsy_plan_fingerprint(plan_before)):
+                raise RuntimeError("rollback verification differed from the prior state")
+            remote("rollback-commit", {"current": current, "previous": previous})
+        except Exception:
+            raise RuntimeError("Host Devsy apply failed at " + phase
+                               + "; automatic rollback FAILED; operator recovery required") from None
+        raise RuntimeError("Host Devsy apply failed at " + phase
+                           + "; previous host state restored") from None
+
+
 def prove_images(manifest,current=None):
     recorded=(current or {}).get('publication_proof',{})
     result={};checked={}
@@ -231,7 +361,7 @@ def stop_owned(config):
     remote('remove-kamal')
 
 
-def restore(previous,directory):
+def restore(previous,directory,native_tuple=None):
     config=configuration(directory,previous['manifest'])
     current=remote('inventory')
     if current['kamal_present']:stop_owned(config)
@@ -246,17 +376,17 @@ def restore(previous,directory):
         for name in ORDER:
             kamal(config,'reboot',name);remote('wait',{'owner':'kamal','service':name})
         remote('devsy-start')
-    remote('smoke')
+    smoke(native_tuple)
     after=remote('snapshot')
     if after['identity']!=previous['identity']:raise RuntimeError('Rollback identity mismatch')
     remote('set-current',previous)
     return after
 
 
-def restore_cas(previous,directory):
+def restore_cas(previous,directory,native_tuple=None):
     config=configuration(directory,previous['manifest'])
     kamal(config,'reboot','cas');remote('wait',{'owner':'kamal','service':'cas'})
-    remote('smoke');after=remote('snapshot')
+    smoke(native_tuple);after=remote('snapshot')
     if after['identity']!=previous['identity']:raise RuntimeError('CAS rollback identity mismatch')
     if after['source_sha']!=previous['source_sha']:raise RuntimeError('CAS rollback found source drift; full deployment reconciliation required')
     remote('set-current',previous)
@@ -264,6 +394,8 @@ def restore_cas(previous,directory):
 
 
 def execute(args):
+    native_tuple = native_codex_tuple(
+        args, require_valid=args.operation in ('adopt','cas','deploy','devsy-apply'))
     if INSTANCE is None:
         configure_instance(getattr(args,'instance_profile',None) or os.environ.get('KAMAL_INSTANCE_PROFILE',DEFAULT_INSTANCE_PROFILE))
     trusted_context(os.environ,args.local)
@@ -272,8 +404,15 @@ def execute(args):
     with lock(), tempfile.TemporaryDirectory(prefix='mcp-kamal-') as directory:
         if args.operation=='status':
             result=remote('status')
-            result['smoke']=remote('smoke') if result['healthy'] else {'status':'BLOCKED: managed service unhealthy'}
+            result['devsy_plan']=remote('devsy-plan',devsy_payload())
+            result['smoke']=smoke(native_tuple) if result['healthy'] else {'status':'BLOCKED: managed service unhealthy'}
             return result
+        if args.operation=='devsy-check':
+            return {'operation':'devsy-check','plan':remote('devsy-plan',devsy_payload()),'mutated':False}
+        if args.operation=='devsy-apply':
+            if not getattr(args,'approve_host_devsy_apply',False):
+                raise ValueError('explicit Host Devsy apply approval is required')
+            return _apply_host_devsy(native_tuple,sha)
         if args.operation=='rollback':
             current=remote('current');previous=remote('rollback-target')
             if current is None:raise ValueError('No recorded deployment generation exists')
@@ -282,7 +421,7 @@ def execute(args):
             remote('images',previous['manifest'])
             state=remote('status')
             if state['inventory'].get('executor',{}).get('state')=='running':remote('backup')
-            after=restore(previous,directory)
+            after=restore(previous,directory,native_tuple)
             remote('rollback-commit',{'current':previous,'previous':current})
             return {'operation':'rollback','authority':after['authority'],'inventory':after['inventory'],'identity_preserved':True}
         before=remote('snapshot')
@@ -302,11 +441,14 @@ def execute(args):
             service='schema-proxy' if key=='schema_proxy' else key
             if before['inventory'][service]['image']!=image_id:raise ValueError('Current managed image differs from recorded generation')
         if args.operation in ('preflight','status'):
-            smoke=remote('smoke')
-            return {'operation':args.operation,'authority':before['authority'],'inventory':before['inventory'],'smoke':smoke,'pinned_images':manifest['images']}
+            devsy_plan=remote('devsy-plan',devsy_payload())
+            smoke_result=smoke(native_tuple)
+            return {'operation':args.operation,'authority':before['authority'],'inventory':before['inventory'],'devsy_plan':devsy_plan,'smoke':smoke_result,'pinned_images':manifest['images']}
         if args.operation=='cas' and before['authority']!='kamal':raise ValueError('Kamal adoption must precede accessory redeploy')
         if args.operation=='adopt' and before['authority']!='compose':raise ValueError('Adoption requires the sole Compose owner')
         if args.operation=='deploy' and before['authority']!='kamal':raise ValueError('Use explicit adoption first')
+        remote('devsy-check',devsy_payload())
+        smoke(native_tuple, require_native=True)
         remote('images',manifest)
         if needs_baseline:remote('baseline',current)
         backup=remote('backup-cas' if args.operation=='cas' else 'backup')
@@ -332,23 +474,23 @@ def execute(args):
                 phase='devsy-start'
                 remote('devsy-start')
             phase='acceptance'
-            after=remote('snapshot');smoke=remote('smoke')
+            after=remote('snapshot');smoke_result=smoke(native_tuple, require_native=True)
             if after['identity']!=before['identity']:raise RuntimeError('Post-deploy Executor identity changed')
             deployed_source=current['source_sha'] if args.operation=='cas' else sha
             remote('commit',{'authority':'kamal','source_sha':deployed_source,'manifest':manifest,'identity':after['identity'],'publication_proof':publication})
-            return {'operation':args.operation,'authority':'kamal','inventory':after['inventory'],'smoke':smoke,'identity_preserved':True,'backup':backup,'source_sha':deployed_source,'controller_sha':sha}
+            return {'operation':args.operation,'authority':'kamal','inventory':after['inventory'],'smoke':smoke_result,'identity_preserved':True,'backup':backup,'source_sha':deployed_source,'controller_sha':sha}
         except Exception:
             # Report only our fixed phase names, never subprocess output or secrets.
             try:
-                if args.operation=='cas':restore_cas(current,directory)
-                else:restore(current,directory)
+                if args.operation=='cas':restore_cas(current,directory,native_tuple)
+                else:restore(current,directory,native_tuple)
             except Exception:
                 raise RuntimeError('Deployment failed at '+phase+'; automatic rollback FAILED; operator recovery required') from None
             raise RuntimeError('Deployment failed at '+phase+'; previous generation restored') from None
 
 
 def main():
-    p=argparse.ArgumentParser();p.add_argument('operation',choices=('preflight','status','adopt','cas','deploy','rollback'));p.add_argument('--cas-digest',default='');p.add_argument('--cas-revision',default='');p.add_argument('--approve-full-stack',action='store_true');p.add_argument('--instance-profile',help='Absolute path to an owned mode-0600 private instance profile');p.add_argument('--local',action='store_true',help='Approved Pi break-glass, or bin/kamal with explicit private local config')
+    p=argparse.ArgumentParser();p.add_argument('operation',choices=('preflight','status','adopt','cas','deploy','rollback','devsy-check','devsy-apply'));p.add_argument('--cas-digest',default='');p.add_argument('--cas-revision',default='');p.add_argument('--approve-full-stack',action='store_true');p.add_argument('--approve-host-devsy-apply',action='store_true');p.add_argument('--instance-profile',help='Absolute path to an owned mode-0600 private instance profile');p.add_argument('--native-target',default=os.environ.get('NATIVE_TARGET'));p.add_argument('--native-cwd',default=os.environ.get('NATIVE_CWD'));p.add_argument('--native-thread-id',default=os.environ.get('NATIVE_THREAD_ID'));p.add_argument('--local',action='store_true',help='Approved Pi break-glass, or bin/kamal with explicit private local config')
     args=p.parse_args()
     try:print(json.dumps(execute(args),indent=2))
     except Exception as e:print(str(e),file=sys.stderr);sys.exit(1)

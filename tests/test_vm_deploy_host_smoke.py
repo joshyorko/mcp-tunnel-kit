@@ -1,0 +1,196 @@
+"""Host smoke checks keep Devsy preflight independent of native thread identity."""
+
+import json
+import os
+from pathlib import Path
+import re
+import sys
+from types import SimpleNamespace
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
+import vm_deploy_host as host
+
+
+DAKOTA_CWD = "/srv/dakota/worktree/mcp-tunnel-kit"
+VM_CWD = "/srv/control-plane/mcp-tunnel-kit"
+THREAD_ID = "12345678-1234-5678-9abc-def012345678"
+
+
+class FakeSession:
+    def __init__(self, *, expected_cwd=DAKOTA_CWD, expected_thread=THREAD_ID,
+                 read_error=None):
+        self.expected_cwd = expected_cwd
+        self.expected_thread = expected_thread
+        self.read_error = read_error
+        self.calls = []
+
+    def call(self, _method, request):
+        code = request["arguments"]["code"]
+        match = re.fullmatch(r"return await tools\.codex\.([a-z_]+)\((.*)\);", code)
+        assert match, "smoke must call the named Codex tool with a JSON argument"
+        name, raw_arguments = match.groups()
+        arguments = json.loads(raw_arguments)
+        self.calls.append((name, arguments))
+        payload = arguments.get("payload", {})
+        if name == "list_targets":
+            content = {"result": {"targets": [{"name": "local"}]}, "error": None}
+        elif name == "discover_threads":
+            content = {
+                "result": {
+                    "operation": "thread/list",
+                    "connection": {"target": "local"},
+                    "result": {"data": [{"id": self.expected_thread,
+                                           "cwd": self.expected_cwd}]},
+                },
+                "error": None,
+            }
+        elif name == "read_thread":
+            if self.read_error:
+                content = {"result": None, "error": self.read_error}
+            elif (payload.get("cwd"), payload.get("thread_id")) != (
+                    self.expected_cwd, self.expected_thread):
+                content = {
+                    "result": None,
+                    "error": "Stored thread id/cwd does not match the requested workstream",
+                }
+            else:
+                content = {
+                    "result": {
+                        "operation": "thread/read",
+                        "connection": {"target": "local"},
+                        "result": {"thread": {"id": self.expected_thread,
+                                               "cwd": self.expected_cwd}},
+                    },
+                    "error": None,
+                }
+        else:
+            raise AssertionError(f"unexpected Codex tool: {name}")
+        return {"structuredContent": {
+            "status": "completed",
+            "execution": {"ok": True, "value": {"structuredContent": content}},
+        }}
+
+
+def configured_host(tmp_path, monkeypatch, *, session):
+    state = tmp_path / "state"
+    profile = {
+        "schema_version": 1,
+        "deploy_host": {"alias": "control-plane-vm", "address": "203.0.113.10",
+                        "user": "operator", "host_key_fingerprint": "SHA256:" + "A" * 43},
+        "vm": {
+            "repo_dir": VM_CWD,
+            "state_dir": str(state),
+            "network": {"name": "mcp-control-plane", "subnet": "198.18.0.0/24",
+                        "gateway": "198.18.0.1"},
+            "native_ssh_dir": str(state / "native-ssh"),
+            "devsy": {"config_source": str(state / "devsy/config.yaml"),
+                      "context_dir": str(state / "devsy/contexts/default"),
+                      "kubeconfig_source": str(state / "ror/operator-kubeconfig"),
+                      "context": "default"},
+        },
+    }
+    host.configure_profile(profile)
+    fake = SimpleNamespace(
+        executor_session=lambda: (object(), session),
+        verify_compact=lambda _session: None,
+        execution=lambda result: result["structuredContent"],
+        read_devsy=lambda _session, _profile: None,
+    )
+    monkeypatch.setitem(sys.modules, "compose_control", fake)
+    monkeypatch.setattr(host, "private", lambda _path: b'{"profile":"fixture"}')
+    return fake
+
+
+def test_smoke_reads_explicit_dakota_tuple_and_not_vm_checkout(tmp_path, monkeypatch):
+    session = FakeSession()
+    configured_host(tmp_path, monkeypatch, session=session)
+
+    result = host.smoke({"native_codex": {
+        "target": "local", "cwd": DAKOTA_CWD, "thread_id": THREAD_ID,
+    }, "require_native": True})
+
+    assert result["native_read"]["status"] == "PASS"
+    assert result["devsy_reads"] == "PASS"
+    discovery = next(args["payload"] for name, args in session.calls
+                     if name == "discover_threads")
+    exact_read = next(args["payload"] for name, args in session.calls
+                      if name == "read_thread")
+    assert discovery["cwd"] == DAKOTA_CWD
+    assert discovery["limit"] <= 100
+    assert exact_read == {"target": "local", "cwd": DAKOTA_CWD,
+                          "thread_id": THREAD_ID, "include_turns": False}
+    assert all(VM_CWD not in json.dumps(args) for _, args in session.calls)
+
+
+def test_non_strict_smoke_reports_redacted_thread_mismatch_after_devsy_reads(
+        tmp_path, monkeypatch):
+    session = FakeSession(expected_cwd=DAKOTA_CWD)
+    fake = configured_host(tmp_path, monkeypatch, session=session)
+    devsy_reads = []
+    fake.read_devsy = lambda _session, _profile: devsy_reads.append("checked")
+
+    result = host.smoke({"native_codex": {
+        "target": "local", "cwd": VM_CWD, "thread_id": THREAD_ID,
+    }, "require_native": False})
+
+    assert devsy_reads == ["checked"]
+    assert result["native_read"] == {
+        "status": "FAIL", "error_code": "NATIVE_THREAD_NOT_DISCOVERED",
+    }
+    assert "home/" not in json.dumps(result)
+    assert not any(name == "read_thread" for name, _ in session.calls)
+
+
+def test_non_strict_smoke_redacts_structured_thread_error(tmp_path, monkeypatch):
+    session = FakeSession(read_error=(
+        "Stored thread id/cwd does not match the requested workstream"))
+    fake = configured_host(tmp_path, monkeypatch, session=session)
+    devsy_reads = []
+    fake.read_devsy = lambda _session, _profile: devsy_reads.append("checked")
+
+    result = host.smoke({"native_codex": {
+        "target": "local", "cwd": DAKOTA_CWD, "thread_id": THREAD_ID,
+    }, "require_native": False})
+
+    assert devsy_reads == ["checked"]
+    assert result["native_read"] == {
+        "status": "FAIL", "error_code": "THREAD_WORKSTREAM_MISMATCH",
+    }
+    assert "Stored thread" not in json.dumps(result)
+
+
+def test_strict_smoke_fails_closed_when_native_tuple_is_missing(tmp_path, monkeypatch):
+    session = FakeSession()
+    fake = configured_host(tmp_path, monkeypatch, session=session)
+    devsy_reads = []
+    fake.read_devsy = lambda _session, _profile: devsy_reads.append("checked")
+
+    try:
+        host.smoke({"require_native": True})
+    except ValueError as exc:
+        assert str(exc) == "qualified Dakota native read is required"
+    else:
+        raise AssertionError("strict smoke accepted an unconfigured native tuple")
+
+    assert devsy_reads == ["checked"]
+    assert not any(name == "read_thread" for name, _ in session.calls)
+
+
+def test_host_devsy_bootstrap_adapter_uses_validated_vm_paths(tmp_path, monkeypatch):
+    import grp
+    import pwd
+    configured_host(tmp_path, monkeypatch, session=FakeSession())
+    policy = json.loads((ROOT / "config/devsy-vm-bootstrap.json").read_text())
+    template = (ROOT / "config/codex-control-plane-devsy.service.in").read_text()
+    starter = "#!/usr/bin/env python3\n"
+
+    bootstrap = host._devsy_bootstrap({
+        "policy": policy, "unit_template": template, "starter_source": starter,
+    })
+
+    assert bootstrap.profile["repo_dir"] == VM_CWD
+    assert bootstrap.profile["state_dir"] == str(host.STATE)
+    assert bootstrap.profile["uid"] == os.getuid()
+    assert bootstrap.profile["service_user"] == pwd.getpwuid(os.getuid()).pw_name
+    assert bootstrap.profile["service_group"] == grp.getgrgid(os.getgid()).gr_name
