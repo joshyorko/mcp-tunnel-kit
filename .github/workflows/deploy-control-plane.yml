@@ -6,7 +6,7 @@ on:
         description: Controlled operation (adopt is one-time Compose to Kamal handoff)
         type: choice
         default: preflight
-        options: [preflight, status, devsy-check, devsy-apply, adopt, cas, deploy, rollback]
+        options: [preflight, status, devsy-check, devsy-apply, devsy-rollback, adopt, cas, deploy, rollback]
         required: true
       cas_digest:
         description: Optional approved CAS sha256 digest; revision must also be supplied
@@ -34,6 +34,10 @@ on:
         default: false
       approve_host_devsy_apply:
         description: Explicitly approve the isolated VM-host Devsy bootstrap/provider apply
+        type: boolean
+        default: false
+      approve_host_devsy_rollback:
+        description: Explicitly approve rollback of the last VM-host Devsy bootstrap/provider apply
         type: boolean
         default: false
 permissions:
@@ -81,11 +85,13 @@ jobs:
           NATIVE_THREAD_ID: ${{ inputs.native_thread_id }}
           FULL_APPROVAL: ${{ inputs.approve_full_stack }}
           HOST_DEVSY_APPLY_APPROVAL: ${{ inputs.approve_host_devsy_apply }}
+          HOST_DEVSY_ROLLBACK_APPROVAL: ${{ inputs.approve_host_devsy_rollback }}
         run: |
           set -euo pipefail
           args=("$OPERATION" --cas-digest "$CAS_DIGEST" --cas-revision "$CAS_REVISION")
           if [ "$FULL_APPROVAL" = true ]; then args+=(--approve-full-stack); fi
           if [ "$HOST_DEVSY_APPLY_APPROVAL" = true ]; then args+=(--approve-host-devsy-apply); fi
+          if [ "$HOST_DEVSY_ROLLBACK_APPROVAL" = true ]; then args+=(--approve-host-devsy-rollback); fi
           python3 scripts/deploy_control_plane.py "${args[@]}" | tee "$RUNNER_TEMP/control-plane-receipt.json"
           {
             printf '### Control-plane operation: %s\n\n' "$OPERATION"

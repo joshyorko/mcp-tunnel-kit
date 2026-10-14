@@ -376,6 +376,7 @@ class VMDevsyBootstrap:
         temporary = path.with_name(path.name + ".new-" + str(os.getpid()))
         try:
             fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode)
+            os.fchmod(fd, mode)
             with os.fdopen(fd, "wb") as stream:
                 stream.write(payload)
                 stream.flush()
@@ -594,9 +595,28 @@ class VMDevsyBootstrap:
         receipt = self._receipt()
         backup = Path(receipt["backup_dir"])
         snapshot = self._read_json_private(backup / "manifest.json", required=True)
-        self._restore(snapshot, backup)
-        self._verify_restored(snapshot, backup)
+        current_state = self._inspect(include_cluster=False)
+        current_source = receipt.get("source_sha")
+        if not isinstance(current_source, str) or not re.fullmatch(r"[a-f0-9]{40}", current_source):
+            current_source = self._command([
+                "git", "-C", str(current_state["repo"]), "rev-parse", "HEAD",
+            ]).stdout.strip()
+        current_backup = self._backup(current_state, current_source)
+        try:
+            self._restore(snapshot, backup)
+            self._verify_restored(snapshot, backup)
+        except Exception:
+            try:
+                self._restore(current_backup["manifest"], current_backup["directory"])
+                self._verify_restored(current_backup["manifest"], current_backup["directory"])
+            except Exception:
+                raise BootstrapError("Host Devsy rollback failed; automatic recovery failed") from None
+            raise BootstrapError("Host Devsy rollback failed; current host state restored") from None
         receipt["status"] = "rolled_back"
+        receipt["tap_revision"] = snapshot.get("tap_revision")
+        receipt["devsy_version"] = snapshot.get("devsy_version")
+        receipt["devsy_sha256"] = snapshot.get("devsy_sha256")
+        receipt["rolled_back_source_sha"] = plan["source_sha"]
         receipt["rolled_back_at_ns"] = time.time_ns()
         self._write_private(self._store() / "devsy-host-current.json",
                             (json.dumps(receipt, sort_keys=True) + "\n").encode())
@@ -678,28 +698,38 @@ class VMDevsyBootstrap:
             return {"operation": "apply", "changed": False,
                     **self._public_plan(state)}
         backup = self._backup(state, source_sha)
+        phase = "stop-service"
         try:
             if state["service"]["active"]:
                 self._command(["sudo", "-n", "systemctl", "stop", "codex-control-plane-devsy"])
+            phase = "homebrew"
             brew = self._ensure_homebrew(state)
+            phase = "tap"
             self._ensure_tap(brew, state)
+            phase = "devsy-install"
             binary = self._install_devsy(brew, state)
             home, _state_dir, repo, kubeconfig = self._validate_inputs()
+            phase = "provider-config"
             provider = self._provider_state(binary, home, kubeconfig)
             provider_options(self.policy, str(kubeconfig))
             if provider["changes"]:
                 self._set_provider_options(binary, home, kubeconfig,
                                            provider_options(self.policy, str(kubeconfig)))
+            phase = "provider-readback"
             verified = self._provider_state(binary, home, kubeconfig)
             if verified["changes"]:
                 raise BootstrapError("ROR provider readback did not match the approved resource policy")
             desired_unit = self._desired_unit(brew)
+            phase = "bridge-starter"
             self._write_starter(repo, Path(self.profile["state_dir"]))
+            phase = "systemd-unit"
             self._install_unit(desired_unit)
             self._command(["sudo", "-n", "systemctl", "daemon-reload"])
             self._command(["sudo", "-n", "systemctl", "enable", "codex-control-plane-devsy"])
             action = "restart" if state["unit_state"] != "absent" else "start"
+            phase = "service-start"
             self._command(["sudo", "-n", "systemctl", action, "codex-control-plane-devsy"], timeout=180)
+            phase = "live-verification"
             self._verify_live(brew, binary, desired_unit, home, kubeconfig)
             receipt = {
                 "schema_version": 1,
@@ -712,6 +742,7 @@ class VMDevsyBootstrap:
                 "backup_dir": str(backup),
                 "applied_at_ns": time.time_ns(),
             }
+            phase = "receipt"
             self._write_private(self._store() / "devsy-host-current.json",
                                 (json.dumps(receipt, sort_keys=True) + "\n").encode())
             return {"operation": "apply", "changed": True,
@@ -720,12 +751,16 @@ class VMDevsyBootstrap:
                     "namespace": "devsy", "unit_sha256": receipt["unit_sha256"],
                     "rollback_ready": True, "executor_untouched": True,
                     "tunnel_untouched": True}
-        except Exception:
+        except Exception as error:
+            failure = str(error) if isinstance(error, BootstrapError) else type(error).__name__
             try:
                 self._restore(backup["manifest"], backup["directory"])
+                self._verify_restored(backup["manifest"], backup["directory"])
             except Exception:
-                raise BootstrapError("Devsy apply failed; automatic rollback failed") from None
-            raise BootstrapError("Devsy apply failed; previous host state restored") from None
+                raise BootstrapError("Devsy apply failed at " + phase
+                                    + "; automatic rollback failed") from None
+            raise BootstrapError("Devsy apply failed at " + phase
+                                + ": " + failure + "; previous host state restored") from None
 
     def _probe_bridge(self, config: dict) -> bool:
         from urllib.request import Request, urlopen
@@ -737,7 +772,7 @@ class VMDevsyBootstrap:
         except Exception:
             return False
 
-    def _inspect(self) -> dict:
+    def _inspect(self, *, include_cluster: bool = True) -> dict:
         home, state_dir, repo, kubeconfig = self._validate_inputs()
         receipt = self._receipt()
         brew_state = self._homebrew_state(receipt)
@@ -764,7 +799,8 @@ class VMDevsyBootstrap:
             provider_state = None
         else:
             provider_state = devsy_state["provider"]
-        cluster = self._cluster_admission(kubeconfig)
+        cluster = (self._cluster_admission(kubeconfig) if include_cluster
+                   else {"status": "not-queried-for-rollback"})
         changes = []
         if not brew_state["present"]:
             changes.append("install-homebrew")
@@ -1040,6 +1076,8 @@ class VMDevsyBootstrap:
                 and expected_helper in command and b"--serve" in command)
 
     def _backup(self, state: dict, source_sha: str) -> dict:
+        if not re.fullmatch(r"[a-f0-9]{40}", source_sha or ""):
+            raise BootstrapError("rollback source revision is invalid")
         store = self._store()
         parent = store / "devsy-host-backups"
         if not parent.exists():

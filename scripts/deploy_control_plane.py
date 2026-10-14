@@ -330,6 +330,48 @@ def _apply_host_devsy(native_tuple, source_sha):
                            + "; previous host state restored") from None
 
 
+def _rollback_host_devsy(native_tuple):
+    payload = devsy_payload()
+    before = remote("snapshot")
+    if before.get("authority") != "kamal" or before.get("tunnel_count") != 1:
+        raise ValueError("Host Devsy rollback requires the healthy Kamal owner and one tunnel client")
+    remote("lifecycle-check")
+    current = remote("current")
+    if (not isinstance(current, dict) or current.get("authority") != "kamal"
+            or current.get("identity") != before.get("identity")):
+        raise ValueError("Host Devsy rollback requires the recorded healthy Kamal generation")
+    target = remote("devsy-rollback-plan", payload)
+    target_sha = target.get("source_sha") if isinstance(target, dict) else None
+    if not isinstance(target_sha, str) or not re.fullmatch(r"[a-f0-9]{40}", target_sha):
+        raise ValueError("Host Devsy rollback plan is invalid")
+    if not target.get("ready"):
+        raise ValueError("Host Devsy rollback is not ready")
+
+    sync_source(target_sha)
+    restored = remote("devsy-rollback", payload)
+    if restored.get("restored") is not True or restored.get("source_sha") != target_sha:
+        raise RuntimeError("Host Devsy rollback receipt was invalid")
+    after = remote("snapshot")
+    if (after.get("source_sha") != target_sha
+            or after.get("identity") != before.get("identity")
+            or after.get("inventory") != before.get("inventory")
+            or after.get("tunnel_count") != 1
+            or after.get("authority") != "kamal"):
+        raise RuntimeError("Host Devsy rollback changed control-plane identity or accessory state")
+    plan_after = remote("devsy-plan", payload)
+    native = smoke(native_tuple)
+    generation = dict(current)
+    generation.update(authority="kamal", source_sha=target_sha,
+                      identity=after["identity"])
+    if not generation.get("publication_proof"):
+        generation["publication_proof"] = prove_images(generation["manifest"], generation)
+    remote("commit", generation)
+    return {"operation": "devsy-rollback", "host_devsy": restored,
+            "plan_after": plan_after, "native_read": native,
+            "identity_preserved": True, "accessories_unchanged": True,
+            "source_sha": target_sha}
+
+
 def prove_images(manifest,current=None):
     recorded=(current or {}).get('publication_proof',{})
     result={};checked={}
@@ -413,6 +455,10 @@ def execute(args):
             if not getattr(args,'approve_host_devsy_apply',False):
                 raise ValueError('explicit Host Devsy apply approval is required')
             return _apply_host_devsy(native_tuple,sha)
+        if args.operation=='devsy-rollback':
+            if not getattr(args,'approve_host_devsy_rollback',False):
+                raise ValueError('explicit Host Devsy rollback approval is required')
+            return _rollback_host_devsy(native_tuple)
         if args.operation=='rollback':
             current=remote('current');previous=remote('rollback-target')
             if current is None:raise ValueError('No recorded deployment generation exists')
@@ -490,7 +536,7 @@ def execute(args):
 
 
 def main():
-    p=argparse.ArgumentParser();p.add_argument('operation',choices=('preflight','status','adopt','cas','deploy','rollback','devsy-check','devsy-apply'));p.add_argument('--cas-digest',default='');p.add_argument('--cas-revision',default='');p.add_argument('--approve-full-stack',action='store_true');p.add_argument('--approve-host-devsy-apply',action='store_true');p.add_argument('--instance-profile',help='Absolute path to an owned mode-0600 private instance profile');p.add_argument('--native-target',default=os.environ.get('NATIVE_TARGET'));p.add_argument('--native-cwd',default=os.environ.get('NATIVE_CWD'));p.add_argument('--native-thread-id',default=os.environ.get('NATIVE_THREAD_ID'));p.add_argument('--local',action='store_true',help='Approved Pi break-glass, or bin/kamal with explicit private local config')
+    p=argparse.ArgumentParser();p.add_argument('operation',choices=('preflight','status','adopt','cas','deploy','rollback','devsy-check','devsy-apply','devsy-rollback'));p.add_argument('--cas-digest',default='');p.add_argument('--cas-revision',default='');p.add_argument('--approve-full-stack',action='store_true');p.add_argument('--approve-host-devsy-apply',action='store_true');p.add_argument('--approve-host-devsy-rollback',action='store_true');p.add_argument('--instance-profile',help='Absolute path to an owned mode-0600 private instance profile');p.add_argument('--native-target',default=os.environ.get('NATIVE_TARGET'));p.add_argument('--native-cwd',default=os.environ.get('NATIVE_CWD'));p.add_argument('--native-thread-id',default=os.environ.get('NATIVE_THREAD_ID'));p.add_argument('--local',action='store_true',help='Approved Pi break-glass, or bin/kamal with explicit private local config')
     args=p.parse_args()
     try:print(json.dumps(execute(args),indent=2))
     except Exception as e:print(str(e),file=sys.stderr);sys.exit(1)

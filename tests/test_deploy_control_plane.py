@@ -88,9 +88,13 @@ def test_protected_workflow_has_separate_host_devsy_plan_and_approved_apply():
     workflow = (ROOT / ".github/workflows/deploy-control-plane.yml").read_text()
     assert "devsy-check" in workflow
     assert "devsy-apply" in workflow
+    assert "devsy-rollback" in workflow
     assert "approve_host_devsy_apply:" in workflow
+    assert "approve_host_devsy_rollback:" in workflow
     assert "HOST_DEVSY_APPLY_APPROVAL: ${{ inputs.approve_host_devsy_apply }}" in workflow
     assert "args+=(--approve-host-devsy-apply)" in workflow
+    assert "HOST_DEVSY_ROLLBACK_APPROVAL: ${{ inputs.approve_host_devsy_rollback }}" in workflow
+    assert "args+=(--approve-host-devsy-rollback)" in workflow
 
 
 def test_remote_source_receives_only_validated_profile_over_pinned_alias():

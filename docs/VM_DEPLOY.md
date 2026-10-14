@@ -50,11 +50,30 @@ data, never executed as shell code.
 Open Actions → **Deploy VM control plane** → **Run workflow**, select **main**.
 Only manual main dispatches can use the `control-plane-production` environment.
 Every operation has GitHub concurrency serialization and a private VM lock.
+The workflow also accepts an optional operator-supplied Dakota native tuple:
+target `local`, exact worktree cwd, and persistent thread id. Full image deploy,
+adopt, and CAS acceptance require that tuple and a successful metadata-only
+exact read. `preflight` reports native-read status without letting a thread
+mismatch block its separate read-only Devsy plan.
 
 - `preflight`: validate host identity, image architecture/OCI source labels,
-  existing encrypted identity, catalog, exact configured thread and Devsy reads.
-- `status`: report the current authority, service inventory and authenticated
-  smoke results.
+  existing encrypted identity and Devsy provider plan. It also reports catalog,
+  Devsy reads and native-read status independently.
+- `status`: report current authority, service inventory, Devsy plan and smoke
+  results.
+- `devsy-check`: non-mutating host Devsy version, systemd, provider, cluster
+  capacity and resource-policy plan. `changes-required` does not apply anything.
+- `devsy-apply`: isolated host-only bootstrap/upgrade. Set the **Approve host
+  Devsy apply** checkbox and supply a verified native tuple. The workflow pins
+  and verifies Homebrew, Josh's tap and the Devsy artifact, applies the private
+  ROR Kubernetes provider policy, enables/verifies `codex-control-plane-devsy`,
+  checks a real exact Dakota native read, and verifies unchanged Kamal
+  accessories, Executor identity and tunnel count. It does not reboot Kamal
+  accessories or create workers.
+- `devsy-rollback`: host-only restoration of the last successful bootstrap
+  snapshot and its source revision. Set the separate **Approve host Devsy
+  rollback** checkbox. The native-read status is reported but does not block
+  rollback.
 - `adopt`: one-time Compose → Kamal authority handoff. Check the full-stack
   approval box. A retained Executor backup is made before service changes; Compose is stopped
   through its owning lifecycle before any Kamal writer/client starts. The
@@ -75,6 +94,17 @@ The job summary records the source SHA, runner, VM and operation receipt.
 Mutating operation receipts include the backup result where the operation
 returns it. No deployment credentials or kubeconfig contents are uploaded.
 Fresh worker creation/deletion is never a deployment smoke test.
+
+Protected GitHub image deploys call the host Devsy drift check and refuse to
+proceed when the selected binary, unit or provider differs. They never apply
+host changes. Local `make cas`, `make up`, restarts, and image redeploys do not
+reinstall the CLI, rewrite the unit, or change provider options. For a clean prepared Linux ARM64
+VM, OS/user setup, Tailscale enrollment, the authorized ROR namespace, private
+Devsy config/context, kubeconfig and cluster prerequisites must already exist;
+this repository does not provision them. Keep config and kubeconfig as
+VM-local mode-`0600` inputs. Run `devsy-check`, review the plan, then run the
+explicit `devsy-apply` workflow operation. If a real clean VM is unavailable,
+isolated fixture results must be labeled as fixture-only.
 
 ## Ownership and state
 

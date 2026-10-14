@@ -88,14 +88,16 @@ def test_cas_failure_restores_only_cas_and_uses_cas_backup():
             return current
         if action in {"backup-cas", "profile", "network-check", "wait", "set-current"}:
             return {}
+        if action == "devsy-check":
+            return {"status": "current"}
         if action in {"image-check", "images"}:
             return {"image_ids": {"cas": "image-cas", "schema_proxy": "image-schema-proxy",
                                   "executor": "image-executor", "tunnel": "image-tunnel"}}
         if action == "smoke":
             smoke_count += 1
-            if smoke_count == 1:
+            if smoke_count == 2:
                 raise RuntimeError("new CAS smoke failed")
-            return {"status": "PASS"}
+            return {"native_read": {"status": "PASS"}}
         raise AssertionError(f"Unexpected VM action: {action}")
 
     kamal_calls = []
@@ -106,7 +108,10 @@ def test_cas_failure_restores_only_cas_and_uses_cas_backup():
          patch.object(d, "sync_source") as sync_source, \
          patch.dict(os.environ, {"GITHUB_SHA": "b" * 40}):
         with pytest.raises(RuntimeError, match="previous generation restored"):
-            d.execute(args("cas"))
+            d.execute(args("cas", native={
+                "target": "local", "cwd": "/home/operator/worktree/mcp-tunnel-kit",
+                "thread_id": "12345678-1234-5678-9abc-def012345678",
+            }))
 
     assert ("backup-cas", None) in calls
     assert ("backup", None) not in calls
@@ -433,6 +438,10 @@ def test_source_sync_failure_is_inside_protected_deployment_path(rollback_fails)
         if action in {"network-check", "image-check", "images"}:
             return {"image_ids": {"cas": "image-cas", "schema_proxy": "image-schema-proxy",
                                   "executor": "image-executor", "tunnel": "image-tunnel"}}
+        if action == "devsy-check":
+            return {"status": "current"}
+        if action == "smoke":
+            return {"native_read": {"status": "PASS"}}
         return {}
 
     with patch.object(d, "trusted_context"), patch.object(d, "lock", return_value=nullcontext()), \
@@ -441,7 +450,10 @@ def test_source_sync_failure_is_inside_protected_deployment_path(rollback_fails)
          patch.object(d, "sync_source", side_effect=RuntimeError("secret-source-detail")), \
          patch.object(d, "restore", side_effect=RuntimeError("secret-rollback-detail") if rollback_fails else None) as restore, patch.dict(os.environ, {"GITHUB_SHA": "b" * 40}):
         with pytest.raises(RuntimeError, match="Deployment failed at source-sync") as error:
-            d.execute(args("deploy", approve=True))
+            d.execute(args("deploy", approve=True, native={
+                "target": "local", "cwd": "/home/operator/worktree/mcp-tunnel-kit",
+                "thread_id": "12345678-1234-5678-9abc-def012345678",
+            }))
 
     restore.assert_called_once()
     assert "secret" not in str(error.value)
@@ -471,7 +483,10 @@ def test_adoption_network_conflict_is_rejected_before_stopping_compose():
          patch.object(d, "sync_source"), patch.object(d, "restore"), \
          patch.dict(os.environ, {"GITHUB_SHA": "b" * 40}):
         with pytest.raises(ValueError, match="foreign network conflict"):
-            d.execute(args("adopt", approve=True))
+            d.execute(args("adopt", approve=True, native={
+                "target": "local", "cwd": "/home/operator/worktree/mcp-tunnel-kit",
+                "thread_id": "12345678-1234-5678-9abc-def012345678",
+            }))
 
     assert "compose-stop" not in calls
 
@@ -490,15 +505,20 @@ def test_adoption_network_check_precedes_compose_stop():
         if action in {"image-check", "images"}:
             return {"image_ids": {"cas": "image-cas", "schema_proxy": "image-schema-proxy",
                                   "executor": "image-executor", "tunnel": "image-tunnel"}}
+        if action == "devsy-check":
+            return {"status": "current"}
         if action == "smoke":
-            return {"status": "PASS"}
+            return {"native_read": {"status": "PASS"}}
         return {}
 
     with patch.object(d, "trusted_context"), patch.object(d, "lock", return_value=nullcontext()), \
          patch.object(d, "remote", side_effect=remote), patch.object(d, "sync_source"), \
          patch.object(d, "prove_images", return_value={}), patch.object(d, "kamal"), \
          patch.dict(os.environ, {"GITHUB_SHA": "b" * 40}):
-        d.execute(args("adopt", approve=True))
+        d.execute(args("adopt", approve=True, native={
+            "target": "local", "cwd": "/home/operator/worktree/mcp-tunnel-kit",
+            "thread_id": "12345678-1234-5678-9abc-def012345678",
+        }))
 
     assert calls.index("network-check") < calls.index("compose-stop")
 

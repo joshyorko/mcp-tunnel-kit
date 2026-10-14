@@ -181,6 +181,25 @@ def test_host_backup_binds_the_vm_source_revision_for_rollback(tmp_path):
     assert backup["manifest"]["source_sha"] == "a" * 40
 
 
+def test_declared_systemd_unit_mode_is_not_reduced_by_process_umask(tmp_path):
+    module = bootstrap_module()
+    profile = private_profile(tmp_path)
+    bootstrap = bootstrap_class(module)(
+        profile, policy(),
+        unit_template=(ROOT / "config/codex-control-plane-devsy.service.in").read_text(),
+        system="Linux", machine="aarch64",
+    )
+    unit = tmp_path / "systemd/codex-control-plane-devsy.service"
+    unit.parent.mkdir(mode=0o700)
+    old_umask = os.umask(0o077)
+    try:
+        bootstrap._write_private(unit, b"[Unit]\n", 0o644)
+    finally:
+        os.umask(old_umask)
+
+    assert unit.stat().st_mode & 0o777 == 0o644
+
+
 @pytest.mark.parametrize(
     ("system", "machine"),
     [("Darwin", "aarch64"), ("Linux", "x86_64"), ("Windows", "AMD64")],

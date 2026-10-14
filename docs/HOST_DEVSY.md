@@ -1,14 +1,66 @@
 # Host-native Devsy through Executor
 
-This optional integration exposes the existing host `devsy mcp serve` beside
-Codex, through the same Executor-facing Secure MCP Tunnel. It does not install
-Devsy, create a provider or workspace, change CAS, or add a scheduler.
+This document describes the host bridge runtime that exposes `devsy mcp serve`
+beside Codex through the same Executor-facing Secure MCP Tunnel. For the
+production VM's pinned CLI installation and ROR provider lifecycle, use the
+protected CI workflow described below; the bridge runtime by itself does not
+install Devsy, create a provider or workspace, change CAS, or add a scheduler.
 
 ```text
 one Secure MCP Tunnel → Executor /mcp?elicitation_mode=browser
                          ├─ Codex → managed gateway:8088/mcp → CAS
                          └─ Devsy → managed gateway:8089/mcp → host devsy mcp serve
 ```
+
+## Production VM bootstrap and updates
+
+Issue #27's VM bootstrap is limited to a **prepared Linux ARM64 VM**. OS setup,
+VM provisioning, Tailscale enrollment, and ROR cluster provisioning remain
+external prerequisites. The VM needs its declared checkout and private state
+paths, systemd and the approved noninteractive sudo rules, `kubectl`, and
+operator-supplied mode-`0600` Devsy config, context, and ROR kubeconfig. These
+private inputs stay on the VM; do not copy Dakota's kubeconfig or commit any of
+them.
+
+Use GitHub Actions → **Deploy VM control plane** on `main`, on the existing
+`pi5-01-mcp-control-plane` runner:
+
+- `devsy-check` runs a read-only plan. It reports the pinned Homebrew/tap/Devsy
+  provenance, existing systemd identity, ROR context/namespace, worker selector,
+  and main/init CPU and memory requests/limits. A `changes-required` result is a
+  plan, not an apply.
+- `preflight` also reports this Devsy plan. Its native Codex status is separate;
+  a stale or missing native thread cannot suppress the non-mutating Devsy plan.
+- `devsy-apply` requires the separate **Approve host Devsy apply** checkbox and
+  an explicit verified Dakota tuple: target `local`, exact Dakota worktree cwd,
+  and a thread id discovered in that cwd. It verifies the tuple with bounded
+  discovery and an exact metadata-only read before changing the host. It backs
+  up the unit, bridge/provider config, previous verified CLI identity, and
+  source revision, then installs/verifies the pinned tap CLI, provider policy,
+  starter, and unit. Post-apply service/provider checks, the native read,
+  Kamal accessory inventory, Executor identity, and single tunnel identity must
+  pass. Failure triggers the host-only rollback path; Kamal accessories are not
+  restarted by this operation.
+- `devsy-rollback` requires its own **Approve host Devsy rollback** checkbox. It
+  restores the last successful host bootstrap receipt and its source revision.
+  Native-read failure is reported separately so it does not prevent a safe host
+  rollback. After rollback, `devsy-check` may report drift against the current
+  policy; normal image deployments remain blocked until the approved apply
+  reconciles it.
+
+Ordinary `preflight`, `status`, `make cas`, and Kamal image deploys never apply
+host bootstrap changes. Image deploys run the drift check and refuse to proceed
+when host Devsy state differs. Reboots and service starts preserve the current
+binary, unit, private config, and provider binding. Do not run `brew`, `systemctl`,
+or a direct SSH bootstrap on the workstation as an alternate deployment path.
+
+For an update, review the new version, tap commit, formula checksum, artifact
+checksum, provider resources, and rollback impact in
+[`config/devsy-vm-bootstrap.json`](../config/devsy-vm-bootstrap.json), then run
+`devsy-check` and the separately approved `devsy-apply`. To recover, use the
+protected `devsy-rollback` operation, re-run `devsy-check`, and re-apply only
+after the cause is corrected. A real fresh-host acceptance is still required;
+fixture tests alone do not prove a clean production VM.
 
 ## Why a host adapter
 
