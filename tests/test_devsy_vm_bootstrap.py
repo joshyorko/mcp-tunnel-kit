@@ -200,6 +200,31 @@ def test_declared_systemd_unit_mode_is_not_reduced_by_process_umask(tmp_path):
     assert unit.stat().st_mode & 0o777 == 0o644
 
 
+def test_rollback_plan_rejects_symlinked_backup_directory(tmp_path):
+    module = bootstrap_module()
+    profile = private_profile(tmp_path)
+    store = Path(profile["state_dir"]) / "deployment"
+    store.mkdir(mode=0o700)
+    outside = tmp_path / "outside-backup"
+    outside.mkdir(mode=0o700)
+    manifest = outside / "manifest.json"
+    manifest.write_text(json.dumps({"source_sha": "a" * 40}))
+    manifest.chmod(0o600)
+    backup = store / "backup-link"
+    backup.symlink_to(outside, target_is_directory=True)
+    receipt = store / "devsy-host-current.json"
+    receipt.write_text(json.dumps({"status": "applied", "backup_dir": str(backup)}))
+    receipt.chmod(0o600)
+    bootstrap = bootstrap_class(module)(
+        profile, policy(),
+        unit_template=(ROOT / "config/codex-control-plane-devsy.service.in").read_text(),
+        system="Linux", machine="aarch64",
+    )
+
+    with pytest.raises(module.BootstrapError, match="private Devsy directory ownership or mode mismatch"):
+        bootstrap.rollback_plan()
+
+
 @pytest.mark.parametrize(
     ("system", "machine"),
     [("Darwin", "aarch64"), ("Linux", "x86_64"), ("Windows", "AMD64")],

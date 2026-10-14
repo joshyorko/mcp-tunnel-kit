@@ -632,6 +632,7 @@ class VMDevsyBootstrap:
         backup = Path(receipt.get("backup_dir", ""))
         if not backup.is_absolute() or self._store(create=False) not in backup.parents:
             raise BootstrapError("Devsy rollback receipt path is invalid")
+        validate_private_directory(backup, int(self.profile["uid"]))
         snapshot = self._read_json_private(backup / "manifest.json", required=True)
         source_sha = snapshot.get("source_sha")
         if not isinstance(source_sha, str) or not re.fullmatch(r"[a-f0-9]{40}", source_sha):

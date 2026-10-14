@@ -839,6 +839,12 @@ def compose_start():
     return {'compose_started':True}
 
 
+def devsy_start():
+    """Restart the existing host bridge without rewriting bootstrap-managed state."""
+    run(['sudo','-n','systemctl','restart','codex-control-plane-devsy'])
+    return {'devsy':'PASS'}
+
+
 def invocation_profile(argv=None):
     """Load a local operator profile or decode the controller's SSH payload."""
     argv=list(sys.argv if argv is None else argv)
@@ -947,11 +953,7 @@ def main():
     elif action=='compose-start':
         result=compose_start()
     elif action=='devsy-start':
-        helper=ROOT/'scripts/host_devsy_service.py'
-        starter=STATE/'start-host-devsy.py';old=STATE/'deployment/start-host-devsy.before-kamal.py'
-        if not old.exists():old.write_bytes(starter.read_bytes());old.chmod(0o600)
-        starter.write_text('import runpy\nrunpy.run_path('+repr(str(helper))+', run_name="__main__")\n');starter.chmod(0o700)
-        run(['sudo','-n','systemctl','restart','codex-control-plane-devsy']);result={'devsy':'PASS'}
+        result=devsy_start()
     elif action=='devsy-stop':
         run(['sudo','-n','systemctl','stop','codex-control-plane-devsy']);result={'devsy_stopped':True}
     elif action=='devsy-ensure':

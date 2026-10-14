@@ -194,3 +194,20 @@ def test_host_devsy_bootstrap_adapter_uses_validated_vm_paths(tmp_path, monkeypa
     assert bootstrap.profile["uid"] == os.getuid()
     assert bootstrap.profile["service_user"] == pwd.getpwuid(os.getuid()).pw_name
     assert bootstrap.profile["service_group"] == grp.getgrgid(os.getgid()).gr_name
+
+
+def test_devsy_start_restarts_without_rewriting_managed_starter(tmp_path, monkeypatch):
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    starter = state / "start-host-devsy.py"
+    starter.write_text("approved managed starter\n")
+    starter.chmod(0o700)
+    calls = []
+    monkeypatch.setattr(host, "STATE", state)
+    monkeypatch.setattr(host, "run", lambda args, **_kwargs: calls.append(args))
+
+    result = host.devsy_start()
+
+    assert result == {"devsy": "PASS"}
+    assert starter.read_text() == "approved managed starter\n"
+    assert calls == [["sudo", "-n", "systemctl", "restart", "codex-control-plane-devsy"]]
