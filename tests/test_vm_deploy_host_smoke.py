@@ -43,14 +43,14 @@ class FakeSession:
                 content = {"result": None, "error": self.read_error}
             else:
                 content = {
-                    "result": {
+                    "result": {"result": {
                         "target": "local", "cwd": self.expected_cwd,
                         "thread_id": self.expected_thread,
                         "source": "native-app-server", "thread_status": self.thread_status,
                         "active_flags": self.active_flags,
                         "unknown_active_flags": self.unknown_active_flags,
                         "native_state_authoritative": self.native_state_authoritative,
-                    },
+                    }, "error": None},
                     "error": None,
                 }
         else:
