@@ -254,6 +254,124 @@ def _devsy_plan_fingerprint(plan):
         "bridge_starter", "service_active", "service_enabled")}
 
 
+def _host_tap_control_plane_guard(native_tuple):
+    before = remote("snapshot")
+    if before.get("authority") != "kamal" or before.get("tunnel_count") != 1:
+        raise ValueError("Homebrew tap operation requires the healthy Kamal owner and one tunnel client")
+    remote("lifecycle-check")
+    current = remote("current")
+    if (not isinstance(current, dict) or current.get("authority") != "kamal"
+            or current.get("identity") != before.get("identity")):
+        raise ValueError("Homebrew tap operation requires the recorded healthy Kamal generation")
+    smoke(native_tuple, require_native=True)
+    return before
+
+
+def _verify_host_tap_control_plane(before, native_tuple):
+    remote("lifecycle-check")
+    after = remote("snapshot")
+    if (after.get("authority") != "kamal"
+            or after.get("identity") != before.get("identity")
+            or after.get("inventory") != before.get("inventory")
+            or after.get("source_sha") != before.get("source_sha")
+            or after.get("tunnel_count") != 1):
+        raise RuntimeError("Homebrew tap operation changed control-plane identity, source or accessories")
+    smoke(native_tuple, require_native=True)
+    return after
+
+
+def _check_host_tap_reconciliation(native_tuple):
+    before = _host_tap_control_plane_guard(native_tuple)
+    plan = remote("devsy-tap-reconcile-plan", devsy_payload())
+    after = _verify_host_tap_control_plane(before, native_tuple)
+    return {"operation": "devsy-tap-reconcile-check", "ready": plan.get("ready") is True,
+            "plan": plan, "identity_preserved": True,
+            "accessories_unchanged": True, "source_unchanged": True,
+            "tunnel_count": after["tunnel_count"], "mutated": False}
+
+
+def _reconcile_host_tap(native_tuple, source_sha, github_run_id, github_run_attempt):
+    payload = devsy_payload()
+    before = _host_tap_control_plane_guard(native_tuple)
+    plan = remote("devsy-tap-reconcile-plan", payload)
+    if plan.get("ready") is not True:
+        raise ValueError("Homebrew tap reconciliation plan is blocked: "
+                         + str(plan.get("reason", "no ready plan returned")))
+    run_identity = {"github_run_id": github_run_id,
+                    "github_run_attempt": github_run_attempt}
+    phase = "host-tap-reconciliation"
+    changed = False
+    try:
+        result = remote("devsy-tap-reconcile", {
+            **payload, "approved": True, "source_sha": source_sha, **run_identity,
+        })
+        if (result.get("operation") != "devsy-tap-reconcile"
+                or result.get("status") not in ("completed", "already-reconciled")
+                or type(result.get("changed")) is not bool):
+            raise RuntimeError("Host tap reconciliation receipt was invalid")
+        changed = result["changed"]
+        phase = "tap-receipt-check"
+        verified = remote("devsy-tap-reconcile-plan", payload)
+        if (verified.get("ready") is not True
+                or verified.get("status") != "already-reconciled"):
+            raise RuntimeError("Host tap reconciliation receipt did not match the live tap")
+        phase = "control-plane-check"
+        after = _verify_host_tap_control_plane(before, native_tuple)
+        return {"operation": "devsy-tap-reconcile", "host_tap": result,
+                "verified_plan": verified, "identity_preserved": True,
+                "accessories_unchanged": True, "source_unchanged": True,
+                "tunnel_count": after["tunnel_count"], "native_read": "PASS"}
+    except Exception as error:
+        if changed:
+            try:
+                rollback = remote("devsy-tap-rollback", {
+                    **payload, "approved": True, **run_identity,
+                })
+                if rollback.get("restored") is not True:
+                    raise RuntimeError("protected rollback receipt was invalid")
+            except Exception:
+                raise RuntimeError("Homebrew tap reconciliation failed at " + phase
+                                   + "; protected tap rollback FAILED; operator recovery required") from None
+            raise RuntimeError("Homebrew tap reconciliation failed at " + phase
+                               + "; protected tap rollback restored the observed tap") from None
+        failure = str(error) if isinstance(error, (RuntimeError, ValueError)) else type(error).__name__
+        raise RuntimeError("Homebrew tap reconciliation failed at " + phase + ": " + failure) from None
+
+
+def _check_host_tap_rollback(native_tuple, github_run_id, github_run_attempt):
+    before = _host_tap_control_plane_guard(native_tuple)
+    plan = remote("devsy-tap-rollback-plan", {
+        **devsy_payload(), "github_run_id": github_run_id,
+        "github_run_attempt": github_run_attempt,
+    })
+    after = _verify_host_tap_control_plane(before, native_tuple)
+    return {"operation": "devsy-tap-rollback-check", "ready": plan.get("ready") is True,
+            "plan": plan, "identity_preserved": True,
+            "accessories_unchanged": True, "source_unchanged": True,
+            "tunnel_count": after["tunnel_count"], "mutated": False}
+
+
+def _rollback_host_tap(native_tuple, github_run_id, github_run_attempt):
+    payload = devsy_payload()
+    before = _host_tap_control_plane_guard(native_tuple)
+    run_identity = {"github_run_id": github_run_id,
+                    "github_run_attempt": github_run_attempt}
+    plan = remote("devsy-tap-rollback-plan", {**payload, **run_identity})
+    if plan.get("ready") is not True:
+        raise ValueError("Homebrew tap rollback plan is blocked: "
+                         + str(plan.get("reason", "no ready rollback plan returned")))
+    restored = remote("devsy-tap-rollback", {
+        **payload, "approved": True, **run_identity,
+    })
+    if restored.get("restored") is not True:
+        raise RuntimeError("Host tap rollback receipt was invalid")
+    after = _verify_host_tap_control_plane(before, native_tuple)
+    return {"operation": "devsy-tap-rollback", "host_tap": restored,
+            "identity_preserved": True, "accessories_unchanged": True,
+            "source_unchanged": True, "tunnel_count": after["tunnel_count"],
+            "native_read": "PASS"}
+
+
 def _attested_missing_kubectl_plan(plan, policy):
     """Allow only the exact pinned-tool absence that apply can safely stage."""
     if not isinstance(plan, dict) or not isinstance(policy, dict):
@@ -491,8 +609,15 @@ def restore_cas(previous,directory,native_tuple=None):
 
 
 def execute(args):
+    host_tap_operations = (
+        'devsy-tap-reconcile-check', 'devsy-tap-reconcile',
+        'devsy-tap-rollback-check', 'devsy-tap-rollback',
+    )
     native_tuple = native_codex_tuple(
-        args, require_valid=args.operation in ('adopt','cas','deploy','devsy-apply'))
+        args, require_valid=args.operation in ('adopt','cas','deploy','devsy-apply')
+        or args.operation in host_tap_operations)
+    if args.operation in host_tap_operations and native_tuple is None:
+        raise ValueError('qualified Dakota native Codex tuple is required for protected Homebrew tap operations')
     if INSTANCE is None:
         configure_instance(getattr(args,'instance_profile',None) or os.environ.get('KAMAL_INSTANCE_PROFILE',DEFAULT_INSTANCE_PROFILE))
     trusted_context(os.environ,args.local)
@@ -506,6 +631,29 @@ def execute(args):
             return result
         if args.operation=='devsy-check':
             return {'operation':'devsy-check','plan':remote('devsy-plan',devsy_payload()),'mutated':False}
+        if args.operation=='devsy-tap-reconcile-check':
+            return _check_host_tap_reconciliation(native_tuple)
+        if args.operation=='devsy-tap-reconcile':
+            if not getattr(args, 'approve_host_tap_reconciliation', False):
+                raise ValueError('explicit Homebrew tap reconciliation approval is required')
+            return _reconcile_host_tap(
+                native_tuple, sha, os.environ.get('GITHUB_RUN_ID', ''),
+                os.environ.get('GITHUB_RUN_ATTEMPT', ''),
+            )
+        if args.operation=='devsy-tap-rollback-check':
+            run_id = getattr(args, 'tap_reconciliation_run_id', '')
+            attempt = getattr(args, 'tap_reconciliation_run_attempt', '')
+            if not run_id or not attempt:
+                raise ValueError('original tap reconciliation run id and attempt are required')
+            return _check_host_tap_rollback(native_tuple, run_id, attempt)
+        if args.operation=='devsy-tap-rollback':
+            if not getattr(args, 'approve_host_tap_rollback', False):
+                raise ValueError('explicit Homebrew tap rollback approval is required')
+            run_id = getattr(args, 'tap_reconciliation_run_id', '')
+            attempt = getattr(args, 'tap_reconciliation_run_attempt', '')
+            if not run_id or not attempt:
+                raise ValueError('original tap reconciliation run id and attempt are required')
+            return _rollback_host_tap(native_tuple, run_id, attempt)
         if args.operation=='devsy-apply':
             if not getattr(args,'approve_host_devsy_apply',False):
                 raise ValueError('explicit Host Devsy apply approval is required')
@@ -591,7 +739,7 @@ def execute(args):
 
 
 def main():
-    p=argparse.ArgumentParser();p.add_argument('operation',choices=('preflight','status','adopt','cas','deploy','rollback','devsy-check','devsy-apply','devsy-rollback'));p.add_argument('--cas-digest',default='');p.add_argument('--cas-revision',default='');p.add_argument('--approve-full-stack',action='store_true');p.add_argument('--approve-host-devsy-apply',action='store_true');p.add_argument('--approve-host-devsy-rollback',action='store_true');p.add_argument('--instance-profile',help='Absolute path to an owned mode-0600 private instance profile');p.add_argument('--native-target',default=os.environ.get('NATIVE_TARGET'));p.add_argument('--native-cwd',default=os.environ.get('NATIVE_CWD'));p.add_argument('--native-thread-id',default=os.environ.get('NATIVE_THREAD_ID'));p.add_argument('--local',action='store_true',help='Approved Pi break-glass, or bin/kamal with explicit private local config')
+    p=argparse.ArgumentParser();p.add_argument('operation',choices=('preflight','status','adopt','cas','deploy','rollback','devsy-check','devsy-apply','devsy-rollback','devsy-tap-reconcile-check','devsy-tap-reconcile','devsy-tap-rollback-check','devsy-tap-rollback'));p.add_argument('--cas-digest',default='');p.add_argument('--cas-revision',default='');p.add_argument('--approve-full-stack',action='store_true');p.add_argument('--approve-host-devsy-apply',action='store_true');p.add_argument('--approve-host-devsy-rollback',action='store_true');p.add_argument('--approve-host-tap-reconciliation',action='store_true');p.add_argument('--approve-host-tap-rollback',action='store_true');p.add_argument('--tap-reconciliation-run-id',default=os.environ.get('TAP_RECONCILIATION_RUN_ID'));p.add_argument('--tap-reconciliation-run-attempt',default=os.environ.get('TAP_RECONCILIATION_RUN_ATTEMPT'));p.add_argument('--instance-profile',help='Absolute path to an owned mode-0600 private instance profile');p.add_argument('--native-target',default=os.environ.get('NATIVE_TARGET'));p.add_argument('--native-cwd',default=os.environ.get('NATIVE_CWD'));p.add_argument('--native-thread-id',default=os.environ.get('NATIVE_THREAD_ID'));p.add_argument('--local',action='store_true',help='Approved Pi break-glass, or bin/kamal with explicit private local config')
     args=p.parse_args()
     try:print(json.dumps(execute(args),indent=2))
     except Exception as e:print(str(e),file=sys.stderr);sys.exit(1)

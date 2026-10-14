@@ -867,8 +867,11 @@ def main():
     if action=='lock':_ensure_private_state_store()
     elif action!='activation-plan' and action.startswith('activation-'):
         _verify_private_directory(STATE);_verify_private_directory(STORE)
-    elif action not in ('activation-plan','devsy-plan','devsy-check','devsy-rollback-plan'):STORE.mkdir(mode=0o700,exist_ok=True)
-    data=json.load(sys.stdin) if action in ('images','image-check','network','network-check','wait','commit','baseline','set-current','rollback-commit','restart-local','activation-plan','activation-preflight','activation-begin','activation-pull-images','activation-install','activation-track','activation-seed','activation-network','activation-identity','activation-cleanup','activation-record','smoke','devsy-plan','devsy-check','devsy-rollback-plan','devsy-apply','devsy-rollback') else {}
+    elif action not in ('activation-plan','devsy-plan','devsy-check','devsy-rollback-plan',
+                        'devsy-tap-reconcile-plan','devsy-tap-reconcile',
+                        'devsy-tap-rollback-plan','devsy-tap-rollback'):
+        STORE.mkdir(mode=0o700,exist_ok=True)
+    data=json.load(sys.stdin) if action in ('images','image-check','network','network-check','wait','commit','baseline','set-current','rollback-commit','restart-local','activation-plan','activation-preflight','activation-begin','activation-pull-images','activation-install','activation-track','activation-seed','activation-network','activation-identity','activation-cleanup','activation-record','smoke','devsy-plan','devsy-check','devsy-rollback-plan','devsy-apply','devsy-rollback','devsy-tap-reconcile-plan','devsy-tap-reconcile','devsy-tap-rollback-plan','devsy-tap-rollback') else {}
     if action=='activation-plan':result=activation_plan(data['generation_dir'])
     elif action=='activation-preflight':
         info=_ensure_empty_activation_target(data['generation_dir'],allow_lock=True)
@@ -945,6 +948,24 @@ def main():
     elif action=='devsy-plan':result=_devsy_bootstrap(data).plan()
     elif action=='devsy-check':result=_devsy_bootstrap(data).assert_current()
     elif action=='devsy-rollback-plan':result=_devsy_bootstrap(data).rollback_plan()
+    elif action=='devsy-tap-reconcile-plan':result=_devsy_bootstrap(data).tap_reconciliation_plan()
+    elif action=='devsy-tap-rollback-plan':
+        if set(data)!={"policy","unit_template","starter_source","github_run_id","github_run_attempt"}:
+            raise ValueError('Tap rollback plan request is invalid')
+        result=_devsy_bootstrap(data).tap_reconciliation_rollback_plan(
+            github_run_id=data['github_run_id'],github_run_attempt=data['github_run_attempt'])
+    elif action=='devsy-tap-reconcile':
+        if set(data)!={"policy","unit_template","starter_source","approved","source_sha","github_run_id","github_run_attempt"}:
+            raise ValueError('Tap reconciliation request is invalid')
+        result=_devsy_bootstrap(data).reconcile_tap(
+            approved=data['approved'],source_sha=data['source_sha'],
+            github_run_id=data['github_run_id'],github_run_attempt=data['github_run_attempt'])
+    elif action=='devsy-tap-rollback':
+        if set(data)!={"policy","unit_template","starter_source","approved","github_run_id","github_run_attempt"}:
+            raise ValueError('Tap rollback request is invalid')
+        result=_devsy_bootstrap(data).rollback_tap_reconciliation(
+            approved=data['approved'],github_run_id=data['github_run_id'],
+            github_run_attempt=data['github_run_attempt'])
     elif action=='devsy-apply':
         if set(data) != {"policy", "unit_template", "starter_source", "approved", "source_sha"}:
             raise ValueError("Devsy apply request is invalid")

@@ -46,6 +46,135 @@ def test_tap_origin_matches_optional_git_suffix_without_changing_repository_iden
     )
 
 
+def test_tap_tree_copy_preserves_hidden_files_and_modes(tmp_path):
+    module = bootstrap_module()
+    source = tmp_path / "tap"
+    (source / ".git").mkdir(parents=True)
+    (source / "Formula").mkdir()
+    (source / ".git/config").write_text("remote.origin.url=https://example.invalid/tap\n")
+    formula = source / "Formula/devsy.rb"
+    formula.write_text("class Devsy < Formula\nend\n")
+    formula.chmod(0o640)
+    (source / ".ignored-cache").write_text("preserve me\n")
+    snapshot = tmp_path / "snapshot"
+
+    before = module.copy_tap_tree(source, snapshot, os.getuid())
+    after = module.tap_tree_manifest(snapshot, os.getuid())
+
+    assert before["sha256"] == after["sha256"]
+    assert (snapshot / ".git/config").read_text().startswith("remote.origin.url=")
+    assert (snapshot / ".ignored-cache").read_text() == "preserve me\n"
+    assert (snapshot / "Formula/devsy.rb").stat().st_mode & 0o777 == 0o640
+
+
+def test_tap_tree_snapshot_rejects_symlinks(tmp_path):
+    module = bootstrap_module()
+    source = tmp_path / "tap"
+    source.mkdir()
+    (source / "escape").symlink_to(tmp_path / "outside")
+
+    with pytest.raises(module.BootstrapError, match="unsafe tap snapshot path"):
+        module.tap_tree_manifest(source, os.getuid())
+
+
+def test_tap_tree_restore_preserves_failed_tree_and_restores_snapshot(tmp_path):
+    module = bootstrap_module()
+    source = tmp_path / "tap"
+    source.mkdir()
+    (source / ".git").mkdir()
+    (source / ".git/HEAD").write_text("before\n")
+    snapshot = tmp_path / "snapshot"
+    before = module.copy_tap_tree(source, snapshot, os.getuid())
+    (source / ".git/HEAD").write_text("partial update\n")
+    (source / "partial-artifact").write_text("keep for audit\n")
+    failed = tmp_path / "failed-tap"
+
+    result = module.restore_tap_tree(
+        snapshot, source, failed, before["sha256"], os.getuid(),
+    )
+
+    assert result["restored_sha256"] == before["sha256"]
+    assert module.tap_tree_manifest(source, os.getuid())["sha256"] == before["sha256"]
+    assert (failed / ".git/HEAD").read_text() == "partial update\n"
+    assert (failed / "partial-artifact").read_text() == "keep for audit\n"
+
+
+def test_issue27_reconciliation_case_is_exact_and_marks_old_backup_unsigned():
+    module = bootstrap_module()
+    configured = policy()
+
+    case = module.validate_tap_reconciliation_case(configured)
+
+    assert case["case_id"] == "issue-27-tap-523d-to-141f"
+    assert case["prior_backup_signed"] is False
+    assert case["observed_tap_revision"] == "523d8a0b85db367c34af749eefba81a25dd26768"
+    assert case["target_tap_revision"] == configured["devsy"]["tap_revision"]
+
+    changed = json.loads(json.dumps(configured))
+    changed["devsy"]["tap_revision"] = "a" * 40
+    with pytest.raises(module.BootstrapError, match="incident reconciliation policy mismatch"):
+        module.validate_tap_reconciliation_case(changed)
+
+
+def test_issue27_reconciliation_manifest_requires_absent_tap_and_legacy_baseline():
+    module = bootstrap_module()
+    configured = policy()
+    case = module.validate_tap_reconciliation_case(configured)
+    manifest = {
+        "schema_version": 1,
+        "source_sha": "a" * 40,
+        "files": {
+            "unit": True, "starter": True, "bridge_config": True,
+            "receipt": False, "devsy_config": True, "kubectl": False,
+        },
+        "unit_active": True, "unit_enabled": True,
+        "unit_state": "legacy", "provider_options": {},
+        "provider_was_verified": True,
+        "tap_was_present": False, "tap_revision": None,
+        "devsy_version": "1.23.0",
+        "devsy_sha256": configured["devsy"]["legacy_sha256"],
+        "devsy_path": "/home/operator/.local/bin/devsy",
+        "kubectl_version": None, "kubectl_sha256": None,
+    }
+
+    summary = module.validate_tap_reconciliation_manifest(manifest, case, configured)
+
+    assert summary["prior_backup_authenticated"] is False
+    assert summary["tap_was_present"] is False
+
+    changed = dict(manifest, tap_was_present=True)
+    with pytest.raises(module.BootstrapError, match="prior backup is not the expected baseline"):
+        module.validate_tap_reconciliation_manifest(changed, case, configured)
+
+
+def test_tap_reconciliation_plan_blocks_when_expected_backup_is_missing(tmp_path):
+    module, bootstrap, tap, calls, _configured = tap_rollback_fixture(
+        tmp_path, origin=policy()["devsy"]["tap_repository"].removesuffix(".git"),
+        revision="d" * 40,
+    )
+
+    result = bootstrap.tap_reconciliation_plan()
+
+    assert result["ready"] is False
+    assert result["status"] == "blocked"
+    assert result["mutated"] is False
+    assert tap.is_dir()
+    assert calls == []
+
+
+def test_tap_reconciliation_requires_explicit_approval_before_commands(tmp_path):
+    module, bootstrap, _tap, calls, _configured, _case = tap_reconciliation_fixture(
+        tmp_path, monkeypatch=None,
+    )
+
+    with pytest.raises(module.BootstrapError, match="explicit tap reconciliation approval"):
+        bootstrap.reconcile_tap(
+            approved=False, source_sha="a" * 40, github_run_id="123", github_run_attempt="1",
+        )
+
+    assert calls == []
+
+
 def private_profile(tmp_path):
     home = tmp_path / "operator"
     state = home / ".local/share/control-plane"
@@ -117,6 +246,206 @@ def tap_rollback_fixture(tmp_path, *, origin, status="", revision="d" * 40):
         runner=command,
     )
     return module, bootstrap, tap, calls, configured
+
+
+def tap_reconciliation_fixture(tmp_path, monkeypatch):
+    module = bootstrap_module()
+    profile = private_profile(tmp_path)
+    prefix = tmp_path / "linuxbrew/.linuxbrew"
+    brew = prefix / "bin/brew"
+    brew.parent.mkdir(parents=True, mode=0o700)
+    brew.write_text("fixture brew")
+    brew.chmod(0o755)
+    repository = prefix / "Homebrew"
+    tap = repository / "Library/Taps/joshyorko/homebrew-tools"
+    tap.mkdir(parents=True, mode=0o700)
+    subprocess.run(["git", "init", "--quiet", str(tap)], check=True)
+    subprocess.run(["git", "-C", str(tap), "config", "user.name", "Issue 27 fixture"], check=True)
+    subprocess.run(["git", "-C", str(tap), "config", "user.email", "issue27@example.invalid"], check=True)
+    subprocess.run(["git", "-C", str(tap), "remote", "add", "origin",
+                    policy()["devsy"]["tap_repository"]], check=True)
+    formula = tap / "Formula/devsy.rb"
+    formula.parent.mkdir()
+    formula.write_text("class Devsy < Formula\nend\n")
+    marker = tap / "revision.txt"
+    marker.write_text("approved target\n")
+    subprocess.run(["git", "-C", str(tap), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(tap), "commit", "--quiet", "-m", "pinned"], check=True)
+    target = subprocess.check_output(["git", "-C", str(tap), "rev-parse", "HEAD"], text=True).strip()
+    marker.write_text("observed upstream\n")
+    subprocess.run(["git", "-C", str(tap), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(tap), "commit", "--quiet", "-m", "observed"], check=True)
+    observed = subprocess.check_output(["git", "-C", str(tap), "rev-parse", "HEAD"], text=True).strip()
+    configured = policy()
+    configured["homebrew"]["prefix"] = str(prefix)
+    configured["devsy"]["tap_revision"] = target
+    profile["brew_path"] = str(brew)
+    source_sha = "a" * 40
+    prior_manifest = {
+        "schema_version": 1,
+        "source_sha": source_sha,
+        "files": {"unit": False, "starter": False, "bridge_config": False,
+                  "receipt": False, "devsy_config": True, "kubectl": False},
+        "unit_active": False,
+        "unit_enabled": False,
+        "unit_state": "legacy",
+        "provider_options": {},
+        "provider_was_verified": True,
+        "tap_was_present": False,
+        "tap_revision": None,
+        "devsy_version": configured["devsy"]["legacy_version"],
+        "devsy_sha256": configured["devsy"]["legacy_sha256"],
+        "devsy_path": str(Path(profile["home"]) / ".local/bin/devsy"),
+        "kubectl_version": None,
+        "kubectl_sha256": None,
+    }
+    manifest_bytes = (json.dumps(prior_manifest, sort_keys=True) + "\n").encode()
+    case = {
+        "case_id": "issue-27-test-reconciliation",
+        "failed_run_id": "38586057895",
+        "prior_backup_directory": "1791990283017830779",
+        "prior_backup_manifest_sha256": module.sha256(manifest_bytes),
+        "prior_backup_signed": False,
+        "observed_tap_revision": observed,
+        "upstream_main_revision": observed,
+        "target_tap_revision": target,
+    }
+    module.ISSUE27_TAP_RECONCILIATION = case
+    if monkeypatch is not None:
+        monkeypatch.setattr(module, "verify_formula", lambda *_args, **_kwargs: None)
+    store = Path(profile["state_dir"]) / "deployment"
+    store.mkdir(mode=0o700)
+    backup = store / "devsy-host-backups" / case["prior_backup_directory"]
+    backup.mkdir(mode=0o700, parents=True)
+    (backup / "manifest.json").write_bytes(manifest_bytes)
+    (backup / "manifest.json").chmod(0o600)
+    calls = []
+
+    def runner(args, **kwargs):
+        args = [str(value) for value in args]
+        calls.append(args)
+        if args[0] == str(brew) and args[1:] == ["--repository"]:
+            return subprocess.CompletedProcess(args, 0, str(repository), "")
+        if args[0] == "git" and args[-4:] == ["ls-remote", "--heads", "origin", "refs/heads/main"]:
+            return subprocess.CompletedProcess(
+                args, 0, observed + "\trefs/heads/main\n", "",
+            )
+        return subprocess.run(args, **kwargs)
+
+    bootstrap = bootstrap_class(module)(
+        profile, configured,
+        unit_template=(ROOT / "config/codex-control-plane-devsy.service.in").read_text(),
+        system="Linux", machine="aarch64",
+        unit_path=tmp_path / "systemd/codex-control-plane-devsy.service",
+        runner=runner,
+    )
+    bootstrap._issue27_prior_backup = lambda _case: (
+        backup, prior_manifest,
+        {"source_sha": source_sha, "tap_was_present": False,
+         "prior_backup_authenticated": False},
+    )
+    return module, bootstrap, tap, calls, configured, case
+
+
+def test_tap_reconciliation_records_pinned_before_after_and_replay_is_read_only(tmp_path, monkeypatch):
+    module, bootstrap, tap, calls, _configured, case = tap_reconciliation_fixture(
+        tmp_path, monkeypatch,
+    )
+
+    result = bootstrap.reconcile_tap(
+        approved=True, source_sha="b" * 40, github_run_id="38610000001", github_run_attempt="1",
+    )
+
+    assert result["operation"] == "devsy-tap-reconcile"
+    assert result["status"] == "completed"
+    assert result["changed"] is True
+    assert result["prior_backup_authenticated"] is False
+    assert result["tap_before_revision"] == case["observed_tap_revision"]
+    assert result["tap_after_revision"] == case["target_tap_revision"]
+    assert subprocess.check_output(["git", "-C", str(tap), "rev-parse", "HEAD"], text=True).strip() == case["target_tap_revision"]
+    assert subprocess.check_output(["git", "-C", str(tap), "status", "--porcelain"], text=True) == ""
+    run_dir = (Path(bootstrap.profile["state_dir"]) / "deployment/devsy-tap-reconciliations"
+               / case["case_id"] / "38610000001-1")
+    before = json.loads((run_dir / "before.json").read_text())
+    after = json.loads((run_dir / "after.json").read_text())
+    assert before["tap_before_sha256"] == result["tap_before_sha256"]
+    assert before["prior_backup_authenticated"] is False
+    assert before["receipt_signature_status"] == "unsigned"
+    assert after["tap_after_sha256"] == result["tap_after_sha256"]
+    assert after["tap_after_revision"] == case["target_tap_revision"]
+    assert all((run_dir / name).stat().st_mode & 0o777 == 0o600
+               for name in ("before.json", "after.json"))
+    assert not any(call[0].endswith("brew") and len(call) > 1 and call[1] in ("install", "tap", "untap")
+                   for call in calls)
+    assert not any(call[0] == "sudo" or "systemctl" in call or "provider" in call
+                   for call in calls)
+
+    checkout_count = sum(call[-3:-2] == ["checkout"] for call in calls)
+    replay = bootstrap.reconcile_tap(
+        approved=True, source_sha="b" * 40, github_run_id="38610000002", github_run_attempt="1",
+    )
+
+    assert replay["status"] == "already-reconciled"
+    assert replay["changed"] is False
+    assert sum(call[-3:-2] == ["checkout"] for call in calls) == checkout_count
+
+
+def test_tap_reconciliation_restores_snapshot_and_keeps_failed_tree_on_postcheckout_error(tmp_path, monkeypatch):
+    module, bootstrap, tap, _calls, _configured, case = tap_reconciliation_fixture(
+        tmp_path, monkeypatch,
+    )
+    original = bootstrap._issue27_tap_state
+    observations = 0
+
+    def fail_postcheckout(current_case):
+        nonlocal observations
+        observations += 1
+        if observations == 3:
+            raise module.BootstrapError("fixture post-checkout failure")
+        return original(current_case)
+
+    bootstrap._issue27_tap_state = fail_postcheckout
+    before_tree = module.tap_tree_manifest(tap, os.getuid())["sha256"]
+
+    with pytest.raises(module.BootstrapError, match="failed at post-checkout-verification: fixture post-checkout failure; automatic rollback restored the original tap"):
+        bootstrap.reconcile_tap(
+            approved=True, source_sha="b" * 40, github_run_id="38610000003", github_run_attempt="1",
+        )
+
+    assert subprocess.check_output(["git", "-C", str(tap), "rev-parse", "HEAD"], text=True).strip() == case["observed_tap_revision"]
+    assert module.tap_tree_manifest(tap, os.getuid())["sha256"] == before_tree
+    run_dir = (Path(bootstrap.profile["state_dir"]) / "deployment/devsy-tap-reconciliations"
+               / case["case_id"] / "38610000003-1")
+    rollback = json.loads((run_dir / "rollback.json").read_text())
+    assert rollback["status"] == "restored"
+    failed_tree = run_dir / rollback["failed_tree"]
+    assert module.tap_tree_manifest(failed_tree, os.getuid())["sha256"] == rollback["failed_tap_sha256"]
+
+
+def test_tap_reconciliation_rollback_requires_approval_and_restores_only_its_receipted_tree(tmp_path, monkeypatch):
+    module, bootstrap, tap, _calls, _configured, case = tap_reconciliation_fixture(
+        tmp_path, monkeypatch,
+    )
+    with pytest.raises(module.BootstrapError, match="explicit tap reconciliation rollback approval"):
+        bootstrap.rollback_tap_reconciliation(
+            approved=False, github_run_id="38610000004", github_run_attempt="1",
+        )
+
+    bootstrap.reconcile_tap(
+        approved=True, source_sha="b" * 40, github_run_id="38610000004", github_run_attempt="1",
+    )
+    result = bootstrap.rollback_tap_reconciliation(
+        approved=True, github_run_id="38610000004", github_run_attempt="1",
+    )
+
+    assert result["operation"] == "devsy-tap-rollback"
+    assert result["restored"] is True
+    assert result["tap_revision"] == case["observed_tap_revision"]
+    assert subprocess.check_output(["git", "-C", str(tap), "rev-parse", "HEAD"], text=True).strip() == case["observed_tap_revision"]
+    with pytest.raises(module.BootstrapError, match="already rolled back"):
+        bootstrap.rollback_tap_reconciliation(
+            approved=True, github_run_id="38610000004", github_run_attempt="1",
+        )
 
 
 def test_restore_preserves_a_tap_with_unexpected_origin_or_local_edits(tmp_path):
