@@ -24,6 +24,17 @@
     "legacy_sha256": "bf6e00b498a09ed614670ce24bd7cf46830b31218e773961f6c267c1a25b8186",
     "legacy_unit_sha256": "b377872e9f7e5304dfd9713bdc7f8735a0deb59ad868980a88b655ab8b9017f7"
   },
+  "kubectl": {
+    "version": "1.36.3",
+    "source_url": "https://dl.k8s.io/release/v1.36.3/bin/linux/{arch}/kubectl",
+    "architecture": {"x86_64": "amd64", "aarch64": "arm64"},
+    "artifact_sha256": {
+      "x86_64": "ebbd080e7c2e275093b55915722043257eb24004363e20acb3c4d71919f88336",
+      "aarch64": "3d86f24401c41ae5a46ac50eef8865fe891d3647d324a0836f6c63757a126e62"
+    },
+    "max_bytes": 134217728,
+    "install_location": "private-devsy-state/bin/kubectl"
+  },
   "provider": {
     "name": "kubernetes",
     "default": true,

@@ -63,6 +63,15 @@ mismatch block its separate read-only Devsy plan.
   results.
 - `devsy-check`: non-mutating host Devsy version, systemd, provider, cluster
   capacity and resource-policy plan. `changes-required` does not apply anything.
+- The host bootstrap pins Kubernetes `kubectl` 1.36.3 to the official
+  `dl.k8s.io` release and architecture checksums in
+  `config/devsy-vm-bootstrap.json`. It installs the binary as the VM operator
+  under the private Devsy state directory, without root. A missing binary keeps
+  `devsy-check` blocked. `devsy-apply` accepts only that exact missing-pin
+  blocker, snapshots rollback state, stages and verifies the binary, then runs
+  ROR admission preflight before any provider, Devsy or systemd change. If
+  admission fails, it removes the staged binary and stops; successful apply
+  rollback restores the pre-apply binary state.
 - `devsy-apply`: isolated host-only bootstrap/upgrade. Set the **Approve host
   Devsy apply** checkbox and supply a verified native tuple. The workflow pins
   and verifies Homebrew, Josh's tap and the Devsy artifact, applies the private

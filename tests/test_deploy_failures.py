@@ -50,6 +50,28 @@ def args(operation, *, approve=False, host_approve=False, host_rollback=False, n
     })()
 
 
+def missing_pinned_kubectl_plan():
+    policy = json.loads((ROOT / "config/devsy-vm-bootstrap.json").read_text())
+    kubectl = policy["kubectl"]
+    architecture = "x86_64"
+    return {
+        "ready": False,
+        "status": "blocked",
+        "changes": ["install-pinned-kubectl"],
+        "cluster": {
+            "ready": False, "status": "blocked",
+            "reason": "pinned kubectl is missing; ROR admission preflight was not run",
+        },
+        "observed": {"kubectl": {
+            "status": "missing", "platform": architecture,
+            "version": kubectl["version"], "sha256": None,
+            "target_sha256": kubectl["artifact_sha256"][architecture],
+            "install_location": kubectl["install_location"],
+            "managed_path_present": False,
+        }},
+    }
+
+
 def runtime_repo(tmp_path):
     repo=tmp_path/"runtime-source";repo.mkdir()
     real_run=subprocess.run
@@ -281,6 +303,37 @@ def test_devsy_apply_stops_on_blocked_plan_before_native_read_or_source_sync(tmp
     assert sync == []
 
 
+def test_devsy_apply_accepts_only_the_exact_attested_missing_kubectl_case():
+    policy = json.loads((ROOT / "config/devsy-vm-bootstrap.json").read_text())
+    plan = missing_pinned_kubectl_plan()
+    assert d._attested_missing_kubectl_plan(plan, policy) is True
+
+    variants = []
+    wrong_reason = json.loads(json.dumps(plan))
+    wrong_reason["cluster"]["reason"] = "ROR has no eligible worker node"
+    variants.append(wrong_reason)
+    wrong_digest = json.loads(json.dumps(plan))
+    wrong_digest["observed"]["kubectl"]["target_sha256"] = "0" * 64
+    variants.append(wrong_digest)
+    found_candidate = json.loads(json.dumps(plan))
+    found_candidate["observed"]["kubectl"]["managed_path_present"] = True
+    variants.append(found_candidate)
+    missing_marker = json.loads(json.dumps(plan))
+    missing_marker["changes"] = []
+    variants.append(missing_marker)
+    wrong_platform = json.loads(json.dumps(plan))
+    wrong_platform["observed"]["kubectl"]["platform"] = "aarch64"
+    wrong_platform["observed"]["kubectl"]["target_sha256"] = (
+        policy["kubectl"]["artifact_sha256"]["aarch64"]
+    )
+    variants.append(wrong_platform)
+    falsely_ready = json.loads(json.dumps(plan))
+    falsely_ready["ready"] = True
+    variants.append(falsely_ready)
+
+    assert all(not d._attested_missing_kubectl_plan(item, policy) for item in variants)
+
+
 def test_devsy_rollback_requires_explicit_approval_before_vm_reads():
     calls = []
 
@@ -359,11 +412,13 @@ def test_devsy_apply_changes_only_host_state_and_records_merged_source(tmp_path)
     before.update(authority="kamal", tunnel_count=1)
     after = {**before, "source_sha": "b" * 40}
     current = {**before, "publication_proof": {}}
-    plan = {"ready": True, "status": "changes-required", "changes": ["install-tap-devsy"],
-            "devsy_current_version": "1.23.0", "provider": {"requests": {"cpu": "1"}},
-            "systemd_unit": "legacy", "bridge_starter": "legacy",
-            "service_active": True, "service_enabled": True, "tap_revision": "old"}
-    verified = {**plan, "status": "current", "changes": [], "devsy_current_version": "1.23.2",
+    plan = missing_pinned_kubectl_plan()
+    plan.update({"changes": ["install-pinned-kubectl", "install-tap-devsy"],
+                 "devsy_current_version": "1.23.0", "provider": {"requests": {"cpu": "1"}},
+                 "systemd_unit": "legacy", "bridge_starter": "legacy",
+                 "service_active": True, "service_enabled": True, "tap_revision": "old"})
+    verified = {**plan, "ready": True, "status": "current", "changes": [],
+                "devsy_current_version": "1.23.2",
                 "systemd_unit": "managed", "bridge_starter": "managed", "tap_revision": "new"}
     calls = []
 
