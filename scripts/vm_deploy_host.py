@@ -755,7 +755,13 @@ def native_thread_read(client, session, supplied):
         return {"status": "FAIL", "error_code": error}
     if not isinstance(snapshot, dict):
         return {"status": "FAIL", "error_code": "CODEX_RESPONSE_INVALID"}
-    if "error" in snapshot and "result" in snapshot:
+    if "connection" in snapshot and "result" in snapshot:
+        connection = snapshot.get("connection")
+        if (not isinstance(connection, dict)
+                or connection.get("target") != identity["target"]):
+            return {"status": "FAIL", "error_code": "NATIVE_THREAD_IDENTITY_MISMATCH"}
+        snapshot = snapshot.get("result")
+    elif "error" in snapshot and "result" in snapshot:
         nested_error = snapshot.get("error")
         if nested_error:
             if nested_error == "Stored thread id/cwd does not match the requested workstream":

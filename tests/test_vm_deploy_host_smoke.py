@@ -20,7 +20,8 @@ THREAD_ID = "12345678-1234-5678-9abc-def012345678"
 class FakeSession:
     def __init__(self, *, expected_cwd=DAKOTA_CWD, expected_thread=THREAD_ID,
                  read_error=None, active_flags=None, unknown_active_flags=False,
-                 native_state_authoritative=True, thread_status="notLoaded"):
+                 native_state_authoritative=True, thread_status="notLoaded",
+                 connection_target="local"):
         self.expected_cwd = expected_cwd
         self.expected_thread = expected_thread
         self.read_error = read_error
@@ -28,6 +29,7 @@ class FakeSession:
         self.unknown_active_flags = unknown_active_flags
         self.native_state_authoritative = native_state_authoritative
         self.thread_status = thread_status
+        self.connection_target = connection_target
         self.calls = []
 
     def call(self, _method, request):
@@ -43,14 +45,18 @@ class FakeSession:
                 content = {"result": None, "error": self.read_error}
             else:
                 content = {
-                    "result": {"result": {
-                        "target": "local", "cwd": self.expected_cwd,
-                        "thread_id": self.expected_thread,
-                        "source": "native-app-server", "thread_status": self.thread_status,
-                        "active_flags": self.active_flags,
-                        "unknown_active_flags": self.unknown_active_flags,
-                        "native_state_authoritative": self.native_state_authoritative,
-                    }, "error": None},
+                    "result": {
+                        "operation": "server/diagnostics",
+                        "connection": {"target": self.connection_target},
+                        "result": {
+                            "target": "local", "cwd": self.expected_cwd,
+                            "thread_id": self.expected_thread,
+                            "source": "native-app-server", "thread_status": self.thread_status,
+                            "active_flags": self.active_flags,
+                            "unknown_active_flags": self.unknown_active_flags,
+                            "native_state_authoritative": self.native_state_authoritative,
+                        },
+                    },
                     "error": None,
                 }
         else:
@@ -151,7 +157,8 @@ def test_native_snapshot_rejects_active_unknown_or_unverified_state(tmp_path, mo
             FakeSession(active_flags=["turn"]),
             FakeSession(unknown_active_flags=True),
             FakeSession(native_state_authoritative=False),
-            FakeSession(thread_status="unknown"))):
+            FakeSession(thread_status="unknown"),
+            FakeSession(connection_target="other"))):
         fake = configured_host(tmp_path / str(index), monkeypatch, session=session)
         fake.read_devsy = lambda _session, _profile: None
         result = host.smoke({"native_codex": {
