@@ -1669,8 +1669,10 @@ class VMDevsyBootstrap:
         if manifest.get("unit_active"):
             config = self._read_json_private(state_dir / "devsy-bridge/config.json", required=True)
             process = self._read_json_private(state_dir / "devsy-bridge/process.json", required=True)
-            if not self.process_probe(config, process) or not self.health_probe(config):
-                raise BootstrapError("restored Host Devsy service health did not match its identity")
+            if not self.process_probe(config, process):
+                raise BootstrapError("restored Host Devsy process identity did not match its receipt")
+            if not self.health_probe(config):
+                raise BootstrapError("restored Host Devsy bridge health did not match its identity")
 
     def _apply(self, source_sha: str) -> dict:
         state = self._inspect()

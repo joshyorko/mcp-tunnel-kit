@@ -148,6 +148,41 @@ def test_issue27_reconciliation_manifest_requires_absent_tap_and_pinned_legacy_c
         module.validate_tap_reconciliation_manifest(changed, case, configured)
 
 
+@pytest.mark.parametrize(("process_matches", "health_matches", "expected", "expected_health_calls"), [
+    (False, True, "restored Host Devsy process identity did not match its receipt", 0),
+    (True, False, "restored Host Devsy bridge health did not match its identity", 1),
+])
+def test_restored_service_baseline_reports_process_and_health_identity_separately(
+        tmp_path, process_matches, health_matches, expected, expected_health_calls):
+    module = bootstrap_module()
+    profile = private_profile(tmp_path)
+    bridge = Path(profile["state_dir"]) / "devsy-bridge"
+    bridge.mkdir(mode=0o700)
+    bridge.chmod(0o700)
+    config = bridge / "config.json"
+    config.write_text(json.dumps({"gateway": "127.0.0.1", "state": str(bridge)}))
+    config.chmod(0o600)
+    process = bridge / "process.json"
+    process.write_text(json.dumps({"pid": 123, "started": "fixture", "instance": "fixture"}))
+    process.chmod(0o600)
+    bootstrap = bootstrap_class(module)(
+        profile, policy(),
+        unit_template=(ROOT / "config/codex-control-plane-devsy.service.in").read_text(),
+        system="Linux", machine="aarch64",
+        unit_path=tmp_path / "systemd/codex-control-plane-devsy.service",
+    )
+    health_calls = []
+    bootstrap.process_probe = lambda _config, _process: process_matches
+    bootstrap.health_probe = lambda _config: health_calls.append(True) or health_matches
+
+    with pytest.raises(module.BootstrapError, match=expected):
+        bootstrap._verify_restored(
+            {"files": {}, "unit_active": True, "provider_was_verified": False}, tmp_path,
+        )
+
+    assert len(health_calls) == expected_health_calls
+
+
 def test_tap_reconciliation_plan_blocks_when_expected_backup_is_missing(tmp_path):
     module, bootstrap, tap, calls, _configured = tap_rollback_fixture(
         tmp_path, origin=policy()["devsy"]["tap_repository"].removesuffix(".git"),
