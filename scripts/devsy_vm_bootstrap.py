@@ -43,9 +43,18 @@ def load_policy(path: Path = POLICY_PATH) -> dict:
     return value
 
 
+def canonical_architecture(machine: str) -> str | None:
+    return {
+        "aarch64": "aarch64",
+        "arm64": "aarch64",
+        "x86_64": "x86_64",
+        "amd64": "x86_64",
+    }.get(machine.lower())
+
+
 def validate_platform(system: str, machine: str) -> None:
-    if system != "Linux" or machine not in ("aarch64", "arm64"):
-        raise BootstrapError("unsupported host platform; expected Linux ARM64")
+    if system != "Linux" or canonical_architecture(machine) is None:
+        raise BootstrapError("unsupported host platform; expected Linux AMD64 or ARM64")
 
 
 def _resource_pairs(resources: dict) -> list[str]:
@@ -132,11 +141,30 @@ def verify_formula(formula: bytes, policy: dict) -> str:
         source = formula.decode("utf-8")
     except UnicodeError:
         raise BootstrapError("pinned Josh tap formula is not valid UTF-8") from None
-    version = re.search(r'(?m)^\s*version\s+"([^"]+)"', source)
-    arm_hash = re.search(r'(?ms)on_arm\s+do.*?sha256\s+"([a-f0-9]{64})"', source)
-    if (not version or version.group(1) != devsy["version"] or not arm_hash
-            or arm_hash.group(1) != devsy["artifact_sha256"]["aarch64"]):
-        raise BootstrapError("pinned Josh tap formula version or ARM64 checksum drifted")
+    version = re.search(r'(?m)^[ \t]*version[ \t]+"([^"]+)"', source)
+    artifacts = devsy.get("artifact_sha256")
+    if not version or version.group(1) != devsy["version"]:
+        raise BootstrapError("pinned Josh tap formula version drifted")
+    if not isinstance(artifacts, dict):
+        raise BootstrapError("pinned Devsy architecture checksums are unavailable")
+
+    release_base = (devsy["tap_repository"].removesuffix(".git")
+                    + "/releases/download/" + devsy["release_tag"])
+    for architecture, selector, artifact, label in (
+            ("x86_64", "on_intel", "devsy-linux-amd64", "AMD64"),
+            ("aarch64", "on_arm", "devsy-linux-arm64", "ARM64")):
+        block = re.search(
+            rf"(?ms)^[ \t]*{selector}[ \t]+do[ \t]*\n(.*?)(?=^[ \t]*end\b)", source)
+        expected_url = f"{release_base}/{artifact}"
+        url = (re.search(r'(?m)^[ \t]*url[ \t]+"([^"\n]+)"[ \t]*$', block.group(1))
+               if block else None)
+        checksum = (re.search(r'(?m)^[ \t]*sha256[ \t]+"([a-f0-9]{64})"[ \t]*$', block.group(1))
+                    if block else None)
+        expected_checksum = artifacts.get(architecture)
+        if (not url or url.group(1) != expected_url or not checksum
+                or not isinstance(expected_checksum, str)
+                or checksum.group(1) != expected_checksum):
+            raise BootstrapError(f"pinned Josh tap formula version or {label} checksum drifted")
     return source
 
 
@@ -294,7 +322,8 @@ class VMDevsyBootstrap:
         self.runner = runner or subprocess.run
         self.fetcher = fetcher or _fetch
         self.system = system or platform.system()
-        self.machine = machine or platform.machine()
+        host_machine = machine or platform.machine()
+        self.machine = canonical_architecture(host_machine) or host_machine
         self.unit_path = Path(unit_path)
         self.env = dict(os.environ if env is None else env)
         self.health_probe = health_probe or self._probe_bridge

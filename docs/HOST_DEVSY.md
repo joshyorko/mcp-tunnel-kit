@@ -14,9 +14,11 @@ one Secure MCP Tunnel → Executor /mcp?elicitation_mode=browser
 
 ## Production VM bootstrap and updates
 
-Issue #27's VM bootstrap is limited to a **prepared Linux ARM64 VM**. OS setup,
-VM provisioning, Tailscale enrollment, and ROR cluster provisioning remain
-external prerequisites. The VM needs its declared checkout and private state
+Issue #27's VM bootstrap supports a **prepared Linux AMD64 or ARM64 VM**. The
+approved `pi5-01` runner remains ARM64 and orchestration-only; Homebrew selects
+the Devsy artifact for the destination VM. OS setup, VM provisioning, Tailscale
+enrollment, and ROR cluster provisioning remain external prerequisites. The VM
+needs its declared checkout and private state
 paths, systemd and the approved noninteractive sudo rules, `kubectl`, and
 operator-supplied mode-`0600` Devsy config, context, and ROR kubeconfig. These
 private inputs stay on the VM; do not copy Dakota's kubeconfig or commit any of

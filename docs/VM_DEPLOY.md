@@ -98,7 +98,7 @@ Fresh worker creation/deletion is never a deployment smoke test.
 Protected GitHub image deploys call the host Devsy drift check and refuse to
 proceed when the selected binary, unit or provider differs. They never apply
 host changes. Local `make cas`, `make up`, restarts, and image redeploys do not
-reinstall the CLI, rewrite the unit, or change provider options. For a clean prepared Linux ARM64
+reinstall the CLI, rewrite the unit, or change provider options. For a clean prepared Linux AMD64 or ARM64
 VM, OS/user setup, Tailscale enrollment, the authorized ROR namespace, private
 Devsy config/context, kubeconfig and cluster prerequisites must already exist;
 this repository does not provision them. Keep config and kubeconfig as
