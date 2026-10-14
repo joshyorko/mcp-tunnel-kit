@@ -444,6 +444,9 @@ class VMDevsyBootstrap:
 
     def _brew_path(self) -> Path | None:
         prefix = Path(self.policy["homebrew"]["prefix"])
+        if not prefix.is_absolute():
+            raise BootstrapError("pinned Homebrew prefix is not absolute")
+        resolved_prefix = prefix.resolve()
         candidates = []
         if self.profile.get("brew_path"):
             candidates.append(Path(self.profile["brew_path"]))
@@ -454,7 +457,17 @@ class VMDevsyBootstrap:
                            Path(self.profile.get("home", "/nonexistent")) / ".linuxbrew/bin/brew"))
         for candidate in candidates:
             if candidate.is_file() and os.access(candidate, os.X_OK):
-                return candidate.resolve()
+                invocation = Path(os.path.abspath(candidate))
+                try:
+                    resolved = candidate.resolve(strict=True)
+                except (OSError, RuntimeError):
+                    raise BootstrapError("Homebrew executable path is unsafe or unavailable") from None
+                try:
+                    invocation.relative_to(prefix)
+                    resolved.relative_to(resolved_prefix)
+                except ValueError:
+                    raise BootstrapError("Homebrew executable path is outside the pinned Homebrew prefix") from None
+                return invocation
         return None
 
     def _command_env(self, *, home: Path | None = None,
