@@ -36,6 +36,7 @@ ISSUE27_TAP_RECONCILIATION = {
     "observed_tap_revision": "523d8a0b85db367c34af749eefba81a25dd26768",
     "upstream_main_revision": "523d8a0b85db367c34af749eefba81a25dd26768",
     "target_tap_revision": "141faa0977de2c2d840ee847ddfec08da9d5a974",
+    "current_vm_source_sha": "510444adbfec4645d24c7b681b0faa7e1d965d3e",
 }
 
 
@@ -78,6 +79,13 @@ def validate_tap_reconciliation_case(policy: dict) -> dict:
             != policy.get("devsy", {}).get("tap_revision")):
         raise BootstrapError("incident reconciliation policy mismatch")
     return dict(ISSUE27_TAP_RECONCILIATION)
+
+
+def validate_tap_reconciliation_source(source_sha: str, dirty: str, case: dict) -> str:
+    if (source_sha != case.get("current_vm_source_sha")
+            or not re.fullmatch(r"[a-f0-9]{40}", source_sha or "") or dirty):
+        raise BootstrapError("VM source checkout differs from the verified incident baseline")
+    return source_sha
 
 
 def validate_tap_reconciliation_manifest(manifest: dict, case: dict, policy: dict) -> dict:
@@ -1129,8 +1137,9 @@ class VMDevsyBootstrap:
         dirty = self._command([
             "git", "-C", str(repo), "status", "--porcelain", "--untracked-files=all",
         ]).stdout.strip()
-        if source_sha != manifest["source_sha"] or dirty:
-            raise BootstrapError("VM source checkout differs from the prior backup baseline")
+        validate_tap_reconciliation_source(source_sha, dirty, case)
+        summary = {**summary, "prior_backup_source_sha": manifest["source_sha"],
+                   "current_vm_source_sha": source_sha}
         return backup, manifest, summary
 
     def _authenticated_git_env(self) -> dict:
@@ -1258,6 +1267,9 @@ class VMDevsyBootstrap:
                     or before.get("receipt_signature_status") != "unsigned"
                     or before.get("status") != "started"
                     or not re.fullmatch(r"[a-f0-9]{40}", str(before.get("source_sha", "")))
+                    or before.get("vm_source_sha") != case["current_vm_source_sha"]
+                    or not re.fullmatch(r"[a-f0-9]{40}",
+                                        str(before.get("prior_backup_source_sha", "")))
                     or before.get("tap_before_revision") != case["observed_tap_revision"]
                     or not re.fullmatch(r"[a-f0-9]{64}",
                                         str(before.get("tap_before_sha256", "")))):
@@ -1279,6 +1291,8 @@ class VMDevsyBootstrap:
                         or after.get("github_run_id") != match.group(1)
                         or after.get("github_run_attempt") != match.group(2)
                         or after.get("source_sha") != before.get("source_sha")
+                        or after.get("vm_source_sha") != before.get("vm_source_sha")
+                        or after.get("prior_backup_source_sha") != before.get("prior_backup_source_sha")
                         or after.get("tap_before_revision") != before.get("tap_before_revision")
                         or after.get("tap_before_sha256") != before.get("tap_before_sha256")
                         or after.get("tap_after_revision") != case["target_tap_revision"]
@@ -1361,6 +1375,8 @@ class VMDevsyBootstrap:
                 "prior_backup_authenticated": False,
                 "current_tap_revision": tap["revision"],
                 "upstream_main_revision": tap["upstream_main_revision"],
+                "vm_source_sha": state["prior_summary"]["current_vm_source_sha"],
+                "prior_backup_source_sha": state["prior_summary"]["prior_backup_source_sha"],
                 "target_tap_revision": case["target_tap_revision"],
                 "tap_tree_sha256": tap["tree"]["sha256"],
                 "tap_tree_bytes": tap["tree"]["bytes"],
@@ -1482,6 +1498,8 @@ class VMDevsyBootstrap:
                 "prior_backup_manifest_sha256": case["prior_backup_manifest_sha256"],
                 "prior_backup_authenticated": False,
                 "receipt_signature_status": "unsigned",
+                "vm_source_sha": state["prior_summary"]["current_vm_source_sha"],
+                "prior_backup_source_sha": state["prior_summary"]["prior_backup_source_sha"],
                 "tap_snapshot": "tap-before",
                 "tap_before_revision": state["tap_state"]["revision"],
                 "tap_before_origin": state["tap_state"]["origin"],
@@ -1527,6 +1545,8 @@ class VMDevsyBootstrap:
                 "schema_version": 1, "case_id": case["case_id"],
                 "github_run_id": github_run_id, "github_run_attempt": github_run_attempt,
                 "source_sha": source_sha, "status": "completed",
+                "vm_source_sha": before["vm_source_sha"],
+                "prior_backup_source_sha": before["prior_backup_source_sha"],
                 "receipt_signature_status": "unsigned",
                 "prior_backup_authenticated": False,
                 "tap_before_revision": before["tap_before_revision"],

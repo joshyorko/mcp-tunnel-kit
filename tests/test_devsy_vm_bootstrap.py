@@ -148,6 +148,19 @@ def test_issue27_reconciliation_manifest_requires_absent_tap_and_pinned_legacy_c
         module.validate_tap_reconciliation_manifest(changed, case, configured)
 
 
+def test_issue27_source_guard_pins_live_vm_baseline_separately_from_old_backup():
+    module = bootstrap_module()
+    configured = policy()
+    case = module.validate_tap_reconciliation_case(configured)
+    current_source = "510444adbfec4645d24c7b681b0faa7e1d965d3e"
+
+    assert module.validate_tap_reconciliation_source(current_source, "", case) == current_source
+    with pytest.raises(module.BootstrapError, match="VM source checkout differs from the verified incident baseline"):
+        module.validate_tap_reconciliation_source("a" * 40, "", case)
+    with pytest.raises(module.BootstrapError, match="VM source checkout differs from the verified incident baseline"):
+        module.validate_tap_reconciliation_source(current_source, " M README.md", case)
+
+
 @pytest.mark.parametrize(("process_matches", "health_matches", "expected", "expected_health_calls"), [
     (False, True, "restored Host Devsy process identity did not match its receipt", 0),
     (True, False, "restored Host Devsy bridge health gate failed: instance-mismatch", 1),
@@ -428,6 +441,7 @@ def tap_reconciliation_fixture(tmp_path, monkeypatch):
         "observed_tap_revision": observed,
         "upstream_main_revision": observed,
         "target_tap_revision": target,
+        "current_vm_source_sha": "c" * 40,
     }
     module.ISSUE27_TAP_RECONCILIATION = case
     if monkeypatch is not None:
@@ -461,6 +475,8 @@ def tap_reconciliation_fixture(tmp_path, monkeypatch):
     bootstrap._issue27_prior_backup = lambda _case: (
         backup, prior_manifest,
         {"source_sha": source_sha, "tap_was_present": False,
+         "prior_backup_source_sha": source_sha,
+         "current_vm_source_sha": case["current_vm_source_sha"],
          "prior_backup_authenticated": False},
     )
     return module, bootstrap, tap, calls, configured, case
