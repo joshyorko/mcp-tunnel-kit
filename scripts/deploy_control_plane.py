@@ -345,28 +345,44 @@ def _apply_host_devsy(native_tuple, source_sha):
                 "accessories_unchanged": True,
                 "rollback_ready": bool(applied.get("rollback_ready", not changed))}
     except Exception:
+        rollback_stage = "source-restore"
+        rollback_failures = []
         try:
             source_restored = True
             try:
                 sync_source(old_source_sha)
             except Exception:
                 source_restored = False
+                rollback_failures.append("source-restore")
             if changed:
+                rollback_stage = "host-devsy-restore"
                 remote("devsy-rollback", payload)
+            rollback_stage = "control-plane-snapshot"
             restored = remote("snapshot")
+            rollback_stage = "devsy-plan"
             plan_restored = remote("devsy-plan", payload)
-            if (not source_restored
-                    or restored.get("source_sha") != old_source_sha
+            if not source_restored:
+                rollback_stage = "source-restore"
+                raise RuntimeError("runtime source did not return to its prior revision")
+            if (restored.get("source_sha") != old_source_sha
                     or restored.get("identity") != before.get("identity")
                     or restored.get("inventory") != before.get("inventory")
-                    or restored.get("tunnel_count") != 1
-                    or _devsy_plan_fingerprint(plan_restored)
+                    or restored.get("tunnel_count") != 1):
+                rollback_stage = "control-plane-snapshot"
+                raise RuntimeError("control-plane snapshot differed from the prior state")
+            if (_devsy_plan_fingerprint(plan_restored)
                     != _devsy_plan_fingerprint(plan_before)):
-                raise RuntimeError("rollback verification differed from the prior state")
+                rollback_stage = "devsy-plan"
+                raise RuntimeError("Devsy plan differed from the prior state")
+            rollback_stage = "generation-commit"
             remote("rollback-commit", {"current": current, "previous": previous})
         except Exception:
+            failed_stages = rollback_failures.copy()
+            if rollback_stage not in failed_stages:
+                failed_stages.append(rollback_stage)
             raise RuntimeError("Host Devsy apply failed at " + phase
-                               + "; automatic rollback FAILED; operator recovery required") from None
+                               + "; automatic rollback FAILED at " + ",".join(failed_stages)
+                               + "; operator recovery required") from None
         raise RuntimeError("Host Devsy apply failed at " + phase
                            + "; previous host state restored") from None
 
