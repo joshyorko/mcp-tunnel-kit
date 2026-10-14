@@ -191,6 +191,14 @@ def verify_formula(formula: bytes, policy: dict) -> str:
     return source
 
 
+def tap_origin_matches(actual: str, expected: str) -> bool:
+    def normalized(origin: str) -> str:
+        origin = origin.rstrip("/")
+        return origin[:-4] if origin.endswith(".git") else origin
+
+    return normalized(actual) == normalized(expected)
+
+
 def _cpu_millicores(value: str) -> int:
     try:
         return int(value[:-1]) if value.endswith("m") else int(float(value) * 1000)
@@ -544,7 +552,7 @@ class VMDevsyBootstrap:
         allowed_revisions = {self.policy["devsy"]["tap_revision"]}
         if receipt and receipt.get("tap_revision"):
             allowed_revisions.add(receipt["tap_revision"])
-        if (origin.rstrip("/") != self.policy["devsy"]["tap_repository"].rstrip("/")
+        if (not tap_origin_matches(origin, self.policy["devsy"]["tap_repository"])
                 or dirty or revision not in allowed_revisions):
             raise BootstrapError("conflicting Josh tools tap state; preserving the existing tap")
         formula_path = tap / self.policy["devsy"]["formula_path"]
@@ -1297,7 +1305,7 @@ class VMDevsyBootstrap:
         if not tap.is_dir() or tap.is_symlink():
             raise BootstrapError("Josh tools tap was not installed at the managed Homebrew path")
         origin = self._command(["git", "-C", str(tap), "remote", "get-url", "origin"]).stdout.strip()
-        if origin.rstrip("/") != devsy["tap_repository"].rstrip("/"):
+        if not tap_origin_matches(origin, devsy["tap_repository"]):
             raise BootstrapError("Josh tools tap origin changed")
         dirty = self._command(["git", "-C", str(tap), "status", "--porcelain"]).stdout.strip()
         if dirty:
@@ -1542,6 +1550,31 @@ class VMDevsyBootstrap:
                 repo = Path(self._command([str(brew), "--repository"], env=self._brew_env()).stdout.strip())
                 tap = repo / "Library/Taps/joshyorko/homebrew-tools"
                 self._command(["git", "-C", str(tap), "checkout", "--detach", tap_revision])
+        elif manifest.get("tap_was_present") is False:
+            brew = self._brew_path()
+            if brew:
+                repo = Path(self._command([str(brew), "--repository"], env=self._brew_env()).stdout.strip())
+                tap = repo / "Library/Taps/joshyorko/homebrew-tools"
+                if tap.exists() or tap.is_symlink():
+                    if tap.is_symlink() or not tap.is_dir():
+                        raise BootstrapError("rollback refused to remove an unsafe Josh tools tap")
+                    origin = self._command([
+                        "git", "-C", str(tap), "remote", "get-url", "origin",
+                    ]).stdout.strip()
+                    dirty = self._command(["git", "-C", str(tap), "status", "--porcelain"]).stdout.strip()
+                    if (not tap_origin_matches(origin, self.policy["devsy"]["tap_repository"])
+                            or dirty):
+                        raise BootstrapError("rollback refused to remove a conflicting Josh tools tap")
+                    self._command([
+                        str(brew), "untap", self.policy["devsy"]["tap"],
+                    ], env=self._brew_env())
+                    if tap.exists() or tap.is_symlink():
+                        raise BootstrapError("rollback left the transaction-created Josh tools tap in place")
+            else:
+                tap = (Path(self.policy["homebrew"]["prefix"])
+                       / "Homebrew/Library/Taps/joshyorko/homebrew-tools")
+                if tap.exists() or tap.is_symlink():
+                    raise BootstrapError("rollback cannot verify transaction-created tap removal")
         old_receipt = directory / "receipt.bin"
         store = self._store()
         if files.get("receipt"):
