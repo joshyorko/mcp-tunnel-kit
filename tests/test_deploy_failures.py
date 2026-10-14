@@ -884,6 +884,7 @@ def test_explicit_rollback_recovers_unhealthy_generation_without_healthy_precond
     ("control-plane-snapshot", "control-plane-snapshot"),
     ("control-plane-snapshot-invalid", "control-plane-snapshot"),
     ("devsy-plan", "devsy-plan"),
+    ("devsy-plan-service-active", "devsy-plan:service_active"),
     ("generation-commit", "generation-commit"),
     ("source-and-plan", "source-restore,devsy-plan"),
     ("snapshot-and-plan", "control-plane-snapshot,devsy-plan"),
@@ -921,6 +922,8 @@ def test_host_devsy_apply_reports_outer_rollback_stage_without_remote_details(
             return None
         if action == "devsy-plan":
             plan_count += 1
+            if failure == "devsy-plan-service-active" and plan_count == 2:
+                return {**plan, "service_active": False}
             if failure in {
                     "devsy-plan", "source-and-plan", "snapshot-and-plan",
                     "source-snapshot-plan"} and plan_count == 2:
@@ -967,5 +970,23 @@ def test_host_devsy_apply_reports_outer_rollback_stage_without_remote_details(
         d.INSTANCE, d.HOST, d.VMROOT, d.VM_HOST_PIN = previous
 
     assert f"automatic rollback FAILED at {expected_stage}" in str(error.value)
+    if failure == "host-devsy-restore":
+        assert "host-apply-phase=" not in str(error.value)
+    else:
+        assert "host-apply-phase=unclassified" in str(error.value)
     assert "secret-" not in str(error.value)
     assert calls[0] == "snapshot"
+
+
+def test_host_devsy_apply_failure_code_preserves_only_allowlisted_phase_and_reason():
+    error = RuntimeError(
+        "VM devsy-apply refused; Deployment boundary refused: "
+        "Devsy apply failed at provider-readback: "
+        "ROR provider readback did not match the approved resource policy; "
+        "previous host state restored"
+    )
+
+    assert d._host_devsy_apply_failure_code(error) == (
+        "provider-readback:provider-policy-mismatch"
+    )
+    assert d._host_devsy_apply_failure_code(RuntimeError("secret remote detail")) == "unclassified"

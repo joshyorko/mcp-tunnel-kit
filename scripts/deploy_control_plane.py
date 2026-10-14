@@ -254,6 +254,50 @@ def _devsy_plan_fingerprint(plan):
         "bridge_starter", "service_active", "service_enabled")}
 
 
+def _devsy_plan_fingerprint_differences(before, after):
+    before_fingerprint = _devsy_plan_fingerprint(before)
+    after_fingerprint = _devsy_plan_fingerprint(after)
+    return [key for key in before_fingerprint
+            if before_fingerprint[key] != after_fingerprint[key]]
+
+
+def _host_devsy_apply_failure_code(error):
+    """Expose only the VM bootstrap's allowlisted phase and safe error category."""
+    detail = str(error)
+    boundary = "Deployment boundary refused: "
+    if boundary in detail:
+        detail = detail.split(boundary, 1)[1]
+    if detail.startswith("Devsy apply stopped before provider or Devsy changes:"):
+        return "preflight-blocked"
+
+    marker = "Devsy apply failed at "
+    if not detail.startswith(marker):
+        return "unclassified"
+    rest = detail[len(marker):]
+    phase = rest.split(":", 1)[0].split(";", 1)[0]
+    allowed_phases = {
+        "stop-service", "homebrew", "tap", "devsy-install", "provider-config",
+        "provider-readback", "bridge-starter", "systemd-unit", "service-start",
+        "live-verification", "receipt",
+    }
+    if phase not in allowed_phases:
+        return "unclassified"
+
+    reason = rest.split(": ", 1)[1].split("; ", 1)[0] if ": " in rest else ""
+    reason_codes = {
+        "ROR provider readback did not match the approved resource policy": "provider-policy-mismatch",
+        "running host kubectl failed pinned version/checksum verification": "kubectl-checksum-mismatch",
+        "systemd unit readback did not match the managed unit": "systemd-unit-mismatch",
+        "systemd Devsy unit identity or health readback failed": "systemd-unit-health",
+        "running bridge does not use the tap-managed Devsy binary": "bridge-binary-binding",
+        "running bridge Devsy binary failed version/checksum verification": "bridge-binary-checksum",
+        "running bridge process identity did not match its receipt": "bridge-process-identity",
+        "Host Devsy bridge health identity check failed": "bridge-health-identity",
+        "VM Devsy bootstrap command failed; raw output withheld": "host-command-failed",
+    }
+    return f"{phase}:{reason_codes[reason]}" if reason in reason_codes else phase
+
+
 def _host_tap_control_plane_guard(native_tuple):
     before = remote("snapshot")
     if before.get("authority") != "kamal" or before.get("tunnel_count") != 1:
@@ -462,7 +506,10 @@ def _apply_host_devsy(native_tuple, source_sha):
                 "native_read": "PASS", "identity_preserved": True,
                 "accessories_unchanged": True,
                 "rollback_ready": bool(applied.get("rollback_ready", not changed))}
-    except Exception:
+    except Exception as error:
+        host_apply_failure = (
+            _host_devsy_apply_failure_code(error) if phase == "host-apply" else None
+        )
         rollback_stage = "source-restore"
         rollback_failures = []
         try:
@@ -483,10 +530,14 @@ def _apply_host_devsy(native_tuple, source_sha):
                 rollback_failures.append("control-plane-snapshot")
             rollback_stage = "devsy-plan"
             plan_restored = remote("devsy-plan", payload)
-            if (not isinstance(plan_restored, dict)
-                    or _devsy_plan_fingerprint(plan_restored)
-                    != _devsy_plan_fingerprint(plan_before)):
-                rollback_failures.append("devsy-plan")
+            if not isinstance(plan_restored, dict):
+                rollback_failures.append("devsy-plan:unavailable")
+            else:
+                plan_differences = _devsy_plan_fingerprint_differences(
+                    plan_before, plan_restored,
+                )
+                if plan_differences:
+                    rollback_failures.append("devsy-plan:" + ",".join(plan_differences))
             if rollback_failures:
                 rollback_stage = rollback_failures[-1]
                 raise RuntimeError("rollback verification differed from the prior state")
@@ -496,10 +547,14 @@ def _apply_host_devsy(native_tuple, source_sha):
             failed_stages = rollback_failures.copy()
             if rollback_stage not in failed_stages:
                 failed_stages.append(rollback_stage)
-            raise RuntimeError("Host Devsy apply failed at " + phase
+            failure_label = ("; host-apply-phase=" + host_apply_failure
+                             if host_apply_failure else "")
+            raise RuntimeError("Host Devsy apply failed at " + phase + failure_label
                                + "; automatic rollback FAILED at " + ",".join(failed_stages)
                                + "; operator recovery required") from None
-        raise RuntimeError("Host Devsy apply failed at " + phase
+        failure_label = ("; host-apply-phase=" + host_apply_failure
+                         if host_apply_failure else "")
+        raise RuntimeError("Host Devsy apply failed at " + phase + failure_label
                            + "; previous host state restored") from None
 
 
