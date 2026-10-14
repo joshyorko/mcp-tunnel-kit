@@ -225,9 +225,62 @@ def test_rollback_plan_rejects_symlinked_backup_directory(tmp_path):
         bootstrap.rollback_plan()
 
 
+@pytest.mark.parametrize("machine", ["x86_64", "amd64", "aarch64", "arm64"])
+def test_linux_amd64_and_arm64_hosts_are_supported(machine):
+    module = bootstrap_module()
+    module.validate_platform("Linux", machine)
+
+
+@pytest.mark.parametrize(
+    ("machine", "canonical"),
+    [("aarch64", "aarch64"), ("arm64", "aarch64"),
+     ("x86_64", "x86_64"), ("amd64", "x86_64")],
+)
+def test_bootstrap_normalizes_linux_machine_aliases_for_artifact_selection(
+        tmp_path, machine, canonical):
+    module = bootstrap_module()
+    bootstrap = bootstrap_class(module)(
+        private_profile(tmp_path), policy(), unit_template="",
+        system="Linux", machine=machine,
+    )
+
+    assert bootstrap.machine == canonical
+
+
+def test_devsy_policy_pins_both_homebrew_release_artifacts():
+    assert policy()["devsy"]["artifact_sha256"] == {
+        "aarch64": "872cd988be2f5c37dc92da684c92fb6e9dd56153963366c1bdb143b78f816ae2",
+        "x86_64": "0e9e703662575faa796c933e108bbaa9bcfbcf95046825da9c8eb3cf452e8891",
+    }
+
+
+def test_pinned_formula_rejects_wrong_amd64_artifact_digest():
+    module = bootstrap_module()
+    formula = b'''class Devsy < Formula
+  version "1.23.2"
+  on_linux do
+    on_intel do
+      url "https://github.com/joshyorko/homebrew-tools/releases/download/devsy-1.23.2/devsy-linux-amd64"
+      sha256 "0e9e703662575faa796c933e108bbaa9bcfbcf95046825da9c8eb3cf452e8891"
+    end
+    on_arm do
+      url "https://github.com/joshyorko/homebrew-tools/releases/download/devsy-1.23.2/devsy-linux-arm64"
+      sha256 "872cd988be2f5c37dc92da684c92fb6e9dd56153963366c1bdb143b78f816ae2"
+    end
+  end
+end
+'''
+    configured = policy()
+    configured["devsy"]["artifact_sha256"]["x86_64"] = "f" * 64
+    configured["devsy"]["formula_sha256"] = module.sha256(formula)
+
+    with pytest.raises(module.BootstrapError, match="AMD64 checksum"):
+        module.verify_formula(formula, configured)
+
+
 @pytest.mark.parametrize(
     ("system", "machine"),
-    [("Darwin", "aarch64"), ("Linux", "x86_64"), ("Windows", "AMD64")],
+    [("Darwin", "aarch64"), ("Linux", "i386"), ("Windows", "AMD64")],
 )
 def test_unsupported_host_is_rejected_before_any_bootstrap_command(system, machine):
     module = bootstrap_module()
@@ -559,10 +612,18 @@ def test_host_bootstrap_apply_twice_converges_without_reapplying_changes(tmp_pat
     configured["devsy"]["legacy_sha256"] = hashlib.sha256(legacy_binary.read_bytes()).hexdigest()
     artifact = b"fixture tap Devsy 1.23.2 artifact"
     target_sha = hashlib.sha256(artifact).hexdigest()
-    configured["devsy"]["artifact_sha256"] = {"aarch64": target_sha}
+    amd64_artifact = b"fixture tap Devsy 1.23.2 AMD64 artifact"
+    amd64_sha = hashlib.sha256(amd64_artifact).hexdigest()
+    configured["devsy"]["artifact_sha256"] = {
+        "aarch64": target_sha, "x86_64": amd64_sha,
+    }
     formula = (
         'class Devsy < Formula\n  version "1.23.2"\n'
-        '  on_arm do\n    sha256 "' + target_sha + '"\n  end\nend\n'
+        '  on_linux do\n'
+        '    on_intel do\n      url "https://github.com/joshyorko/homebrew-tools/releases/download/devsy-1.23.2/devsy-linux-amd64"\n'
+        '      sha256 "' + amd64_sha + '"\n    end\n'
+        '    on_arm do\n      url "https://github.com/joshyorko/homebrew-tools/releases/download/devsy-1.23.2/devsy-linux-arm64"\n'
+        '      sha256 "' + target_sha + '"\n    end\n  end\nend\n'
     ).encode()
     configured["devsy"]["formula_sha256"] = hashlib.sha256(formula).hexdigest()
     prefix = tmp_path / "linuxbrew/.linuxbrew"
