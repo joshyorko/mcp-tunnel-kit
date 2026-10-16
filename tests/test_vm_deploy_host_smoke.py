@@ -21,7 +21,7 @@ class FakeSession:
     def __init__(self, *, expected_cwd=DAKOTA_CWD, expected_thread=THREAD_ID,
                  read_error=None, active_flags=None, unknown_active_flags=False,
                  native_state_authoritative=True, thread_status="notLoaded",
-                 connection_target="local"):
+                 connection_target="local", latest_turn=None):
         self.expected_cwd = expected_cwd
         self.expected_thread = expected_thread
         self.read_error = read_error
@@ -30,6 +30,7 @@ class FakeSession:
         self.native_state_authoritative = native_state_authoritative
         self.thread_status = thread_status
         self.connection_target = connection_target
+        self.latest_turn = latest_turn
         self.calls = []
 
     def call(self, _method, request):
@@ -55,6 +56,7 @@ class FakeSession:
                             "active_flags": self.active_flags,
                             "unknown_active_flags": self.unknown_active_flags,
                             "native_state_authoritative": self.native_state_authoritative,
+                            "latest_turn": self.latest_turn,
                         },
                     },
                     "error": None,
@@ -165,6 +167,74 @@ def test_native_snapshot_rejects_active_unknown_or_unverified_state(tmp_path, mo
             "target": "local", "cwd": DAKOTA_CWD, "thread_id": THREAD_ID,
         }, "require_native": False})
         assert result["native_read"]["status"] == "FAIL"
+
+
+def test_native_snapshot_accepts_idle_only_with_completed_latest_turn(
+        tmp_path, monkeypatch):
+    session = FakeSession(
+        thread_status="idle",
+        latest_turn={"id": "12345678-1234-5678-9abc-def012345678",
+                     "status": "completed", "error_code": None},
+    )
+    fake = configured_host(tmp_path, monkeypatch, session=session)
+    fake.read_devsy = lambda _session, _profile: None
+
+    result = host.smoke({"native_codex": {
+        "target": "local", "cwd": DAKOTA_CWD, "thread_id": THREAD_ID,
+    }, "require_native": True})
+
+    assert result["native_read"] == {"status": "PASS", "target": "local"}
+
+
+def test_native_snapshot_rejects_idle_with_missing_or_noncompleted_latest_turn(
+        tmp_path, monkeypatch):
+    invalid_snapshots = (
+        (None, [], False, "NATIVE_THREAD_STATE_UNVERIFIED"),
+        ({"id": "12345678-1234-5678-9abc-def012345678", "status": "inProgress",
+          "error_code": None}, [], False, "NATIVE_THREAD_STATE_UNVERIFIED"),
+        ({"id": "malformed", "status": "completed", "error_code": None}, [], False,
+         "NATIVE_THREAD_STATE_UNVERIFIED"),
+        ({"id": "12345678-1234-5678-9abc-def012345678", "status": "completed",
+          "error_code": "unexpected"}, [], False, "NATIVE_THREAD_STATE_UNVERIFIED"),
+        ({"id": "12345678-1234-5678-9abc-def012345678", "status": "completed",
+          "error_code": None}, ["turn"], False, "NATIVE_THREAD_ACTIVITY_UNKNOWN"),
+        ({"id": "12345678-1234-5678-9abc-def012345678", "status": "completed",
+          "error_code": None}, [], True, "NATIVE_THREAD_ACTIVITY_UNKNOWN"),
+    )
+    for index, (latest_turn, active_flags, unknown_active_flags, error_code) in enumerate(
+            invalid_snapshots):
+        session = FakeSession(thread_status="idle", latest_turn=latest_turn,
+                              active_flags=active_flags,
+                              unknown_active_flags=unknown_active_flags)
+        fake = configured_host(tmp_path / str(index), monkeypatch, session=session)
+        fake.read_devsy = lambda _session, _profile: None
+
+        result = host.smoke({"native_codex": {
+            "target": "local", "cwd": DAKOTA_CWD, "thread_id": THREAD_ID,
+        }, "require_native": False})
+
+        assert result["native_read"] == {
+            "status": "FAIL", "error_code": error_code,
+        }
+
+
+def test_native_snapshot_rejects_active_even_without_active_flags(
+        tmp_path, monkeypatch):
+    session = FakeSession(
+        thread_status="active",
+        latest_turn={"id": "12345678-1234-5678-9abc-def012345678",
+                     "status": "inProgress", "error_code": None},
+    )
+    fake = configured_host(tmp_path, monkeypatch, session=session)
+    fake.read_devsy = lambda _session, _profile: None
+
+    result = host.smoke({"native_codex": {
+        "target": "local", "cwd": DAKOTA_CWD, "thread_id": THREAD_ID,
+    }, "require_native": False})
+
+    assert result["native_read"] == {
+        "status": "FAIL", "error_code": "NATIVE_THREAD_STATE_UNVERIFIED",
+    }
 
 
 def test_strict_smoke_fails_closed_when_native_tuple_is_missing(tmp_path, monkeypatch):
