@@ -774,14 +774,26 @@ def native_thread_read(client, session, supplied):
             or snapshot.get("cwd") != identity["cwd"]
             or snapshot.get("thread_id") != identity["thread_id"]):
         return {"status": "FAIL", "error_code": "NATIVE_THREAD_IDENTITY_MISMATCH"}
+    thread_status = snapshot.get("thread_status")
     if (snapshot.get("source") != "native-app-server"
             or snapshot.get("native_state_authoritative") is not True
-            or snapshot.get("thread_status") not in ("loaded", "notLoaded")):
+            or thread_status not in ("loaded", "notLoaded", "idle")):
         return {"status": "FAIL", "error_code": "NATIVE_THREAD_STATE_UNVERIFIED"}
     active_flags = snapshot.get("active_flags")
     if (not isinstance(active_flags, list) or active_flags
             or snapshot.get("unknown_active_flags") is not False):
         return {"status": "FAIL", "error_code": "NATIVE_THREAD_ACTIVITY_UNKNOWN"}
+    if thread_status == "idle":
+        latest_turn = snapshot.get("latest_turn")
+        if (not isinstance(latest_turn, dict)
+                or not isinstance(latest_turn.get("id"), str)
+                or not re.fullmatch(
+                    r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}",
+                    latest_turn["id"],
+                )
+                or latest_turn.get("status") != "completed"
+                or latest_turn.get("error_code") is not None):
+            return {"status": "FAIL", "error_code": "NATIVE_THREAD_STATE_UNVERIFIED"}
     return {"status": "PASS", "target": identity["target"]}
 
 

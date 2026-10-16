@@ -55,6 +55,9 @@ target `local`, exact worktree cwd, and persistent thread id. Full image deploy,
 adopt, and CAS acceptance require that tuple and a successful metadata-only
 exact read. `preflight` reports native-read status without letting a thread
 mismatch block its separate read-only Devsy plan.
+The native gate accepts `idle` only when the exact snapshot also reports a
+completed latest turn, no active flags, and no unknown activity flags; `active`
+and unrecognized states remain blocked.
 
 - `preflight`: validate host identity, image architecture/OCI source labels,
   existing encrypted identity and Devsy provider plan. It also reports catalog,
