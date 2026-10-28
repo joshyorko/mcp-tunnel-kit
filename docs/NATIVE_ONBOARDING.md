@@ -29,6 +29,11 @@ registers the target with the existing central CAS. It then verifies CAS and
 Executor reads. A matching rerun verifies the same configuration without key
 rotation or service recreation.
 
+Progress appears on stderr before each controller, native-read, Kamal and
+verification phase. Slow phases print a heartbeat every 15 seconds and report
+their elapsed time when finished. Stdout remains the final JSON result. A
+completed lifecycle receipt clears the earlier pending-transaction fields.
+
 For a registration that changes central files, provide an existing surviving
 target's exact worktree and persistent thread once. The acceptance target
 defaults to `local` for compatibility; select another with `--native-target`:

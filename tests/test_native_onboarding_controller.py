@@ -52,6 +52,22 @@ def test_verify_requires_structured_success():
         c.action_result({'content': []})
 
 
+def test_failed_controller_request_reports_failure_on_stderr(monkeypatch, capsys):
+    import subprocess
+    monkeypatch.setattr(c, '_remote_source', lambda: 'source')
+    monkeypatch.setattr(c.deploy, 'INSTANCE', {})
+    monkeypatch.setattr(c.instance_profile, 'encode', lambda _instance: 'profile')
+    monkeypatch.setattr(c.deploy, 'ssh_args', lambda _command: ['ssh'])
+    monkeypatch.setattr(c.subprocess, 'run', lambda *args, **kwargs: subprocess.CompletedProcess(
+        ['ssh'], 1, '', 'ValueError: remote failure'))
+    with pytest.raises(RuntimeError, match='remote failure'):
+        c.Connection().info()
+    captured = capsys.readouterr()
+    assert not captured.out
+    assert 'Reading controller identity: failed' in captured.err
+    assert 'Reading controller identity: done' not in captured.err
+
+
 @pytest.fixture
 def changed(monkeypatch):
     conn = connection(monkeypatch)
@@ -146,11 +162,16 @@ def test_lifecycle_rename_passes_pre_and_post_acceptance_and_verifies_before_com
     rpc = Mock(side_effect=[{'pending': None},
                             {'changed': True, 'targets_before': {'local': {}},
                              'targets_after': {'local': {}, 'dakota-nvidia': {}}},
-                            {'changed': True, 'transaction_id': 'b' * 32},
+                            {'changed': True, 'transaction_id': 'b' * 32,
+                             'pending_transaction_id': 'b' * 32, 'pending_name': 'dakota',
+                             'pending_operation': 'rename'},
                             {'verified': True}, {'status': 'complete'}])
     monkeypatch.setattr(conn, '_call', rpc)
     monkeypatch.setattr(conn, 'info', lambda: {'controller_fingerprint': 'SHA256:' + 'a' * 43})
-    assert conn.lifecycle({'operation': 'rename', 'name': 'dakota', 'new_name': 'dakota-nvidia'}, accepted)['verified']
+    result = conn.lifecycle({'operation': 'rename', 'name': 'dakota', 'new_name': 'dakota-nvidia'}, accepted)
+    assert result['verified']
+    assert result['status'] == 'complete'
+    assert all(result[key] is None for key in ('pending_transaction_id', 'pending_name', 'pending_operation'))
     assert [call.args[0] for call in rpc.call_args_list] == [
         'pending', 'lifecycle-plan', 'lifecycle-apply', 'verify-lifecycle', 'complete']
     plan_request = rpc.call_args_list[1].args[1]
