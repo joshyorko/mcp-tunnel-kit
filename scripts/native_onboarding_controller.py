@@ -15,6 +15,7 @@ import zlib
 
 import deploy_control_plane as deploy
 import instance_profile
+from operator_progress import run_phase
 
 
 def action_result(response):
@@ -174,13 +175,20 @@ class Connection:
     def _call(self, action, data=None):
         command = shlex.join(['python3', '-c', _remote_source(), action,
                               instance_profile.encode(deploy.INSTANCE)])
-        result = subprocess.run(deploy.ssh_args(command), input=json.dumps(data or {}),
-                                text=True, capture_output=True, timeout=600)
-        if result.returncode:
-            # Registration errors contain paths and fixed reasons, never private key bytes.
-            reason = result.stderr.strip().splitlines()[-1:] or ['remote request failed']
-            raise RuntimeError('Native registration ' + action + ' failed: ' + reason[0][:400])
-        return json.loads(result.stdout)
+        labels = {'info': 'Reading controller identity', 'pending': 'Checking unfinished operations',
+                  'lifecycle-plan': 'Planning target change', 'lifecycle-apply': 'Publishing target change',
+                  'plan': 'Planning target registration', 'apply': 'Publishing target registration',
+                  'verify': 'Verifying CAS and Executor', 'verify-lifecycle': 'Verifying CAS and Executor',
+                  'complete': 'Completing transaction', 'rollback': 'Restoring previous configuration'}
+        def request():
+            result = subprocess.run(deploy.ssh_args(command), input=json.dumps(data or {}),
+                                    text=True, capture_output=True, timeout=600)
+            if result.returncode:
+                # Registration errors contain paths and fixed reasons, never private key bytes.
+                reason = result.stderr.strip().splitlines()[-1:] or ['remote request failed']
+                raise RuntimeError('Native registration ' + action + ' failed: ' + reason[0][:400])
+            return json.loads(result.stdout)
+        return run_phase(labels[action], request)
 
     def info(self):
         return self._call('info')
@@ -264,7 +272,7 @@ class Connection:
             if (current.get('authority') != 'kamal' or before.get('authority') != 'kamal'
                     or current.get('identity') != before.get('identity') or before.get('tunnel_count') != 1):
                 raise ValueError('Native lifecycle change requires the healthy recorded Kamal generation')
-            deploy.smoke(native_before, require_native=True)
+            run_phase('Checking native access before the change', deploy.smoke, native_before, require_native=True)
             self._bundle()
             try:
                 applied = self._call('lifecycle-apply', full_request)
@@ -282,7 +290,7 @@ class Connection:
                 try:
                     self._refresh(config)
                     verified = self.verify_lifecycle(plan)
-                    deploy.smoke(accepted, require_native=True)
+                    run_phase('Checking native access after the change', deploy.smoke, accepted, require_native=True)
                     after = deploy.remote('snapshot')
                     if after.get('identity') != before['identity'] or after.get('tunnel_count') != 1:
                         raise RuntimeError('Control-plane identity changed during native lifecycle operation')
@@ -301,28 +309,31 @@ class Connection:
                     try:
                         self._call('rollback', {'transaction_id': transaction})
                         self._refresh(config)
-                        deploy.smoke(native_before, require_native=True)
+                        run_phase('Checking restored native access', deploy.smoke, native_before, require_native=True)
                     except Exception:
                         raise RuntimeError('Native lifecycle operation failed; automatic rollback FAILED. '
                                            'Retain the transaction journal for recovery.') from None
                     raise RuntimeError('Native lifecycle operation failed; previous CAS configuration restored') from None
-            return {**applied, **verified}
+            return {**applied, **verified, 'status': 'complete',
+                    'pending_transaction_id': None, 'pending_name': None, 'pending_operation': None}
 
     def _bundle(self):
         if deploy.LOCAL_CONFIGURED:
             from local_kamal import bundle_environment
             bundle_environment()
         try:
-            check = subprocess.run(['bundle', '_2.6.9_', 'check'], capture_output=True, text=True, timeout=30)
+            check = run_phase('Checking Kamal tooling', subprocess.run,
+                              ['bundle', '_2.6.9_', 'check'], capture_output=True, text=True, timeout=30)
             if check.returncode:
                 # The existing setup confines gems to the user's isolated Kamal bundle.
-                subprocess.run(['bundle', '_2.6.9_', 'install'], check=True, timeout=300)
+                run_phase('Installing the isolated Kamal bundle', subprocess.run,
+                          ['bundle', '_2.6.9_', 'install'], check=True, timeout=300)
         except (OSError, subprocess.SubprocessError):
             raise ValueError('Kamal setup failed; provide Ruby 3.4.8 and run bin/kamal setup-local') from None
 
     def _refresh(self, config):
-        deploy.kamal(config, 'reboot', 'cas')
-        deploy.remote('wait', {'owner': 'kamal', 'service': 'cas'})
+        run_phase('Recreating CAS with the pinned image', deploy.kamal, config, 'reboot', 'cas')
+        run_phase('Waiting for CAS health', deploy.remote, 'wait', {'owner': 'kamal', 'service': 'cas'})
 
     def _recover(self, transaction, current, native):
         with tempfile.TemporaryDirectory(prefix='native-kamal-recovery-') as directory:
@@ -330,7 +341,7 @@ class Connection:
             try:
                 self._call('rollback', {'transaction_id': transaction})
                 self._refresh(config)
-                deploy.smoke(native, require_native=True)
+                run_phase('Checking restored native access', deploy.smoke, native, require_native=True)
             except Exception:
                 raise RuntimeError('Native registration automatic rollback FAILED. '
                                    'Retain the transaction journal for recovery.') from None
@@ -360,7 +371,7 @@ class Connection:
             if (current.get('authority') != 'kamal' or before.get('authority') != 'kamal'
                     or current.get('identity') != before.get('identity') or before.get('tunnel_count') != 1):
                 raise ValueError('Registration requires the healthy recorded Kamal generation')
-            deploy.smoke(native, require_native=True)
+            run_phase('Checking native access before registration', deploy.smoke, native, require_native=True)
             self._bundle()
             try:
                 applied = self._call('apply', descriptor)
@@ -378,7 +389,7 @@ class Connection:
                 try:
                     self._refresh(config)
                     verified = self._call('verify', descriptor)
-                    deploy.smoke(native, require_native=True)
+                    run_phase('Checking native access after registration', deploy.smoke, native, require_native=True)
                     after = deploy.remote('snapshot')
                     if after.get('identity') != before['identity'] or after.get('tunnel_count') != 1:
                         raise RuntimeError('Control-plane identity changed during registration')
@@ -395,7 +406,7 @@ class Connection:
                     try:
                         self._call('rollback', {'transaction_id': transaction})
                         self._refresh(config)
-                        deploy.smoke(native, require_native=True)
+                        run_phase('Checking restored native access', deploy.smoke, native, require_native=True)
                     except Exception:
                         raise RuntimeError('Native registration failed; automatic rollback FAILED. '
                                            'Retain the transaction journal for recovery.') from None

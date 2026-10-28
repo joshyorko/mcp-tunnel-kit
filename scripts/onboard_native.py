@@ -18,6 +18,7 @@ import tempfile
 from typing import Callable
 
 import native_codex_ssh
+from operator_progress import run_phase
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -340,7 +341,8 @@ def main(argv: list[str] | None = None) -> int:
             native = load_acceptance(state, native)
             if lifecycle:
                 import native_onboarding_controller as controller
-                connection = controller.connect(args.local_env.absolute(), args.instance_profile)
+                connection = run_phase('Connecting to the control plane', controller.connect,
+                                       args.local_env.absolute(), args.instance_profile)
                 request = {"operation": args.operation, "name": args.name}
                 if args.operation == "rename":
                     request["new_name"] = args.new_name
@@ -363,7 +365,8 @@ def main(argv: list[str] | None = None) -> int:
             address = ensure_tailnet(non_interactive=args.non_interactive)
             codex, sock = discover_daemon(codex_bin=args.codex_bin, socket_path=args.socket_path)
             import native_onboarding_controller as controller
-            connection = controller.connect(args.local_env.absolute(), args.instance_profile)
+            connection = run_phase('Connecting to the control plane', controller.connect,
+                                   args.local_env.absolute(), args.instance_profile)
             info = connection.info()
             print("Preparing or adopting the restricted SSH endpoint...", file=sys.stderr, flush=True)
             public = prepare_endpoint(state, codex, sock, address, args.port, info)
