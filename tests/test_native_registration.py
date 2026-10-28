@@ -180,7 +180,7 @@ def test_complete_refuses_changed_files(setup):
     path.write_text(path.read_text() + '\n')
     with pytest.raises(ValueError, match='changed before completion'):
         reg.complete(result['transaction_id'])
-    assert reg.pending.exists()
+    assert reg.pending_path.exists()
 
 
 def test_probe_uses_verified_key_and_ignores_user_ssh_config(setup, monkeypatch):
@@ -239,3 +239,162 @@ def test_probe_accepts_running_daemon_without_optional_socket_field(setup, monke
     reg, descriptor, _, _ = setup
     monkeypatch.setattr(module.subprocess, 'run', lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout='{"status":"running"}'))
     assert Registration.probe(reg, descriptor)['status'] == 'PASS'
+
+
+def lifecycle_request(reg, operation='rename', name='local', new_name='dakota-nvidia'):
+    before = {'target': 'local', 'cwd': '/home/kdlocpanda/second_brain',
+              'thread_id': '12345678-1234-5678-9abc-def012345678'}
+    after = {'target': new_name if operation == 'rename' else 'local',
+             'cwd': '/home/kdlocpanda/second_brain',
+             'thread_id': '12345678-1234-5678-9abc-def012345678'}
+    request = {'operation': operation, 'name': name,
+               'controller_fingerprint': reg.instance['deploy_host']['host_key_fingerprint'],
+               'native_before': before, 'native_after': after}
+    if operation == 'rename':
+        request['new_name'] = new_name
+    return request
+
+
+def test_lifecycle_rename_preserves_entry_and_journals_native_tuples(setup):
+    reg, _, state, _ = setup
+    targets = {'local': {'transport': 'ssh', 'destination': 'dakota-native', 'opaque': {'x': 1}},
+               'keep': {'transport': 'ssh', 'destination': 'other'}}
+    (state / 'cas-targets.json').write_text(json.dumps({'targets': targets}))
+    request = lifecycle_request(reg)
+    plan = reg.lifecycle_plan(request)
+    assert plan['targets_before'] == targets
+    assert plan['targets_after'] == {'dakota-nvidia': targets['local'], 'keep': targets['keep']}
+    assert plan['operation'] == 'rename' and plan['new_name'] == 'dakota-nvidia'
+    result = reg.lifecycle_apply(request)
+    journal = reg._journal(result['transaction_id'])
+    assert journal['native_before'] == request['native_before']
+    assert journal['native_after'] == request['native_after']
+    assert journal['targets_before'] == targets
+    assert json.loads((state / 'cas-targets.json').read_text())['targets'] == plan['targets_after']
+    assert set(result['files']) == {'targets'}
+
+
+def test_lifecycle_rename_rejects_conflicting_destination(setup):
+    reg, _, state, _ = setup
+    (state / 'cas-targets.json').write_text(json.dumps({'targets': {
+        'local': {'transport': 'ssh', 'destination': 'dakota-native'},
+        'dakota-nvidia': {'transport': 'local', 'destination': 'other'}}}))
+    with pytest.raises(ValueError, match='conflict'):
+        reg.lifecycle_plan(lifecycle_request(reg))
+
+
+def test_lifecycle_rename_rejects_missing_source_without_receipt(setup):
+    reg, _, state, _ = setup
+    (state / 'cas-targets.json').write_text(json.dumps({'targets': {
+        'dakota-nvidia': {'transport': 'ssh', 'destination': 'dakota-native'},
+        'keep': {'transport': 'ssh'}}}))
+    with pytest.raises(ValueError, match='source missing'):
+        reg.lifecycle_plan(lifecycle_request(reg))
+
+
+def test_lifecycle_remove_refuses_last_and_acceptance_target(setup):
+    reg, _, state, _ = setup
+    (state / 'cas-targets.json').write_text(json.dumps({'targets': {'local': {'transport': 'ssh'}}}))
+    request = lifecycle_request(reg, operation='remove', name='local')
+    request['native_after'] = {'target': 'local', 'cwd': request['native_before']['cwd'], 'thread_id': request['native_before']['thread_id']}
+    with pytest.raises(ValueError, match='last|acceptance'):
+        reg.lifecycle_plan(request)
+    (state / 'cas-targets.json').write_text(json.dumps({'targets': {
+        'local': {'transport': 'ssh'}, 'keep': {'transport': 'ssh'}}}))
+    with pytest.raises(ValueError, match='acceptance'):
+        reg.lifecycle_plan(request)
+
+
+def test_lifecycle_remove_retry_and_rollback_restore_local(setup):
+    reg, _, state, _ = setup
+    original = {'local': {'transport': 'ssh'}, 'keep': {'transport': 'ssh'}}
+    (state / 'cas-targets.json').write_text(json.dumps({'targets': original}))
+    request = lifecycle_request(reg, operation='remove', name='keep')
+    request['native_before']['target'] = 'local'
+    request['native_after']['target'] = 'local'
+    result = reg.lifecycle_apply(request)
+    reg.rollback(result['transaction_id'])
+    assert json.loads((state / 'cas-targets.json').read_text())['targets'] == original
+    reg.lifecycle_apply(request)
+    assert reg.lifecycle_plan(request)['changed'] is False
+
+
+def test_pending_matches_lifecycle_request_after_rename_publication(setup):
+    reg, _, state, _ = setup
+    targets = {'local': {'transport': 'ssh', 'destination': 'dakota-native'},
+               'keep': {'transport': 'ssh'}}
+    (state / 'cas-targets.json').write_text(json.dumps({'targets': targets}))
+    request = lifecycle_request(reg)
+    result = reg.lifecycle_apply(request)
+    pending = reg.pending(request)
+    assert pending['transaction_id'] == result['transaction_id']
+    assert pending['targets_before'] == targets
+    with pytest.raises(ValueError, match='pending'):
+        reg.pending(lifecycle_request(reg, new_name='other'))
+
+
+def test_pending_dispatch_recovers_with_identity_only_after_source_is_gone(setup):
+    import native_registration as module
+    reg, _, state, _ = setup
+    targets = {'local': {'transport': 'ssh', 'destination': 'dakota-native'},
+               'keep': {'transport': 'ssh'}}
+    (state / 'cas-targets.json').write_text(json.dumps({'targets': targets}))
+    request = lifecycle_request(reg)
+    result = reg.lifecycle_apply(request)
+    assert 'local' not in json.loads(reg.paths['targets'].read_text())['targets']
+    identity = {key: request[key] for key in ('operation', 'name', 'new_name', 'controller_fingerprint')}
+    response = module.dispatch('pending', identity, reg.instance)
+    assert response['pending']['transaction_id'] == result['transaction_id']
+    assert response['pending']['native_before'] == request['native_before']
+    assert response['pending']['native_after'] == request['native_after']
+
+
+def test_lifecycle_rejects_control_characters_in_native_cwd(setup):
+    reg, _, _, _ = setup
+    request = lifecycle_request(reg)
+    request['native_before']['cwd'] = '/repo\nmalicious'
+    with pytest.raises(ValueError, match='acceptance tuple'):
+        reg.lifecycle_plan(request)
+
+
+def test_completed_lifecycle_rename_is_idempotent_only_for_receipted_entry(setup):
+    reg, _, state, _ = setup
+    original = {'local': {'transport': 'ssh', 'destination': 'dakota-native', 'custom': [1, 2]},
+                'keep': {'transport': 'ssh'}}
+    (state / 'cas-targets.json').write_text(json.dumps({'targets': original}))
+    request = lifecycle_request(reg)
+    result = reg.lifecycle_apply(request)
+    reg.complete(result['transaction_id'])
+    assert reg.lifecycle_plan(request)['changed'] is False
+    changed = {'dakota-nvidia': {'transport': 'ssh', 'destination': 'changed'},
+               'keep': original['keep']}
+    (state / 'cas-targets.json').write_text(json.dumps({'targets': changed}))
+    with pytest.raises(ValueError, match='source missing'):
+        reg.lifecycle_plan(request)
+
+
+def test_lifecycle_partial_publication_rolls_back_and_changed_assets_are_refused(setup, monkeypatch):
+    import native_registration as module
+    reg, _, state, _ = setup
+    original = {'local': {'transport': 'ssh'}, 'keep': {'transport': 'ssh'}}
+    (state / 'cas-targets.json').write_text(json.dumps({'targets': original}))
+    request = lifecycle_request(reg)
+    original_write = module._write
+    def interrupted(path, content):
+        if path == reg.paths['targets']:
+            raise OSError('simulated interruption')
+        original_write(path, content)
+    monkeypatch.setattr(module, '_write', interrupted)
+    with pytest.raises(OSError, match='simulated interruption'):
+        reg.lifecycle_apply(request)
+    monkeypatch.setattr(module, '_write', original_write)
+    journal = reg.pending(request)
+    assert journal['operation'] == 'rename'
+    assert journal['targets_before'] == original
+    reg.rollback(journal['transaction_id'])
+    assert json.loads(reg.paths['targets'].read_text())['targets'] == original
+    result = reg.lifecycle_apply(request)
+    reg.paths['ssh_config'].write_text('operator edit\n')
+    with pytest.raises(ValueError, match='changed since transaction'):
+        reg.rollback(result['transaction_id'])
+    assert reg.paths['ssh_config'].read_text() == 'operator edit\n'

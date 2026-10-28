@@ -85,7 +85,8 @@ def load_acceptance(state: Path, supplied: dict | None) -> dict | None:
     native = value.get("native")
     if (set(value) != {"schema_version", "native"} or value["schema_version"] != 1
             or not isinstance(native, dict) or set(native) != {"target", "cwd", "thread_id"}
-            or native["target"] != "local"):
+            or not isinstance(native.get("target"), str)
+            or not re.fullmatch(r"[a-z][a-z0-9-]{0,62}", native["target"])):
         raise OnboardingError("Private onboarding settings have an unsupported acceptance schema.")
     return native
 
@@ -277,15 +278,19 @@ def prepare_endpoint(state: Path, codex: Path, sock: Path, address: str, port: i
     return " ".join(public[:2])
 
 
-def native_tuple(cwd: str | None, thread_id: str | None) -> dict | None:
+def native_tuple(cwd: str | None, thread_id: str | None, target: str | None = None) -> dict | None:
     if bool(cwd) != bool(thread_id):
         raise OnboardingError("--native-cwd and --native-thread-id must be supplied together.")
-    return {"target": "local", "cwd": cwd, "thread_id": thread_id} if cwd else None
+    if target and not cwd:
+        raise OnboardingError("--native-target requires --native-cwd and --native-thread-id.")
+    return {"target": target or "local", "cwd": cwd, "thread_id": thread_id} if cwd else None
 
 
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__)
+    result.add_argument("--operation", choices=("register", "remove", "rename"), default="register")
     result.add_argument("--name", required=True, help="Logical CAS target name, e.g. dakota-cpu")
+    result.add_argument("--new-name", help="New logical CAS target name for rename")
     result.add_argument("--local-env", type=Path, default=ROOT / ".env.kamal.local")
     result.add_argument("--instance-profile", type=Path)
     result.add_argument("--codex-bin", type=Path)
@@ -294,6 +299,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--port", type=int, default=22222)
     result.add_argument("--native-cwd")
     result.add_argument("--native-thread-id")
+    result.add_argument("--native-target", help="Exact post-change target for native acceptance")
     result.add_argument("--non-interactive", action="store_true", help="Fail with instructions rather than open sudo/browser prompts")
     result.add_argument("--install-dependencies", action="store_true", help="Allow interactive sudo installation on supported mutable Linux hosts")
     result.add_argument("--prepare-only", action="store_true", help="Prepare SSH and export its descriptor for protected CI registration")
@@ -306,11 +312,24 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if os.geteuid() == 0:
             raise OnboardingError("Run onboarding as the non-root owner of the existing Codex daemon.")
-        if not re.fullmatch(r"[a-z][a-z0-9-]{0,62}", args.name) or args.name == "local":
-            raise OnboardingError("Choose a target name using lowercase letters, digits and hyphens, other than local.")
+        if not re.fullmatch(r"[a-z][a-z0-9-]{0,62}", args.name):
+            raise OnboardingError("Choose a target name using lowercase letters, digits and hyphens.")
+        lifecycle = args.operation in {"remove", "rename"}
+        if args.name == "local" and not lifecycle:
+            raise OnboardingError("The local target is reserved for remove and rename operations.")
+        if args.operation == "rename":
+            if (not args.new_name or not re.fullmatch(r"[a-z][a-z0-9-]{0,62}", args.new_name)
+                    or args.new_name == args.name or args.new_name == "local"):
+                raise OnboardingError("Rename requires a distinct non-local --new-name using lowercase letters, digits and hyphens.")
+        elif args.new_name is not None:
+            raise OnboardingError("--new-name is only valid with --operation rename.")
+        if lifecycle and (args.prepare_only or args.install_dependencies):
+            raise OnboardingError("--prepare-only and --install-dependencies are only valid with --operation register.")
         if not 1024 <= args.port <= 65535:
             raise OnboardingError("SSH port must be between 1024 and 65535.")
-        native = native_tuple(args.native_cwd, args.native_thread_id)
+        native = native_tuple(args.native_cwd, args.native_thread_id, args.native_target)
+        if native and not re.fullmatch(r"[a-z][a-z0-9-]{0,62}", native["target"]):
+            raise OnboardingError("--native-target must use lowercase letters, digits and hyphens.")
         state = args.state_dir.absolute()
         private_directory(state)
         lock_path = state / "onboarding.lock"
@@ -319,6 +338,25 @@ def main(argv: list[str] | None = None) -> int:
             private_file(lock_path)
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             native = load_acceptance(state, native)
+            if lifecycle:
+                import native_onboarding_controller as controller
+                connection = controller.connect(args.local_env.absolute(), args.instance_profile)
+                request = {"operation": args.operation, "name": args.name}
+                if args.operation == "rename":
+                    request["new_name"] = args.new_name
+                request["controller_fingerprint"] = connection.info()["controller_fingerprint"]
+                receipt = connection.lifecycle(request, native=native)
+                accepted = native
+                if accepted is None:
+                    accepted = receipt.get("native_after")
+                    if accepted is None and isinstance(receipt.get("plan"), dict):
+                        accepted = receipt["plan"].get("native_after")
+                write_private_json(state / "lifecycle-receipt.json", {
+                    "request": request, "native": accepted, "result": receipt,
+                })
+                save_acceptance(state, accepted)
+                print(json.dumps({"target": args.name, "status": "verified", "lifecycle": receipt}, indent=2))
+                return 0
             if args.install_dependencies:
                 install_dependencies(non_interactive=args.non_interactive)
             print("Checking Tailscale and the existing native Codex daemon...", file=sys.stderr, flush=True)
@@ -335,7 +373,6 @@ def main(argv: list[str] | None = None) -> int:
             if args.prepare_only:
                 destination = args.descriptor_out.absolute() if args.descriptor_out else state / "native-target.json"
                 write_private_json(destination, descriptor)
-                save_acceptance(state, native)
                 print(json.dumps({"target": args.name, "status": "prepared", "descriptor_file": str(destination)}, indent=2))
                 return 0
             print("Registering and verifying through CAS and Executor...", file=sys.stderr, flush=True)

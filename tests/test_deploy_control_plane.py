@@ -53,6 +53,10 @@ def test_native_codex_read_requires_an_explicit_verified_tuple():
     assert d.native_codex_tuple(SimpleNamespace(
         native_target=tuple_value["target"], native_cwd=tuple_value["cwd"],
         native_thread_id=tuple_value["thread_id"])) == tuple_value
+    named = {**tuple_value, "target": "dakota-nvidia"}
+    assert d.native_codex_tuple(SimpleNamespace(
+        native_target=named["target"], native_cwd=named["cwd"],
+        native_thread_id=named["thread_id"])) == named
     assert d.native_codex_tuple(SimpleNamespace(
         native_target=None, native_cwd=None, native_thread_id=None)) is None
     partial = SimpleNamespace(native_target="local", native_cwd=None, native_thread_id=None)
@@ -60,7 +64,7 @@ def test_native_codex_read_requires_an_explicit_verified_tuple():
         "target": "local", "cwd": None, "thread_id": None,
     }
     for values in (
-        {"native_target": "dakota", "native_cwd": tuple_value["cwd"],
+        {"native_target": "bad target", "native_cwd": tuple_value["cwd"],
          "native_thread_id": tuple_value["thread_id"]},
         {"native_target": "local", "native_cwd": "relative/worktree",
          "native_thread_id": tuple_value["thread_id"]},

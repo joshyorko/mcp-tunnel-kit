@@ -103,6 +103,133 @@ def test_native_acceptance_requires_both_fields():
     }
 
 
+def test_acceptance_settings_support_named_target_and_legacy_local(tmp_path):
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    legacy = {"target": "local", "cwd": "/old", "thread_id": "old"}
+    settings = state / "onboarding-settings.json"
+    settings.write_text(json.dumps({"schema_version": 1, "native": legacy}))
+    settings.chmod(0o600)
+    assert onboard.load_acceptance(state, None) == legacy
+    target = {"target": "dakota-nvidia", "cwd": "/gpu", "thread_id": "new"}
+    onboard.save_acceptance(state, target)
+    assert onboard.load_acceptance(state, None) == target
+
+
+@pytest.mark.parametrize("operation", ["remove", "rename"])
+def test_lifecycle_never_touches_local_endpoint_or_dependencies(tmp_path, monkeypatch, operation):
+    state = tmp_path / "state"
+    calls = []
+    class Connection:
+        def info(self):
+            calls.append("info")
+            return {"controller_fingerprint": "SHA256:controller"}
+        def lifecycle(self, request, *, native):
+            calls.append(("lifecycle", request, native))
+            return {"status": "verified", "operation": request["operation"]}
+    import sys
+    import types
+    monkeypatch.setitem(sys.modules, "native_onboarding_controller", types.SimpleNamespace(
+        connect=lambda *a: Connection()))
+    for name in ("install_dependencies", "ensure_tailnet", "discover_daemon", "prepare_endpoint"):
+        monkeypatch.setattr(onboard, name, lambda *a, _name=name, **kw: pytest.fail(f"called {_name}"))
+    thread = "12345678-1234-5678-9abc-def012345678"
+    args = ["--name", "dakota-cpu", "--operation", operation,
+            "--native-target", "local", "--native-cwd", "/same/worktree",
+            "--native-thread-id", thread, "--state-dir", str(state)]
+    if operation == "rename":
+        args += ["--new-name", "dakota-nvidia"]
+    assert onboard.main(args) == 0
+    request = next(call[1] for call in calls if isinstance(call, tuple) and call[0] == "lifecycle")
+    assert request == {"operation": operation, "name": "dakota-cpu",
+                       **({"new_name": "dakota-nvidia"} if operation == "rename" else {}),
+                       "controller_fingerprint": "SHA256:controller"}
+    assert (state / "lifecycle-receipt.json").exists()
+    assert not (state / "onboarding-receipt.json").exists()
+
+
+def test_lifecycle_uses_saved_acceptance_tuple_when_not_supplied(tmp_path, monkeypatch):
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    native = {"target": "dakota-nvidia", "cwd": "/gpu", "thread_id": "saved"}
+    onboard.save_acceptance(state, native)
+    observed = []
+    class Connection:
+        def info(self):
+            return {"controller_fingerprint": "SHA256:controller"}
+        def lifecycle(self, request, *, native):
+            observed.append(native)
+            return {"status": "verified"}
+    import sys
+    import types
+    monkeypatch.setitem(sys.modules, "native_onboarding_controller", types.SimpleNamespace(
+        connect=lambda *a: Connection()))
+    assert onboard.main(["--name", "local", "--operation", "remove", "--state-dir", str(state)]) == 0
+    assert observed == [native]
+
+
+def test_lifecycle_requires_native_acceptance_tuple(tmp_path, monkeypatch):
+    state = tmp_path / "state"
+    accepted = {"target": "local", "cwd": "/recovered", "thread_id": "recovered-thread"}
+    observed = []
+    class Connection:
+        def info(self):
+            return {"controller_fingerprint": "SHA256:controller"}
+        def lifecycle(self, request, *, native):
+            observed.append(native)
+            return {"verified": True, "native_after": accepted}
+    import sys
+    import types
+    monkeypatch.setitem(sys.modules, "native_onboarding_controller", types.SimpleNamespace(
+        connect=lambda *a: Connection()))
+    assert onboard.main(["--name", "dakota-cpu", "--operation", "remove",
+                         "--state-dir", str(state)]) == 0
+    assert observed == [None]
+    assert onboard.load_acceptance(state, None) == accepted
+
+
+def test_register_allows_local_acceptance_for_named_target(tmp_path, monkeypatch):
+    state = tmp_path / "state"
+    thread = "12345678-1234-5678-9abc-def012345678"
+    expected = {"target": "local", "cwd": "/repo", "thread_id": thread}
+    class Connection:
+        def info(self):
+            return {"address": "100.75.96.78", "public_key": "ssh-ed25519 key",
+                    "controller_fingerprint": "SHA256:controller"}
+        def register(self, descriptor, *, native):
+            assert descriptor["name"] == "cpu"
+            assert native == expected
+            return {"verified": True}
+    import sys
+    import types
+    monkeypatch.setitem(sys.modules, "native_onboarding_controller", types.SimpleNamespace(
+        connect=lambda *a: Connection()))
+    monkeypatch.setattr(onboard, "ensure_tailnet", lambda **kw: "100.118.115.62")
+    monkeypatch.setattr(onboard, "discover_daemon", lambda **kw: (Path("/codex"), Path("/socket")))
+    monkeypatch.setattr(onboard, "prepare_endpoint", lambda *a: "ssh-ed25519 key")
+    assert onboard.main(["--name", "cpu", "--state-dir", str(state), "--native-target", "local",
+                         "--native-cwd", "/repo", "--native-thread-id", thread]) == 0
+    assert onboard.load_acceptance(state, None) == expected
+
+
+def test_rename_rejects_reserved_local_destination_before_state_creation(tmp_path):
+    state = tmp_path / "state"
+    assert onboard.main(["--name", "dakota-cpu", "--operation", "rename", "--new-name", "local",
+                         "--state-dir", str(state), "--native-target", "dakota-cpu",
+                         "--native-cwd", "/repo", "--native-thread-id", "thread"]) == 2
+    assert not state.exists()
+
+
+@pytest.mark.parametrize("extra", [["--prepare-only"], ["--install-dependencies"]])
+def test_lifecycle_rejects_registration_flags_before_local_mutations(tmp_path, monkeypatch, extra):
+    state = tmp_path / "state"
+    for name in ("install_dependencies", "ensure_tailnet", "discover_daemon", "prepare_endpoint"):
+        monkeypatch.setattr(onboard, name, lambda *a, **kw: pytest.fail(f"called {name}"))
+    args = ["--name", "dakota-cpu", "--operation", "remove", "--state-dir", str(state), *extra]
+    assert onboard.main(args) == 2
+    assert not state.exists()
+
+
 def test_endpoint_adoption_does_not_rotate_keys_or_restart(tmp_path, monkeypatch):
     state = tmp_path / "endpoint"
     state.mkdir(mode=0o700)

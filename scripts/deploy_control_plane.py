@@ -219,21 +219,22 @@ def choose_manifest(current, digest, revision):
 
 
 def native_codex_tuple(args, *, require_valid=True):
-    """Return an explicit operator-supplied Dakota target/thread/worktree tuple."""
+    """Return an explicit operator-supplied target/thread/worktree tuple."""
     values = [getattr(args, name, None) for name in (
         "native_target", "native_cwd", "native_thread_id")]
     values = [value or None for value in values]
     if not any(values):
         return None
     target, cwd, thread_id = values
-    valid = all(isinstance(value, str) and value for value in values) and target == "local"
+    valid = (all(isinstance(value, str) and value for value in values)
+             and bool(re.fullmatch(r"[a-z][a-z0-9-]{0,62}", target)))
     if valid:
         path = PurePosixPath(cwd)
         valid = (path.is_absolute() and ".." not in path.parts and str(path) == cwd
                  and not any(ord(char) < 32 for char in cwd)
                  and bool(re.fullmatch(r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}", thread_id)))
     if not valid and require_valid:
-        raise ValueError("native Codex tuple must explicitly bind target local, cwd, and thread id")
+        raise ValueError("native Codex tuple must explicitly bind a safe target name, cwd, and thread id")
     return {"target": target, "cwd": cwd, "thread_id": thread_id}
 
 
@@ -244,7 +245,7 @@ def smoke_request(native_tuple, *, require_native=False):
 def smoke(native_tuple, *, require_native=False):
     result = remote("smoke", smoke_request(native_tuple, require_native=require_native))
     if require_native and result.get("native_read", {}).get("status") != "PASS":
-        raise RuntimeError("Qualified Dakota native read failed; production changes were not started")
+        raise RuntimeError("Qualified native read failed; production changes were not started")
     return result
 
 
@@ -746,7 +747,7 @@ def execute(args):
         args, require_valid=args.operation in ('adopt','cas','deploy','devsy-apply')
         or args.operation in host_tap_operations)
     if args.operation in host_tap_operations and native_tuple is None:
-        raise ValueError('qualified Dakota native Codex tuple is required for protected Homebrew tap operations')
+        raise ValueError('qualified native Codex tuple is required for protected Homebrew tap operations')
     if INSTANCE is None:
         configure_instance(getattr(args,'instance_profile',None) or os.environ.get('KAMAL_INSTANCE_PROFILE',DEFAULT_INSTANCE_PROFILE))
     trusted_context(os.environ,args.local)

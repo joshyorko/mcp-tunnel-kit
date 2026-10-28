@@ -132,7 +132,7 @@ class Registration:
                       'ssh_config': self.native / 'ssh_config.native',
                       'known_hosts': self.native / 'known_hosts.native'}
         self.store = self.state / 'native-registration'
-        self.pending = self.store / 'pending.json'
+        self.pending_path = self.store / 'pending.json'
 
     def _descriptor(self, descriptor):
         value = validate_descriptor(descriptor)
@@ -157,8 +157,8 @@ class Registration:
         value = self._descriptor(descriptor)
         before = {name: _read(path) for name, path in self.paths.items()}
         targets = json.loads(before['targets'])
-        if not isinstance(targets, dict) or not isinstance(targets.get('targets'), dict) or 'local' not in targets['targets']:
-            raise ValueError('Existing local target must be preserved')
+        if not isinstance(targets, dict) or not isinstance(targets.get('targets'), dict) or not targets['targets']:
+            raise ValueError('At least one existing target must be preserved')
         name, alias = value['name'], value['name'] + '-native'
         target = {'transport': 'ssh', 'destination': alias, 'codex_bin': value['codex_bin'],
                   'socket_path': value['socket'], 'ssh_config': '/run/codex-ssh/ssh_config',
@@ -237,7 +237,7 @@ class Registration:
 
     def plan(self, descriptor):
         value, before, after = self._render(descriptor)
-        pending = json.loads(_read(self.pending)) if self.pending.exists() or self.pending.is_symlink() else None
+        pending = json.loads(_read(self.pending_path)) if self.pending_path.exists() or self.pending_path.is_symlink() else None
         return {'changed': before != after, 'name': value['name'],
                 'pending_transaction_id': pending['transaction_id'] if pending else None,
                 'pending_name': pending['name'] if pending else None,
@@ -276,7 +276,7 @@ class Registration:
     def _journal(self, transaction_id):
         if not isinstance(transaction_id, str) or not re.fullmatch(r'[a-f0-9]{32}', transaction_id):
             raise ValueError('Invalid registration transaction id')
-        source = self.pending if self.pending.exists() or self.pending.is_symlink() else self.store / transaction_id / 'receipt.json'
+        source = self.pending_path if self.pending_path.exists() or self.pending_path.is_symlink() else self.store / transaction_id / 'receipt.json'
         journal = json.loads(_read(source))
         if journal.get('transaction_id') != transaction_id:
             raise ValueError('Registration transaction mismatch')
@@ -284,7 +284,7 @@ class Registration:
 
     def apply(self, descriptor):
         value, before, after = self._render(descriptor)
-        if self.pending.exists() or self.pending.is_symlink():
+        if self.pending_path.exists() or self.pending_path.is_symlink():
             raise ValueError('Registration pending; complete or rollback the existing transaction')
         self.probe(value)
         if before == after:
@@ -298,7 +298,7 @@ class Registration:
         journal = {'transaction_id': transaction_id, 'name': value['name'], 'status': 'pending',
                    'before': {key: _sha(content) for key, content in before.items()},
                    'after': {key: _sha(content) for key, content in after.items()}}
-        _write(self.pending, _json(journal))
+        _write(self.pending_path, _json(journal))
         for name, content in after.items():
             if before[name] != content:
                 if _read(self.paths[name]) != before[name]:
@@ -328,7 +328,7 @@ class Registration:
     def _finish(self, journal, status):
         journal['status'] = status
         _write(self.store / journal['transaction_id'] / 'receipt.json', _json(journal))
-        self.pending.unlink()
+        self.pending_path.unlink()
         directory_fd = os.open(self.store, os.O_DIRECTORY)
         try:
             os.fsync(directory_fd)
@@ -346,6 +346,169 @@ class Registration:
         self._finish(journal, 'complete')
         return {'transaction_id': transaction_id, 'status': 'complete'}
 
+    def _lifecycle_request(self, request):
+        if not isinstance(request, dict):
+            raise ValueError('Invalid lifecycle request')
+        operation = request.get('operation')
+        expected = {'operation', 'name', 'controller_fingerprint', 'native_before', 'native_after'}
+        if operation == 'rename':
+            expected.add('new_name')
+        if operation not in ('remove', 'rename') or set(request) != expected:
+            raise ValueError('Invalid lifecycle request fields')
+        name = request['name']
+        if not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,62}', name):
+            raise ValueError('Invalid lifecycle target name')
+        new_name = request.get('new_name')
+        if operation == 'rename' and (not isinstance(new_name, str)
+                or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,62}', new_name)
+                or new_name.lower() == 'local' or new_name == name):
+            raise ValueError('Invalid or reserved lifecycle destination name')
+        self._lifecycle_identity(request)
+        tuples = {}
+        for key in ('native_before', 'native_after'):
+            value = request[key]
+            if not isinstance(value, dict) or set(value) != {'target', 'cwd', 'thread_id'}:
+                raise ValueError('Invalid native acceptance tuple')
+            target, cwd, thread_id = value['target'], value['cwd'], value['thread_id']
+            if (not isinstance(target, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,62}', target)
+                    or not isinstance(cwd, str) or not cwd.startswith('/')
+                    or any(ord(char) < 32 for char in cwd)
+                    or str(PurePosixPath(cwd)) != cwd or '..' in PurePosixPath(cwd).parts
+                    or not isinstance(thread_id, str)
+                    or not re.fullmatch(r'[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}', thread_id)):
+                raise ValueError('Invalid native acceptance tuple')
+            tuples[key] = dict(value)
+        return {'operation': operation, 'name': name, **({'new_name': new_name} if operation == 'rename' else {}),
+                'controller_fingerprint': request['controller_fingerprint'], **tuples}
+
+    def _lifecycle_identity(self, request):
+        if not isinstance(request, dict):
+            raise ValueError('Invalid lifecycle request')
+        operation = request.get('operation')
+        expected = {'operation', 'name', 'controller_fingerprint'}
+        if operation == 'rename':
+            expected.add('new_name')
+        if operation not in ('remove', 'rename') or set(request) not in (expected, expected | {'native_before', 'native_after'}):
+            raise ValueError('Invalid lifecycle request identity')
+        name = request.get('name')
+        if not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,62}', name):
+            raise ValueError('Invalid lifecycle target name')
+        if operation == 'rename':
+            new_name = request.get('new_name')
+            if (not isinstance(new_name, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,62}', new_name)
+                    or new_name.lower() == 'local' or new_name == name):
+                raise ValueError('Invalid or reserved lifecycle destination name')
+        if request.get('controller_fingerprint') != self.instance['deploy_host']['host_key_fingerprint']:
+            raise ValueError('Lifecycle controller fingerprint mismatch')
+        return {key: request.get(key) for key in ('operation', 'name', 'new_name', 'controller_fingerprint')}
+
+    def _lifecycle_state(self, request):
+        value = self._lifecycle_request(request)
+        before = {name: _read(path) for name, path in self.paths.items()}
+        document = json.loads(before['targets'])
+        targets = document.get('targets') if isinstance(document, dict) else None
+        if not isinstance(targets, dict) or not targets:
+            raise ValueError('At least one existing target is required')
+        if any(not isinstance(k, str) or not isinstance(v, dict) for k, v in targets.items()):
+            raise ValueError('Invalid target map')
+        operation, name = value['operation'], value['name']
+        after_targets = dict(targets)
+        source = targets.get(name)
+        if operation == 'rename':
+            destination = value['new_name']
+            if source is None:
+                receipt = self._completed_rename(value)
+                if receipt is not None and destination in targets and targets[destination] == receipt['renamed_entry']:
+                    return value, before, before, targets, targets
+                raise ValueError('Rename source missing without a matching completed receipt')
+            if destination in targets:
+                raise ValueError('Rename destination conflict')
+            del after_targets[name]
+            after_targets[destination] = source
+        elif source is not None:
+            del after_targets[name]
+        if not after_targets:
+            raise ValueError('Cannot remove the last target')
+        if operation == 'remove' and source is not None and value['native_before']['target'] == name:
+            raise ValueError('Cannot remove the acceptance target')
+        if value['native_before']['target'] not in targets:
+            raise ValueError('Native before target must exist in targets_before')
+        if value['native_after']['target'] not in after_targets:
+            raise ValueError('Native after target must exist in targets_after')
+        after_document = dict(document)
+        after_document['targets'] = after_targets
+        after = dict(before)
+        after['targets'] = _json(after_document) if after_targets != targets else before['targets']
+        return value, before, after, targets, after_targets
+
+    def _completed_rename(self, value):
+        if not self.store.exists():
+            return None
+        for receipt_path in self.store.glob('*/receipt.json'):
+            receipt = json.loads(_read(receipt_path))
+            if (receipt.get('status') == 'complete' and receipt.get('operation') == 'rename'
+                    and receipt.get('name') == value['name'] and receipt.get('new_name') == value['new_name']
+                    and receipt.get('controller_fingerprint') == value['controller_fingerprint']
+                    and receipt.get('native_before') == value['native_before']
+                    and receipt.get('native_after') == value['native_after']):
+                return receipt
+        return None
+
+    def lifecycle_plan(self, request):
+        value, before, after, targets_before, targets_after = self._lifecycle_state(request)
+        pending = json.loads(_read(self.pending_path)) if self.pending_path.exists() or self.pending_path.is_symlink() else None
+        changed = before != after
+        return self._lifecycle_result(value, before, after, targets_before, targets_after, pending, None)
+
+    def _lifecycle_result(self, value, before, after, targets_before, targets_after, pending, transaction_id):
+        return {'changed': before != after, 'operation': value['operation'], 'name': value['name'],
+                'new_name': value.get('new_name'), 'targets_before': targets_before,
+                'targets_after': targets_after,
+                'pending_transaction_id': pending.get('transaction_id') if pending else None,
+                'pending_name': pending.get('name') if pending else None,
+                'pending_operation': pending.get('operation') if pending else None,
+                'native_before': value['native_before'], 'native_after': value['native_after'],
+                'files': [name for name in before if before[name] != after[name]],
+                'retained_assets': ['operator/shared SSH configuration', 'native SSH identity and known-host pins'],
+                'transaction_id': transaction_id}
+
+    def lifecycle_apply(self, request):
+        value, before, after, targets_before, targets_after = self._lifecycle_state(request)
+        if self.pending_path.exists() or self.pending_path.is_symlink():
+            raise ValueError('Lifecycle pending; complete or rollback the existing transaction')
+        files = [name for name in before if before[name] != after[name]]
+        if not files:
+            return self._lifecycle_result(value, before, after, targets_before, targets_after, None, None)
+        self._init_store()
+        transaction_id = uuid.uuid4().hex
+        directory = self.store / transaction_id
+        directory.mkdir(mode=0o700)
+        for name, content in before.items():
+            _write(directory / (name + '.before'), content)
+        journal = {'transaction_id': transaction_id, 'name': value['name'], 'new_name': value.get('new_name'),
+                   'operation': value['operation'], 'controller_fingerprint': value['controller_fingerprint'],
+                   'native_before': value['native_before'], 'native_after': value['native_after'],
+                   'targets_before': targets_before, 'targets_after': targets_after, 'status': 'pending',
+                   'before': {key: _sha(content) for key, content in before.items()},
+                   'after': {key: _sha(content) for key, content in after.items()},
+                   'renamed_entry': targets_before.get(value['name']) if value['operation'] == 'rename' else None}
+        _write(self.pending_path, _json(journal))
+        for name in files:
+            if _read(self.paths[name]) != before[name]:
+                raise ValueError('Lifecycle source changed; rollback pending transaction')
+            _write(self.paths[name], after[name])
+        return self._lifecycle_result(value, before, after, targets_before, targets_after, journal, transaction_id)
+
+    def pending(self, request):
+        identity = self._lifecycle_identity(request)
+        if not self.pending_path.exists() and not self.pending_path.is_symlink():
+            return None
+        journal = json.loads(_read(self.pending_path))
+        if (journal.get('operation') not in ('remove', 'rename')
+                or any(journal.get(key) != value for key, value in identity.items())):
+            raise ValueError('A different registration transaction is pending')
+        return journal
+
 
 def dispatch(action, data, instance):
     registration = Registration(instance)
@@ -355,4 +518,10 @@ def dispatch(action, data, instance):
         return getattr(registration, action)(data)
     if action in ('rollback', 'complete'):
         return getattr(registration, action)(data['transaction_id'])
+    if action == 'lifecycle-plan':
+        return registration.lifecycle_plan(data)
+    if action == 'lifecycle-apply':
+        return registration.lifecycle_apply(data)
+    if action == 'pending':
+        return {'pending': registration.pending(data)}
     raise ValueError('Unknown native registration action')

@@ -84,7 +84,8 @@ Run `bin/onboard-native --name dakota-cpu` on the device after configuring the
 existing pinned controller connection in `.env.kamal.local`. The command handles
 Tailscale login, restricted SSH setup and central CAS registration. See
 [native device onboarding](docs/NATIVE_ONBOARDING.md) for first-run acceptance
-settings, dependency installation and the GitHub Actions alternative.
+settings, dependency installation, removal/rename operations and the GitHub
+Actions alternative.
 
 ## Requirements and setup
 

@@ -208,7 +208,7 @@ def test_deploy_fails_closed_on_missing_native_tuple_before_backup_or_reboot(tmp
              patch.object(d, "configuration", return_value=tmp_path / "deploy.yml"), \
              patch.object(d, "kamal", side_effect=lambda *args: kamal_calls.append(args)), \
              patch.dict(os.environ, {"GITHUB_SHA": "b" * 40}):
-            with pytest.raises(RuntimeError, match="Qualified Dakota native read failed"):
+            with pytest.raises(RuntimeError, match="Qualified native read failed"):
                 d.execute(args("deploy", approve=True))
     finally:
         d.INSTANCE, d.HOST, d.VMROOT, d.VM_HOST_PIN = previous
