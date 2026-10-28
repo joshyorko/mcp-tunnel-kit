@@ -65,6 +65,7 @@ log/
 # External/downloaded binaries and build artifacts
 bin/*
 !bin/kamal
+!bin/onboard-native
 binaries/
 downloads/
 build/

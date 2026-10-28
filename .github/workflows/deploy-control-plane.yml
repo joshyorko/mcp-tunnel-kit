@@ -6,8 +6,12 @@ on:
         description: Controlled operation (adopt is one-time Compose to Kamal handoff)
         type: choice
         default: preflight
-        options: [devsy-bridge-path-check, devsy-bridge-path-apply, devsy-scope-rebind-check, devsy-scope-rebind, preflight, status, devsy-check, devsy-apply, devsy-rollback, devsy-tap-reconcile-check, devsy-tap-reconcile, devsy-tap-rollback-check, devsy-tap-rollback, adopt, cas, deploy, rollback]
+        options: [onboard-native, devsy-bridge-path-check, devsy-bridge-path-apply, devsy-scope-rebind-check, devsy-scope-rebind, preflight, status, devsy-check, devsy-apply, devsy-rollback, devsy-tap-reconcile-check, devsy-tap-reconcile, devsy-tap-rollback-check, devsy-tap-rollback, adopt, cas, deploy, rollback]
         required: true
+      native_descriptor:
+        description: Public endpoint JSON from bin/onboard-native --prepare-only (onboard-native only)
+        type: string
+        required: false
       cas_digest:
         description: Optional approved CAS sha256 digest; revision must also be supplied
         type: string
@@ -99,6 +103,7 @@ jobs:
           done
           printf '%s\n' "$RBENV_ROOT/bin" "$RBENV_ROOT/shims" >> "$GITHUB_PATH"
       - name: Locked, digest-pinned deployment and authenticated acceptance
+        if: inputs.operation != 'onboard-native'
         shell: bash
         env:
           OPERATION: ${{ inputs.operation }}
@@ -134,5 +139,38 @@ jobs:
             printf 'Source `%s`; runner `%s`; VM `kamal-test-deploy`.\n\n' "$GITHUB_SHA" "$RUNNER_NAME"
             printf '```json\n'
             cat "$RUNNER_TEMP/control-plane-receipt.json"
+            printf '\n```\n'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Register prepared native device with the existing CAS
+        if: inputs.operation == 'onboard-native'
+        shell: bash
+        env:
+          NATIVE_DESCRIPTOR: ${{ inputs.native_descriptor }}
+          NATIVE_CWD: ${{ inputs.native_cwd }}
+          NATIVE_THREAD_ID: ${{ inputs.native_thread_id }}
+        run: |
+          set -euo pipefail
+          descriptor="$RUNNER_TEMP/native-endpoint-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json"
+          trap 'rm -f "$descriptor"' EXIT
+          export ONBOARDING_DESCRIPTOR_PATH="$descriptor"
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          import sys
+          sys.path.insert(0, 'scripts')
+          from native_registration import validate_descriptor
+          value = validate_descriptor(json.loads(os.environ['NATIVE_DESCRIPTOR']))
+          fd = os.open(os.environ['ONBOARDING_DESCRIPTOR_PATH'], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+          with os.fdopen(fd, 'w') as stream:
+              json.dump(value, stream)
+          PY
+          python3 scripts/native_onboarding_controller.py \
+            --descriptor "$descriptor" \
+            --native-cwd "$NATIVE_CWD" \
+            --native-thread-id "$NATIVE_THREAD_ID" \
+            | tee "$RUNNER_TEMP/native-onboarding-receipt.json"
+          {
+            printf '### Native device onboarding\n\n```json\n'
+            cat "$RUNNER_TEMP/native-onboarding-receipt.json"
             printf '\n```\n'
           } >> "$GITHUB_STEP_SUMMARY"

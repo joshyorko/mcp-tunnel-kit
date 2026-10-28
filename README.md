@@ -78,6 +78,14 @@ at `friday_mcp_adapter.py:140`, Friday launcher, tool module, run registry logic
 profile-key reader and contracts have been retired. Existing ignored local files
 and credentials are not migrated or deleted.
 
+## Add another native Codex device
+
+Run `bin/onboard-native --name dakota-cpu` on the device after configuring the
+existing pinned controller connection in `.env.kamal.local`. The command handles
+Tailscale login, restricted SSH setup and central CAS registration. See
+[native device onboarding](docs/NATIVE_ONBOARDING.md) for first-run acceptance
+settings, dependency installation and the GitHub Actions alternative.
+
 ## Requirements and setup
 
 Run on the Bluefin host, or in the same network namespace as the existing
