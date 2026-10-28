@@ -1,5 +1,9 @@
 # Bounded native Codex SSH
 
+For automated device preparation, activation and central CAS registration, use
+[native device onboarding](NATIVE_ONBOARDING.md). The steps below describe the
+lower-level endpoint preparation helper.
+
 This lane prepares a separate unprivileged OpenSSH daemon for one existing Codex app-server endpoint. It binds only to the configured Tailscale CGNAT IPv4 address and port. It does not install OpenSSH, enroll a device, change tailnet policy, install or activate a service, or change the native Codex daemon. The client must use a dedicated SSH identity and pin the dedicated host key.
 
 The private JSON profile has exactly these fields:

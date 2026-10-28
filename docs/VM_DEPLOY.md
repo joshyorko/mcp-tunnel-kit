@@ -1,5 +1,9 @@
 # VM control-plane deployment
 
+To register another device rather than redeploy an existing service, use
+[native device onboarding](NATIVE_ONBOARDING.md). It supports local Kamal and
+the protected workflow's `onboard-native` operation.
+
 For host rebuild and encrypted recovery, see [Rebuild a control-plane host](REBUILD.md) and [Capture and stage recovery](RECOVERY.md). Keep the instance profile outside the checkout as an owned mode-`0600` file. See [the private profile example](../config/instance.example.json) for its schema. The profile-aware VM helper accepts `--instance-profile` and otherwise reads the default private profile. A captured runtime checkout may predate that helper. Run recovery from the updated controller checkout rather than assuming an old VM checkout supports this flag.
 
 Issue #20 manages Executor, schema proxy, CAS and the original OpenAI tunnel as
