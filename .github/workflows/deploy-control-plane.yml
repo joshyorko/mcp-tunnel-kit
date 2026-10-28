@@ -6,8 +6,16 @@ on:
         description: Controlled operation (adopt is one-time Compose to Kamal handoff)
         type: choice
         default: preflight
-        options: [onboard-native, devsy-bridge-path-check, devsy-bridge-path-apply, devsy-scope-rebind-check, devsy-scope-rebind, preflight, status, devsy-check, devsy-apply, devsy-rollback, devsy-tap-reconcile-check, devsy-tap-reconcile, devsy-tap-rollback-check, devsy-tap-rollback, adopt, cas, deploy, rollback]
+        options: [onboard-native, remove-native, rename-native, devsy-bridge-path-check, devsy-bridge-path-apply, devsy-scope-rebind-check, devsy-scope-rebind, preflight, status, devsy-check, devsy-apply, devsy-rollback, devsy-tap-reconcile-check, devsy-tap-reconcile, devsy-tap-rollback-check, devsy-tap-rollback, adopt, cas, deploy, rollback]
         required: true
+      native_name:
+        description: Existing logical target to remove or rename
+        type: string
+        required: false
+      native_new_name:
+        description: New logical target name (rename-native only)
+        type: string
+        required: false
       native_descriptor:
         description: Public endpoint JSON from bin/onboard-native --prepare-only (onboard-native only)
         type: string
@@ -21,7 +29,7 @@ on:
         type: string
         required: false
       native_target:
-        description: Verified logical Dakota Codex target for full acceptance (local)
+        description: Verified surviving native target for acceptance; use the new name when renaming it
         type: string
         required: false
       native_cwd:
@@ -103,7 +111,7 @@ jobs:
           done
           printf '%s\n' "$RBENV_ROOT/bin" "$RBENV_ROOT/shims" >> "$GITHUB_PATH"
       - name: Locked, digest-pinned deployment and authenticated acceptance
-        if: inputs.operation != 'onboard-native'
+        if: inputs.operation != 'onboard-native' && inputs.operation != 'remove-native' && inputs.operation != 'rename-native'
         shell: bash
         env:
           OPERATION: ${{ inputs.operation }}
@@ -146,6 +154,7 @@ jobs:
         shell: bash
         env:
           NATIVE_DESCRIPTOR: ${{ inputs.native_descriptor }}
+          NATIVE_TARGET: ${{ inputs.native_target }}
           NATIVE_CWD: ${{ inputs.native_cwd }}
           NATIVE_THREAD_ID: ${{ inputs.native_thread_id }}
         run: |
@@ -166,11 +175,40 @@ jobs:
           PY
           python3 scripts/native_onboarding_controller.py \
             --descriptor "$descriptor" \
+            --native-target "${NATIVE_TARGET:-local}" \
             --native-cwd "$NATIVE_CWD" \
             --native-thread-id "$NATIVE_THREAD_ID" \
             | tee "$RUNNER_TEMP/native-onboarding-receipt.json"
           {
             printf '### Native device onboarding\n\n```json\n'
             cat "$RUNNER_TEMP/native-onboarding-receipt.json"
+            printf '\n```\n'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Remove or rename a native target
+        if: inputs.operation == 'remove-native' || inputs.operation == 'rename-native'
+        shell: bash
+        env:
+          NATIVE_OPERATION: ${{ inputs.operation }}
+          NATIVE_NAME: ${{ inputs.native_name }}
+          NATIVE_NEW_NAME: ${{ inputs.native_new_name }}
+          NATIVE_TARGET: ${{ inputs.native_target }}
+          NATIVE_CWD: ${{ inputs.native_cwd }}
+          NATIVE_THREAD_ID: ${{ inputs.native_thread_id }}
+        run: |
+          set -euo pipefail
+          case "$NATIVE_OPERATION" in
+            remove-native) operation=remove ;;
+            rename-native) operation=rename ;;
+            *) printf 'Unsupported native lifecycle operation\n' >&2; exit 1 ;;
+          esac
+          args=(--operation "$operation" --name "$NATIVE_NAME"
+                --native-target "$NATIVE_TARGET" --native-cwd "$NATIVE_CWD"
+                --native-thread-id "$NATIVE_THREAD_ID")
+          if [ "$operation" = rename ]; then args+=(--new-name "$NATIVE_NEW_NAME"); fi
+          python3 scripts/native_onboarding_controller.py "${args[@]}" \
+            | tee "$RUNNER_TEMP/native-lifecycle-receipt.json"
+          {
+            printf '### Native target lifecycle\n\n```json\n'
+            cat "$RUNNER_TEMP/native-lifecycle-receipt.json"
             printf '\n```\n'
           } >> "$GITHUB_STEP_SUMMARY"

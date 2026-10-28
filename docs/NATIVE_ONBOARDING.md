@@ -29,8 +29,9 @@ registers the target with the existing central CAS. It then verifies CAS and
 Executor reads. A matching rerun verifies the same configuration without key
 rotation or service recreation.
 
-For a registration that changes central files, provide the existing original
-`local` target's exact worktree and persistent thread once:
+For a registration that changes central files, provide an existing surviving
+target's exact worktree and persistent thread once. The acceptance target
+defaults to `local` for compatibility; select another with `--native-target`:
 
 ```sh
 bin/onboard-native --name dakota-cpu \
@@ -39,8 +40,8 @@ bin/onboard-native --name dakota-cpu \
 ```
 
 These acceptance values are saved in the private endpoint state directory for
-future runs and revalidated each time. They refer to the existing `local`
-target, not the new device. The existing deployment gate requires an idle,
+future runs and revalidated each time. They refer to the selected existing
+target, not necessarily the new device. The deployment gate requires an idle,
 completed thread. Onboarding does not start turns or restart native Codex.
 
 Use `--codex-bin` and `--socket` when discovery is ambiguous. `--port` and
@@ -68,7 +69,7 @@ bin/onboard-native --name dakota-cpu --prepare-only
 
 The command reports the private `native-target.json` path. In **Deploy VM
 control plane**, choose `onboard-native`; paste that JSON into
-`native_descriptor` and supply the original `local` acceptance cwd/thread.
+`native_descriptor` and supply the acceptance target and its exact cwd/thread.
 The protected self-hosted runner uses its existing pinned controller SSH files
 and private instance profile. No new GitHub secrets are needed for this
 deployment. The descriptor has no private keys, but controls a trusted endpoint;
@@ -79,20 +80,80 @@ device's interactive Tailscale login or activate its local service. Run device
 preparation first. Ordinary `cas` deployment continues to reuse the persisted
 target map and SSH inputs without registering devices.
 
+## Remove a registration
+
+Run this from any configured controller checkout. The device can be offline:
+
+```sh
+bin/onboard-native --operation remove --name dakota-cpu
+```
+
+The command reuses saved acceptance settings. If none exist, add
+`--native-target`, `--native-cwd`, and `--native-thread-id` for another target
+that will remain registered. Removing that acceptance target or the last target
+is refused. The operation removes the central CAS registration only. It retains
+operator-owned SSH aliases and host pins and reports them in the receipt.
+It does not log out Tailscale, stop Codex, disable the device SSH service, or
+delete device keys. Repeating a completed removal is a no-op.
+
+## Rename a registration
+
+Rename the old NVIDIA target without recreating its endpoint:
+
+```sh
+bin/onboard-native --operation rename --name local --new-name dakota-nvidia \
+  --native-target dakota-nvidia \
+  --native-cwd /absolute/nvidia/worktree \
+  --native-thread-id YOUR_EXISTING_NVIDIA_THREAD_UUID
+```
+
+The whole transport entry is preserved, including its existing SSH destination
+alias. The command reads the exact thread through `local` before publication and
+through `dakota-nvidia` afterward. Rollback restores and verifies `local`.
+No daemon restart, key rotation, device-side setup, or re-registration is needed.
+A conflicting destination name is refused. A repeated rename is a no-op only
+when a completed matching receipt proves it was the same rename.
+
+After rename, this controller saves the successful new acceptance tuple. Update
+other controllers' acceptance settings and future workflow inputs to use the
+new target name. `local` is a legacy logical name, not a permanent GPU identity.
+
+In **Deploy VM control plane**, use `remove-native` or `rename-native`, set
+`native_name`, and set `native_new_name` for a rename. Supply `native_target`
+and its exact cwd/thread. For a renamed acceptance target, use its **new** name.
+These operations use the same protected runner and transaction as the local CLI.
+
+## Deploy an updated CAS image
+
+Device lifecycle changes do not build or update CAS images. If a separate CAS
+build changes the Action Server version, use the image digest and matching CAS
+source revision published by that build. A runtime version such as `1.0.4` is
+not an image digest or source revision.
+
+Dispatch **Deploy VM control plane** with operation `cas`, the build's
+`cas_digest` and `cas_revision`, and a valid native acceptance target/cwd/thread.
+Use `local` if it is still registered, or the new name after renaming it. This
+updates CAS only; a full-stack redeploy is unnecessary for this change.
+
 ## Transaction and recovery
 
-Changed registrations retain the existing native acceptance gate and VM
+Changed registrations, removals and renames retain the native acceptance gate and VM
 deployment lock. They validate/probe the endpoint, back up the existing files,
 publish complete replacements and recreate **CAS only** with its recorded image
 pins. This entails brief CAS downtime. The recreation is necessary because
 individual file bind mounts retain old inodes after atomic host replacement.
 
-CAS and Executor must resolve/read the new target, and the original native
-acceptance check must still pass. Failure restores the prior configuration and
-recreates CAS. An interrupted transaction is recovered on a same-target rerun;
+CAS and Executor must expose the expected target inventory, and the exact native
+acceptance check must pass under the post-change name. Failure restores the prior configuration and
+recreates CAS and verifies the journaled pre-change name. An interrupted transaction is recovered on a matching-operation rerun;
 intervening operator edits stop recovery rather than being overwritten.
 Rollback failures are reported explicitly and require inspection of the private
 `native-registration` journal under the controller state directory.
+
+Verification requires every expected operator target and rejects the removed
+or renamed source name. Unrelated runtime-discovered worker targets may coexist;
+their registry and lifecycle are not changed by these operations. Completion
+also checks the exact published operator-file hashes.
 
 Successful device runs write `onboarding-receipt.json`. Adopted assets remain
 operator-owned. A failed central operation leaves the prepared device endpoint

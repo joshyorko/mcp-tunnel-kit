@@ -2,7 +2,9 @@
 
 To register another device rather than redeploy an existing service, use
 [native device onboarding](NATIVE_ONBOARDING.md). It supports local Kamal and
-the protected workflow's `onboard-native` operation.
+the protected workflow's `onboard-native`, `remove-native` and `rename-native`
+operations. Native acceptance targets are configurable; supply the new name
+after renaming a target.
 
 For host rebuild and encrypted recovery, see [Rebuild a control-plane host](REBUILD.md) and [Capture and stage recovery](RECOVERY.md). Keep the instance profile outside the checkout as an owned mode-`0600` file. See [the private profile example](../config/instance.example.json) for its schema. The profile-aware VM helper accepts `--instance-profile` and otherwise reads the default private profile. A captured runtime checkout may predate that helper. Run recovery from the updated controller checkout rather than assuming an old VM checkout supports this flag.
 
@@ -55,7 +57,8 @@ Open Actions → **Deploy VM control plane** → **Run workflow**, select **main
 Only manual main dispatches can use the `control-plane-production` environment.
 Every operation has GitHub concurrency serialization and a private VM lock.
 The workflow also accepts an optional operator-supplied Dakota native tuple:
-target `local`, exact worktree cwd, and persistent thread id. Full image deploy,
+logical target name, exact worktree cwd, and persistent thread id. `local`
+remains valid until renamed; afterward use the new name. Full image deploy,
 adopt, and CAS acceptance require that tuple and a successful metadata-only
 exact read. `preflight` reports native-read status without letting a thread
 mismatch block its separate read-only Devsy plan.

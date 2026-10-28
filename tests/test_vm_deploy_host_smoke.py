@@ -21,7 +21,7 @@ class FakeSession:
     def __init__(self, *, expected_cwd=DAKOTA_CWD, expected_thread=THREAD_ID,
                  read_error=None, active_flags=None, unknown_active_flags=False,
                  native_state_authoritative=True, thread_status="notLoaded",
-                 connection_target="local", latest_turn=None):
+                 connection_target="local", expected_target="local", latest_turn=None):
         self.expected_cwd = expected_cwd
         self.expected_thread = expected_thread
         self.read_error = read_error
@@ -30,6 +30,7 @@ class FakeSession:
         self.native_state_authoritative = native_state_authoritative
         self.thread_status = thread_status
         self.connection_target = connection_target
+        self.expected_target = expected_target
         self.latest_turn = latest_turn
         self.calls = []
 
@@ -50,7 +51,7 @@ class FakeSession:
                         "operation": "server/diagnostics",
                         "connection": {"target": self.connection_target},
                         "result": {
-                            "target": "local", "cwd": self.expected_cwd,
+                            "target": self.expected_target, "cwd": self.expected_cwd,
                             "thread_id": self.expected_thread,
                             "source": "native-app-server", "thread_status": self.thread_status,
                             "active_flags": self.active_flags,
@@ -100,20 +101,52 @@ def configured_host(tmp_path, monkeypatch, *, session):
 
 
 def test_smoke_reads_explicit_dakota_tuple_and_not_vm_checkout(tmp_path, monkeypatch):
-    session = FakeSession()
+    session = FakeSession(connection_target="dakota-nvidia", expected_target="dakota-nvidia")
     configured_host(tmp_path, monkeypatch, session=session)
 
     result = host.smoke({"native_codex": {
-        "target": "local", "cwd": DAKOTA_CWD, "thread_id": THREAD_ID,
+        "target": "dakota-nvidia", "cwd": DAKOTA_CWD, "thread_id": THREAD_ID,
     }, "require_native": True})
 
     assert result["native_read"]["status"] == "PASS"
     assert result["devsy_reads"] == "PASS"
     exact_read = next(args["payload"] for name, args in session.calls
                       if name == "get_thread_snapshot")
-    assert exact_read == {"target": "local", "cwd": DAKOTA_CWD,
+    assert exact_read == {"target": "dakota-nvidia", "cwd": DAKOTA_CWD,
                           "thread_id": THREAD_ID}
     assert all(VM_CWD not in json.dumps(args) for _, args in session.calls)
+
+
+def test_native_read_rejects_wrong_named_connection(tmp_path, monkeypatch):
+    session = FakeSession(connection_target="dakota-cpu", expected_target="dakota-nvidia")
+    configured_host(tmp_path, monkeypatch, session=session)
+    import pytest
+    with pytest.raises(ValueError, match="NATIVE_THREAD_IDENTITY_MISMATCH"):
+        host.smoke({"native_codex": {
+            "target": "dakota-nvidia", "cwd": DAKOTA_CWD, "thread_id": THREAD_ID,
+        }, "require_native": True})
+
+
+def test_native_read_rejects_named_target_cwd_or_thread_mismatch(tmp_path, monkeypatch):
+    import pytest
+    mismatches = (
+        {"expected_target": "dakota-cpu"},
+        {"expected_cwd": "/srv/other/worktree"},
+        {"expected_thread": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"},
+    )
+    for mismatch in mismatches:
+        session = FakeSession(connection_target="dakota-nvidia", **mismatch)
+        configured_host(tmp_path, monkeypatch, session=session)
+        with pytest.raises(ValueError, match="NATIVE_THREAD_IDENTITY_MISMATCH"):
+            host.smoke({"native_codex": {
+                "target": "dakota-nvidia", "cwd": DAKOTA_CWD, "thread_id": THREAD_ID,
+            }, "require_native": True})
+
+
+def test_native_read_rejects_unsafe_target_name():
+    assert host._codex_read_payload({
+        "target": "bad target", "cwd": DAKOTA_CWD, "thread_id": THREAD_ID,
+    }) is None
 
 
 def test_non_strict_smoke_reports_redacted_thread_mismatch_after_devsy_reads(
@@ -246,7 +279,7 @@ def test_strict_smoke_fails_closed_when_native_tuple_is_missing(tmp_path, monkey
     try:
         host.smoke({"require_native": True})
     except ValueError as exc:
-        assert str(exc) == "qualified Dakota native read is required"
+        assert str(exc) == "qualified native read is required"
     else:
         raise AssertionError("strict smoke accepted an unconfigured native tuple")
 

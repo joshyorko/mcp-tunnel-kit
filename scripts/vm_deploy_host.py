@@ -708,7 +708,8 @@ def _codex_read_payload(value):
     if not isinstance(value, dict) or set(value) != {"target", "cwd", "thread_id"}:
         return None
     target, cwd, thread_id = value["target"], value["cwd"], value["thread_id"]
-    if target != "local" or not isinstance(cwd, str) or not isinstance(thread_id, str):
+    if (not isinstance(target, str) or not re.fullmatch(r"[a-z][a-z0-9-]{0,62}", target)
+            or not isinstance(cwd, str) or not isinstance(thread_id, str)):
         return None
     path = PurePosixPath(cwd)
     if (not path.is_absolute() or ".." in path.parts or str(path) != cwd
@@ -813,8 +814,8 @@ def smoke(request=None):
         native=native_thread_read(c,m,supplied)
     if require_native and native["status"] != "PASS":
         if native["status"] == "UNCONFIGURED":
-            raise ValueError("qualified Dakota native read is required")
-        raise ValueError("qualified Dakota native read failed: " + native.get("error_code", "UNKNOWN"))
+            raise ValueError("qualified native read is required")
+        raise ValueError("qualified native read failed: " + native.get("error_code", "UNKNOWN"))
     return {'catalog':'PASS','native_read':native,'devsy_reads':'PASS'}
 
 
