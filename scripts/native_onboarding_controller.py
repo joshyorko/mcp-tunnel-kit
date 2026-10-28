@@ -189,7 +189,13 @@ class Connection:
                         raise RuntimeError('Control-plane identity changed during registration')
                     if after.get('inventory') != before.get('inventory'):
                         raise RuntimeError('Pinned image or accessory configuration changed during registration')
-                    self._call('complete', {'transaction_id': transaction})
+                    try:
+                        self._call('complete', {'transaction_id': transaction})
+                    except Exception:
+                        # A lost SSH response is not evidence that commit failed remotely.
+                        final = self._call('plan', descriptor)
+                        if final['changed'] or final.get('pending_transaction_id'):
+                            raise
                 except Exception:
                     try:
                         self._call('rollback', {'transaction_id': transaction})

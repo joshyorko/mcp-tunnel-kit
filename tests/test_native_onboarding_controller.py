@@ -124,3 +124,14 @@ def test_rerun_does_not_recover_a_different_target(changed, monkeypatch):
         conn.register({'name': 'cpu'}, native)
     assert rpc.call_count == 1
     refresh.assert_not_called()
+
+
+def test_lost_completion_response_does_not_rollback_committed_state(changed, monkeypatch):
+    conn, native, _, refresh = changed
+    rpc = Mock(side_effect=[{'changed': True}, {'changed': True, 'transaction_id': 'a' * 32},
+                            {'verified': True}, RuntimeError('completion response lost'),
+                            {'changed': False, 'pending_transaction_id': None}])
+    monkeypatch.setattr(conn, '_call', rpc)
+    assert conn.register({'name': 'cpu'}, native)['verified']
+    assert [call.args[0] for call in rpc.call_args_list] == ['plan', 'apply', 'verify', 'complete', 'plan']
+    refresh.assert_called_once()

@@ -321,11 +321,13 @@ def main(argv: list[str] | None = None) -> int:
             native = load_acceptance(state, native)
             if args.install_dependencies:
                 install_dependencies(non_interactive=args.non_interactive)
+            print("Checking Tailscale and the existing native Codex daemon...", file=sys.stderr, flush=True)
             address = ensure_tailnet(non_interactive=args.non_interactive)
             codex, sock = discover_daemon(codex_bin=args.codex_bin, socket_path=args.socket_path)
             import native_onboarding_controller as controller
             connection = controller.connect(args.local_env.absolute(), args.instance_profile)
             info = connection.info()
+            print("Preparing or adopting the restricted SSH endpoint...", file=sys.stderr, flush=True)
             public = prepare_endpoint(state, codex, sock, address, args.port, info)
             descriptor = {"schema_version": 1, "name": args.name, "address": address, "port": args.port,
                           "user": pwd.getpwuid(os.geteuid()).pw_name, "codex_bin": str(codex), "socket": str(sock),
@@ -336,6 +338,7 @@ def main(argv: list[str] | None = None) -> int:
                 save_acceptance(state, native)
                 print(json.dumps({"target": args.name, "status": "prepared", "descriptor_file": str(destination)}, indent=2))
                 return 0
+            print("Registering and verifying through CAS and Executor...", file=sys.stderr, flush=True)
             receipt = connection.register(descriptor, native=native)
             path = state / "onboarding-receipt.json"
             write_private_json(path, {"descriptor": descriptor, "registration": receipt})
