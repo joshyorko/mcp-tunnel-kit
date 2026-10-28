@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.native_registration import Registration, validate_descriptor
+from native_registration import Registration, validate_descriptor
 
 
 def public_key(byte=b'a'):
@@ -122,7 +122,7 @@ def test_failed_probe_never_publishes(setup, monkeypatch):
 
 
 def test_partial_publication_is_recoverable(setup, monkeypatch):
-    import scripts.native_registration as module
+    import native_registration as module
     reg, descriptor, _, native = setup
     originals = {p: p.read_bytes() for p in reg.paths.values()}
     original_write = module._write
@@ -185,7 +185,7 @@ def test_complete_refuses_changed_files(setup):
 
 def test_probe_uses_verified_key_and_ignores_user_ssh_config(setup, monkeypatch):
     from types import SimpleNamespace
-    import scripts.native_registration as module
+    import native_registration as module
     reg, descriptor, _, native = setup
     observed = []
     def run(args, **kwargs):
@@ -226,7 +226,7 @@ def test_plan_identifies_pending_target(setup):
 @pytest.mark.parametrize('response', ['not json', '{}', '[]', '{"status":"stopped"}', '{"status":"running","socketPath":"/tmp/other.sock"}'])
 def test_probe_rejects_inactive_or_unverified_daemon(setup, monkeypatch, response):
     from types import SimpleNamespace
-    import scripts.native_registration as module
+    import native_registration as module
     reg, descriptor, _, _ = setup
     monkeypatch.setattr(module.subprocess, 'run', lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=response))
     with pytest.raises(ValueError, match='daemon'):
@@ -235,7 +235,7 @@ def test_probe_rejects_inactive_or_unverified_daemon(setup, monkeypatch, respons
 
 def test_probe_accepts_running_daemon_without_optional_socket_field(setup, monkeypatch):
     from types import SimpleNamespace
-    import scripts.native_registration as module
+    import native_registration as module
     reg, descriptor, _, _ = setup
     monkeypatch.setattr(module.subprocess, 'run', lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout='{"status":"running"}'))
     assert Registration.probe(reg, descriptor)['status'] == 'PASS'
