@@ -2,8 +2,10 @@
 """Private VM deployment boundary. JSON output contains no credential values."""
 import fcntl
 import argparse
+import base64
 from datetime import datetime
 import hashlib
+import http.client
 import importlib.util
 import io
 import ipaddress
@@ -14,6 +16,7 @@ from pathlib import Path
 from pathlib import PurePosixPath
 import re
 import shutil
+import socket
 import sqlite3
 import stat
 import subprocess
@@ -663,6 +666,580 @@ def memoryd_adapter_finalize(data):
     if json.loads(private(marker))!=metadata:
         raise ValueError('MemoryD adapter receipt does not match its staged file')
     return {'staged':True,'adapter_sha256':data['adapter_sha256'],'size_bytes':data['size_bytes']}
+
+
+def _memoryd_rollout_execs_clear():
+    """Reject active Docker execs on owned containers, except health probes."""
+    names=[*NAMES['kamal'].values(),*sorted(MEMORYD_SERVICES)]
+    rows=json.loads(run(['docker','inspect',*names],timeout=30))
+    if len(rows)!=len(names):raise ValueError('MemoryD rollout container exec inventory is incomplete')
+
+    class DockerSocket(http.client.HTTPConnection):
+        def connect(self):
+            self.sock=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
+            self.sock.settimeout(3)
+            self.sock.connect('/var/run/docker.sock')
+
+    for row in rows:
+        exec_ids=row.get('ExecIDs') or []
+        if not isinstance(exec_ids,list) or len(exec_ids)>4096:
+            raise ValueError('MemoryD rollout exec inventory is invalid')
+        health=(row.get('Config',{}).get('Healthcheck') or {}).get('Test') or []
+        for exec_id in exec_ids:
+            if not isinstance(exec_id,str) or not re.fullmatch(r'[a-f0-9]{64}',exec_id):
+                raise ValueError('MemoryD rollout exec identity is invalid')
+            connection=DockerSocket('localhost',timeout=3)
+            try:
+                connection.request('GET','/exec/'+exec_id+'/json')
+                response=connection.getresponse();raw=response.read(65537)
+                if response.status!=200 or len(raw)>65536:
+                    raise ValueError('MemoryD rollout exec status is unavailable')
+                result=json.loads(raw)
+            except (OSError,http.client.HTTPException,ValueError):
+                raise ValueError('MemoryD rollout exec status is unavailable') from None
+            finally:connection.close()
+            if type(result.get('Running')) is not bool:
+                raise ValueError('MemoryD rollout exec status is invalid')
+            if result['Running']:
+                process=result.get('ProcessConfig') or {}
+                command=[process.get('entrypoint'),*(process.get('arguments') or [])]
+                shell_health=(len(health)==2 and health[0]=='CMD-SHELL'
+                              and command==['/bin/sh','-c',health[1]])
+                direct_health=(len(health)>1 and health[0]=='CMD' and command==health[1:])
+                if not (shell_health or direct_health):return False
+    return True
+
+
+def _memoryd_rollout_container_identities():
+    names=[*NAMES['kamal'].values(),'mcp-control-plane-memoryd']
+    rows=json.loads(run(['docker','inspect',*names],timeout=30))
+    if len(rows)!=len(names):raise ValueError('MemoryD rollout container identity inventory is incomplete')
+    result={}
+    for row in rows:
+        name=row.get('Name','').lstrip('/');state=row.get('State',{})
+        if (name not in names or name in result or (row.get('Config',{}).get('Labels') or {}).get('service')!=name
+                or not re.fullmatch(r'[a-f0-9]{64}',str(row.get('Id','')))
+                or state.get('Status')!='running' or not isinstance(state.get('StartedAt'),str)):
+            raise ValueError('MemoryD rollout container identity is invalid')
+        result[name]={'id':row['Id'],'started_at':state['StartedAt'],'image':row.get('Image')}
+    if set(result)!=set(names):raise ValueError('MemoryD rollout container identity inventory is incomplete')
+    return result
+
+
+def _memoryd_rollout_workers_clear(*, proc=Path('/proc')):
+    """Refuse visible surviving host or database maintenance workers."""
+    if not _memoryd_capture_import_quiescent():
+        return False
+    for process in proc.iterdir():
+        if not process.name.isdigit() or int(process.name)==os.getpid():
+            continue
+        try:
+            if process.stat().st_uid != os.getuid():
+                continue
+            argv=(process/'cmdline').read_bytes().split(b'\0')
+        except FileNotFoundError:
+            continue
+        except OSError:
+            raise ValueError('MemoryD worker inventory is unavailable') from None
+        if any(b'<mcp-controller>' in arg for arg in argv):
+            if b'lock' not in argv and b'memoryd-rollout-lock' not in argv:
+                return False
+        if argv:
+            command=argv[0].rsplit(b'/',1)[-1]
+            if command in (b'docker',b'scp',b'sftp-server',b'kamal'):
+                return False
+            if any(re.search(rb'(^|[/\s])(docker|scp|sftp-server|kamal)(\s|$)', arg)
+                   for arg in argv[1:]):
+                return False
+    return _memoryd_rollout_execs_clear()
+
+
+def _memoryd_rollout_kamal_owner(rollout_id):
+    directory=Path.home()/'.kamal'/'lock-mcp-control-plane'
+    try:
+        info=directory.lstat();details=directory/'details';detail_info=details.lstat()
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid!=os.getuid()
+                or not stat.S_ISREG(detail_info.st_mode) or detail_info.st_uid!=os.getuid()
+                or directory.resolve(strict=True)!=directory.absolute()):
+            raise ValueError('MemoryD rollout Kamal lock is unsafe')
+        raw=details.read_bytes()
+    except OSError:raise ValueError('MemoryD rollout Kamal lock is unavailable') from None
+    try:decoded=base64.b64decode(b''.join(raw.split()),validate=True) if len(raw)<=4096 else b''
+    except ValueError:decoded=b''
+    if ('Message: memoryd-adapter-rollout:'+rollout_id).encode() not in decoded.splitlines():
+        raise ValueError('MemoryD rollout Kamal lock belongs to another operation')
+
+
+def _memoryd_rollout_exclusion(rollout_id):
+    """Verify an extant flock and this rollout's durable Kamal lock."""
+    path=STORE/'deploy.lock'
+    fd=os.open(path,os.O_RDWR|os.O_NOFOLLOW)
+    try:
+        info=os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid!=os.getuid()
+                or stat.S_IMODE(info.st_mode)!=0o600):
+            raise ValueError('MemoryD rollout deployment lock is unsafe')
+        try:fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        except BlockingIOError:pass
+        else:
+            fcntl.flock(fd,fcntl.LOCK_UN)
+            raise ValueError('MemoryD rollout deployment lock was lost')
+    finally:os.close(fd)
+    _memoryd_rollout_kamal_owner(rollout_id)
+
+
+def _memoryd_rollout_recovery_lock(data):
+    """Reacquire the existing flock without opening the admission fence."""
+    if (not isinstance(data,dict) or set(data)!={'rollout_id'}
+            or not re.fullmatch(r'[a-f0-9]{32}',str(data.get('rollout_id','')))):
+        raise ValueError('MemoryD rollout identity is invalid')
+    _verify_private_directory(STATE)
+    root=STATE/'memoryd-adapter-rollouts';_verify_private_directory(root)
+    if _memoryd_json(_memoryd_read_owned(root/'active.json'))!=data:
+        raise ValueError('MemoryD rollout ownership is ambiguous')
+    _memoryd_rollout_kamal_owner(data['rollout_id'])
+    info=STORE.lstat()
+    if (not stat.S_ISDIR(info.st_mode) or info.st_uid!=os.getuid()
+            or stat.S_IMODE(info.st_mode) not in (0o500,0o700)):
+        raise ValueError('MemoryD rollout deployment directory is unsafe')
+    fd=os.open(STORE/'deploy.lock',os.O_RDWR|os.O_NOFOLLOW)
+    info=os.fstat(fd)
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid!=os.getuid()
+            or stat.S_IMODE(info.st_mode)!=0o600):
+        os.close(fd);raise ValueError('MemoryD rollout deployment lock is unsafe')
+    try:fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+    except OSError:os.close(fd);raise
+    return fd
+
+
+def memoryd_rollout_begin(data):
+    """Record and fence a single reviewed adapter update under both locks.
+
+    The caller must own the deploy flock and a separately held, uniquely
+    identified Kamal lock, and must have drained all controller hosts first.
+    A changed state is never automatically unfenced after an error.
+    """
+    expected={'rollout_id','adapter_sha256','size_bytes','controller_sha'}
+    if (not isinstance(data,dict) or set(data)!=expected
+            or not re.fullmatch(r'[a-f0-9]{32}',str(data.get('rollout_id','')))
+            or not re.fullmatch(r'[a-f0-9]{64}',str(data.get('adapter_sha256','')))
+            or not re.fullmatch(r'[a-f0-9]{40}',str(data.get('controller_sha','')))
+            or type(data.get('size_bytes')) is not int or not 0<data['size_bytes']<=1024*1024):
+        raise ValueError('MemoryD adapter rollout request is invalid')
+    _verify_private_directory(STATE)
+    _verify_private_directory(STORE)
+    bootstrap=STATE/'bootstrap'
+    _verify_private_directory(bootstrap)
+    current_path=STORE/'current.json'; pin_path=bootstrap/'memoryd-adapter-image.json'
+    current_raw=_memoryd_read_owned(current_path);pin_raw=_memoryd_read_owned(pin_path)
+    current=_memoryd_json(current_raw);pin=_memoryd_json(pin_raw)
+    _memoryd_adapter_image(current,pin)
+    artifact=_memoryd_adapter_dir(data['adapter_sha256'])
+    _verify_private_directory(artifact.parent);_verify_private_directory(artifact)
+    source=artifact/'codex_memoryd_mcp.py'
+    try:source_raw=_memoryd_read_owned(source,limit=1024*1024)
+    except (OSError,ValueError):raise ValueError('MemoryD rollout artifact is invalid') from None
+    meta=_memoryd_json(_memoryd_read_owned(artifact/'artifact.json'))
+    if (len(source_raw)!=data['size_bytes'] or hashlib.sha256(source_raw).hexdigest()!=data['adapter_sha256']
+            or meta!={key:data[key] for key in ('adapter_sha256','size_bytes','controller_sha')}):
+        raise ValueError('MemoryD rollout artifact does not match its receipt')
+    health=memoryd_health();before=snapshot()
+    if (health.get('status')!='PASS' or health.get('adapter_sha256')!=pin.get('adapter_sha256')
+            or health.get('adapter_image')!=pin.get('image')
+            or current.get('authority')!='kamal' or current.get('identity')!=before.get('identity')
+            or before.get('authority')!='kamal' or before.get('tunnel_count')!=1
+            or data['adapter_sha256']==pin.get('adapter_sha256')):
+        raise ValueError('MemoryD rollout baseline is invalid')
+    _verify_registered_memoryd_app()
+    if not _memoryd_rollout_workers_clear():
+        raise ValueError('MemoryD rollout workers are active')
+    _memoryd_rollout_exclusion(data['rollout_id'])
+    root=STATE/'memoryd-adapter-rollouts'
+    if not root.exists():
+        root.mkdir(mode=0o700)
+        _memoryd_sync_directory(STATE)
+    _verify_private_directory(root)
+    intent_path=root/(data['rollout_id']+'.json')
+    if os.path.lexists(intent_path):raise ValueError('MemoryD rollout intent already exists')
+    active=root/'active.json'
+    if os.path.lexists(active):raise ValueError('Another MemoryD rollout is already active')
+    old_pin_path=root/(data['rollout_id']+'.old-pin.json')
+    _memoryd_publish_once(old_pin_path,pin_raw)
+    intent={'schema_version':1,'status':'prepared','rollout_id':data['rollout_id'],
+            'controller_sha':data['controller_sha'],'old_adapter_sha256':pin['adapter_sha256'],
+            'new_adapter_sha256':data['adapter_sha256'],'adapter_image':pin['image'],
+            'old_pin_sha256':hashlib.sha256(pin_raw).hexdigest(),
+            'current_sha256':hashlib.sha256(current_raw).hexdigest(),'before':before,
+            'container_identities':_memoryd_rollout_container_identities(),
+            'old_modes':{'store':0o700,'bootstrap':0o700,'current':0o600,'pin':0o600}}
+    _memoryd_publish_once(intent_path,(json.dumps(intent,sort_keys=True)+'\n').encode())
+    _memoryd_publish_once(active,(json.dumps({'rollout_id':data['rollout_id']})+'\n').encode())
+    _memoryd_rollout_exclusion(data['rollout_id'])
+    old_current_info=current_path.lstat();old_pin_info=pin_path.lstat()
+    # Lock admission fails on an untrusted STORE mode even for older clients.
+    # Current/pin are then latched and bootstrap becomes non-writable so older
+    # atomic writers cannot replace those files by changing the directory entry.
+    for path,mode in ((STORE,0o500),(current_path,0o400),(pin_path,0o400),(bootstrap,0o500)):
+        fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW)
+        try:os.fchmod(fd,mode);os.fsync(fd)
+        finally:os.close(fd)
+    if not _memoryd_rollout_workers_clear():
+        raise ValueError('MemoryD rollout fenced; a surviving worker requires reconciliation')
+    _memoryd_rollout_exclusion(data['rollout_id'])
+    if (_memoryd_read_owned(current_path,mode=0o400)!=current_raw
+            or _memoryd_read_owned(pin_path,mode=0o400)!=pin_raw
+            or (current_path.stat().st_dev,current_path.stat().st_ino)!=(old_current_info.st_dev,old_current_info.st_ino)
+            or (pin_path.stat().st_dev,pin_path.stat().st_ino)!=(old_pin_info.st_dev,old_pin_info.st_ino)
+            or _memoryd_read_owned(source,limit=1024*1024)!=source_raw
+            or _memoryd_json(_memoryd_read_owned(artifact/'artifact.json'))!=meta):
+        raise ValueError('MemoryD rollout fenced; baseline files changed during admission')
+    return {'status':'fenced','rollout_id':data['rollout_id'],
+            'old_adapter_sha256':pin['adapter_sha256'],'new_adapter_sha256':data['adapter_sha256'],
+            'adapter_image':pin['image']}
+
+
+def _memoryd_rollout_intent(data):
+    if (not isinstance(data,dict) or set(data)!={'rollout_id'}
+            or not re.fullmatch(r'[a-f0-9]{32}',str(data.get('rollout_id','')))):
+        raise ValueError('MemoryD rollout identity is invalid')
+    rollout_id=data['rollout_id'];root=STATE/'memoryd-adapter-rollouts'
+    _verify_private_directory(STATE);_verify_private_directory(root)
+    if _memoryd_json(_memoryd_read_owned(root/'active.json'))!={'rollout_id':rollout_id}:
+        raise ValueError('MemoryD rollout ownership is ambiguous')
+    intent_path=root/(rollout_id+'.json')
+    intent=_memoryd_json(_memoryd_read_owned(intent_path))
+    if (intent.get('schema_version')!=1 or intent.get('rollout_id')!=rollout_id
+            or intent.get('status') not in ('prepared','selected','accepted')
+            or intent.get('old_modes')!={'store':0o700,'bootstrap':0o700,'current':0o600,'pin':0o600}):
+        raise ValueError('MemoryD rollout intent is invalid')
+    _memoryd_rollout_exclusion(rollout_id)
+    for path,mode in ((STORE,0o500),(STATE/'bootstrap',0o500)):
+        info=path.lstat()
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid!=os.getuid()
+                or stat.S_IMODE(info.st_mode)!=mode):
+            raise ValueError('MemoryD rollout fence is incomplete; reconcile before retry')
+    current=_memoryd_read_owned(STORE/'current.json',mode=0o400)
+    if hashlib.sha256(current).hexdigest()!=intent.get('current_sha256'):
+        raise ValueError('MemoryD rollout current receipt changed')
+    old=_memoryd_read_owned(root/(rollout_id+'.old-pin.json'))
+    if hashlib.sha256(old).hexdigest()!=intent.get('old_pin_sha256'):
+        raise ValueError('MemoryD rollout saved pin changed')
+    pin=_memoryd_json(old)
+    if (pin.get('adapter_sha256')!=intent.get('old_adapter_sha256')
+            or pin.get('image')!=intent.get('adapter_image')):
+        raise ValueError('MemoryD rollout saved pin is invalid')
+    return intent_path,intent,old
+
+
+def _memoryd_rollout_live_adapter():
+    rows=json.loads(run(['docker','inspect','mcp-control-plane-memoryd-mcp']))
+    if len(rows)!=1:raise ValueError('MemoryD rollout live adapter is ambiguous')
+    row=rows[0];config=row.get('Config',{});state=row.get('State',{})
+    mounts=[item for item in row.get('Mounts',[])
+            if item.get('Destination')=='/opt/tunnel-kit/codex_memoryd_mcp.py' and item.get('RW') is False]
+    if (row.get('Name','').lstrip('/')!='mcp-control-plane-memoryd-mcp'
+            or (config.get('Labels') or {}).get('service')!='mcp-control-plane-memoryd-mcp'
+            or len(mounts)!=1):
+        raise ValueError('MemoryD rollout live adapter ownership is invalid')
+    source=Path(mounts[0].get('Source',''))
+    if (source.name!='codex_memoryd_mcp.py' or source.parent.parent!=STATE/'memoryd-adapter'
+            or not re.fullmatch(r'[a-f0-9]{64}',source.parent.name)):
+        raise ValueError('MemoryD rollout live adapter path is invalid')
+    _verify_private_directory(source.parent.parent);_verify_private_directory(source.parent)
+    raw=_memoryd_read_owned(source,limit=1024*1024)
+    if hashlib.sha256(raw).hexdigest()!=source.parent.name:
+        raise ValueError('MemoryD rollout live adapter artifact changed')
+    return {'adapter_sha256':source.parent.name,'image':config.get('Image'),
+            'state':state.get('Status'),'health':(state.get('Health') or {}).get('Status')}
+
+
+def memoryd_rollout_select(data):
+    """Select only the verified healthy new container while admission is fenced."""
+    path,intent,old=_memoryd_rollout_intent(data)
+    if not _memoryd_rollout_workers_clear():raise ValueError('MemoryD rollout workers are active')
+    live=_memoryd_rollout_live_adapter()
+    if live!={'adapter_sha256':intent['new_adapter_sha256'],'image':intent['adapter_image'],
+             'state':'running','health':'healthy'}:
+        raise ValueError('MemoryD rollout live adapter does not match the intended artifact and image')
+    _memoryd_rollout_exclusion(data['rollout_id'])
+    pin_path=STATE/'bootstrap/memoryd-adapter-image.json'
+    current_pin=_memoryd_read_owned(pin_path,mode=0o400)
+    new_pin={**_memoryd_json(old),'adapter_sha256':intent['new_adapter_sha256']}
+    new_raw=(json.dumps(new_pin)+'\n').encode()
+    if current_pin not in (old,new_raw):
+        raise ValueError('MemoryD rollout pin has an unknown value')
+    if current_pin==old:
+        bootstrap=pin_path.parent
+        os.chmod(bootstrap,0o700,follow_symlinks=False)
+        temp=None
+        try:
+            fd,temp=tempfile.mkstemp(prefix='.memoryd-adapter-rollout-',dir=bootstrap)
+            with os.fdopen(fd,'wb') as stream:
+                stream.write(new_raw);stream.flush();os.fsync(stream.fileno());os.fchmod(stream.fileno(),0o400)
+            if _memoryd_read_owned(pin_path,mode=0o400)!=old:
+                raise ValueError('MemoryD rollout old pin changed before replacement')
+            os.replace(temp,pin_path);temp=None;_memoryd_sync_directory(bootstrap)
+        finally:
+            if temp and os.path.lexists(temp):os.unlink(temp)
+            os.chmod(bootstrap,0o500,follow_symlinks=False);_memoryd_sync_directory(bootstrap)
+    if _memoryd_read_owned(pin_path,mode=0o400)!=new_raw:
+        raise ValueError('MemoryD rollout selected pin could not be verified')
+    if intent['status']=='prepared':
+        intent['status']='selected';write(path,intent)
+    return {'status':'selected','rollout_id':data['rollout_id'],
+            'adapter_sha256':intent['new_adapter_sha256']}
+
+
+def _memoryd_rollout_executor_accept():
+    """Check the exact tool catalog and recall options without returning memories."""
+    import compose_control as c
+    os.environ.update(EXECUTOR_URL='http://127.0.0.1:4312',
+                      EXECUTOR_PAT_FILE=str(STATE/'secrets/executor-pat'))
+    _,session=c.executor_session()
+    code='''const list = await tools.search({namespace:"memoryd",query:"memory",limit:100});
+const value = await tools.memoryd.memory_recall({query:"Dakota Codex durable memory",maxTokens:64,packMode:"debugging"});
+const data = JSON.parse(value.content[0].text);
+return {paths:list.items.map(item=>item.path),ok:value.isError!==true && data.ok===true,
+        mode:data.data?.pack?.mode,max_tokens:data.data?.pack?.max_tokens};'''
+    result=c.execution(session.call('tools/call',{'name':'execute','arguments':{'code':code}}))
+    value=result.get('execution',{}).get('value',{})
+    expected={'tools.memoryd.memory_status','tools.memoryd.memory_recall','tools.memoryd.memory_search'}
+    if (result.get('status')!='completed' or not result.get('execution',{}).get('ok')
+            or result.get('unavailableApps') or not isinstance(value.get('paths'),list)
+            or set(value['paths'])!=expected or len(value['paths'])!=len(expected)
+            or value.get('ok') is not True or value.get('mode')!='debugging'
+            or value.get('max_tokens')!=64):
+        raise ValueError('MemoryD Executor recall acceptance failed')
+    return {'status':'PASS','tool_count':3,'recall_max_tokens':64,'recall_mode':'debugging'}
+
+
+def memoryd_rollout_accept(data):
+    """Run the existing checks without making fenced receipt files writable."""
+    path,intent,old=_memoryd_rollout_intent(data)
+    if intent['status'] not in ('selected','accepted'):
+        raise ValueError('MemoryD rollout pin has not been selected')
+    if not _memoryd_rollout_workers_clear():raise ValueError('MemoryD rollout workers are active')
+    expected_pin=(json.dumps({**_memoryd_json(old),'adapter_sha256':intent['new_adapter_sha256']})+'\n').encode()
+    if _memoryd_read_owned(STATE/'bootstrap/memoryd-adapter-image.json',mode=0o400)!=expected_pin:
+        raise ValueError('MemoryD rollout selected pin changed')
+    original_private=globals()['private']
+    def fenced_private(path):
+        if path in (STORE/'current.json',STATE/'bootstrap/memoryd-adapter-image.json'):
+            return _memoryd_read_owned(path,mode=0o400)
+        return original_private(path)
+    globals()['private']=fenced_private
+    try:
+        health=memoryd_health();after=snapshot();_verify_registered_memoryd_app()
+        probe=smoke();semantic=_memoryd_rollout_executor_accept()
+    finally:globals()['private']=original_private
+    before=intent['before']
+    if (health.get('status')!='PASS' or health.get('adapter_sha256')!=intent['new_adapter_sha256']
+            or health.get('adapter_image')!=intent['adapter_image']
+            or after.get('authority')!='kamal' or after.get('tunnel_count')!=1
+            or after.get('identity')!=before.get('identity')
+            or after.get('inventory')!=before.get('inventory')
+            or after.get('source_sha')!=before.get('source_sha')
+            or _memoryd_rollout_container_identities()!=intent.get('container_identities')
+            or probe.get('catalog')!='PASS' or probe.get('devsy_reads')!='PASS'
+            or probe.get('memoryd_discovery')!='PASS' or semantic.get('status')!='PASS'):
+        raise ValueError('MemoryD rollout acceptance failed')
+    _memoryd_rollout_exclusion(data['rollout_id'])
+    if not _memoryd_rollout_workers_clear():raise ValueError('MemoryD rollout workers are active')
+    if intent['status']!='accepted':
+        intent['status']='accepted';write(path,intent)
+    return {'status':'accepted','rollout_id':data['rollout_id'],
+            'adapter_sha256':intent['new_adapter_sha256'],'identity_preserved':True,
+            'existing_tunnel_count':1,'executor':semantic}
+
+
+def _memoryd_rollout_unfence(data,path,intent,status):
+    _memoryd_rollout_exclusion(data['rollout_id'])
+    intent['status']=status;write(path,intent)
+    for file,mode in ((STATE/'bootstrap/memoryd-adapter-image.json',0o600),
+                      (STATE/'bootstrap',0o700),(STORE/'current.json',0o600),(STORE,0o700)):
+        fd=os.open(file,os.O_RDONLY|os.O_NOFOLLOW)
+        try:os.fchmod(fd,mode);os.fsync(fd)
+        finally:os.close(fd)
+    active=STATE/'memoryd-adapter-rollouts/active.json'
+    if _memoryd_json(_memoryd_read_owned(active))!={'rollout_id':data['rollout_id']}:
+        raise ValueError('MemoryD rollout ownership changed after acceptance')
+    os.unlink(active);_memoryd_sync_directory(active.parent)
+
+
+def memoryd_rollout_finish(data):
+    """Unfence only after acceptance; STORE is the final admission gate."""
+    path,intent,old=_memoryd_rollout_intent(data)
+    if intent['status']!='accepted':raise ValueError('MemoryD rollout has not passed acceptance')
+    if not _memoryd_rollout_workers_clear():raise ValueError('MemoryD rollout workers are active')
+    live=_memoryd_rollout_live_adapter()
+    if live!={'adapter_sha256':intent['new_adapter_sha256'],'image':intent['adapter_image'],
+             'state':'running','health':'healthy'}:
+        raise ValueError('MemoryD rollout live adapter changed after acceptance')
+    new_pin=(json.dumps({**_memoryd_json(old),'adapter_sha256':intent['new_adapter_sha256']})+'\n').encode()
+    if _memoryd_read_owned(STATE/'bootstrap/memoryd-adapter-image.json',mode=0o400)!=new_pin:
+        raise ValueError('MemoryD rollout pin changed after acceptance')
+    _memoryd_rollout_unfence(data,path,intent,'complete')
+    return {'status':'complete','rollout_id':data['rollout_id'],
+            'adapter_sha256':intent['new_adapter_sha256'],'identity_preserved':True}
+
+
+def memoryd_rollout_abort(data):
+    """Release a fence only if the original adapter is still fully healthy."""
+    path,intent,old=_memoryd_rollout_intent(data)
+    if intent['status']!='prepared':raise ValueError('MemoryD rollout cannot abort a selected pin')
+    if not _memoryd_rollout_workers_clear():raise ValueError('MemoryD rollout workers are active')
+    live=_memoryd_rollout_live_adapter()
+    if live!={'adapter_sha256':intent['old_adapter_sha256'],'image':intent['adapter_image'],
+             'state':'running','health':'healthy'}:
+        raise ValueError('MemoryD rollout live adapter is not the original healthy artifact')
+    if _memoryd_read_owned(STATE/'bootstrap/memoryd-adapter-image.json',mode=0o400)!=old:
+        raise ValueError('MemoryD rollout old pin changed')
+    original_private=globals()['private']
+    def fenced_private(path):
+        if path in (STORE/'current.json',STATE/'bootstrap/memoryd-adapter-image.json'):
+            return _memoryd_read_owned(path,mode=0o400)
+        return original_private(path)
+    globals()['private']=fenced_private
+    try:
+        health=memoryd_health();after=snapshot();_verify_registered_memoryd_app();probe=smoke()
+    finally:globals()['private']=original_private
+    before=intent['before']
+    if (health.get('status')!='PASS' or health.get('adapter_sha256')!=intent['old_adapter_sha256']
+            or health.get('adapter_image')!=intent['adapter_image']
+            or after.get('authority')!='kamal' or after.get('tunnel_count')!=1
+            or after.get('identity')!=before.get('identity') or after.get('inventory')!=before.get('inventory')
+            or after.get('source_sha')!=before.get('source_sha')
+            or _memoryd_rollout_container_identities()!=intent.get('container_identities')
+            or probe.get('catalog')!='PASS' or probe.get('devsy_reads')!='PASS'
+            or probe.get('memoryd_discovery')!='PASS'):
+        raise ValueError('MemoryD rollout original state acceptance failed')
+    if not _memoryd_rollout_workers_clear():raise ValueError('MemoryD rollout workers are active')
+    _memoryd_rollout_unfence(data,path,intent,'aborted')
+    return {'status':'aborted','rollout_id':data['rollout_id'],'adapter_sha256':intent['old_adapter_sha256']}
+
+
+def memoryd_rollout_reconcile(data):
+    """Re-establish the fence after an interrupted operation; never reboot."""
+    if (not isinstance(data,dict) or set(data)!={'rollout_id'}
+            or not re.fullmatch(r'[a-f0-9]{32}',str(data.get('rollout_id','')))):
+        raise ValueError('MemoryD rollout identity is invalid')
+    rollout_id=data['rollout_id'];root=STATE/'memoryd-adapter-rollouts'
+    _verify_private_directory(STATE);_verify_private_directory(root)
+    if _memoryd_json(_memoryd_read_owned(root/'active.json'))!={'rollout_id':rollout_id}:
+        raise ValueError('MemoryD rollout ownership is ambiguous')
+    path=root/(rollout_id+'.json');intent=_memoryd_json(_memoryd_read_owned(path))
+    if (intent.get('schema_version')!=1 or intent.get('rollout_id')!=rollout_id
+            or intent.get('status') not in ('prepared','selected','accepted','complete','aborted')
+            or intent.get('old_modes')!={'store':0o700,'bootstrap':0o700,'current':0o600,'pin':0o600}):
+        raise ValueError('MemoryD rollout intent is invalid')
+    _memoryd_rollout_exclusion(rollout_id)
+    if not _memoryd_rollout_workers_clear():raise ValueError('MemoryD rollout workers are active')
+    bootstrap=STATE/'bootstrap';current=STORE/'current.json';pin=bootstrap/'memoryd-adapter-image.json'
+    for directory in (STORE,bootstrap):
+        info=directory.lstat()
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid!=os.getuid()
+                or stat.S_IMODE(info.st_mode) not in (0o500,0o700)):
+            raise ValueError('MemoryD rollout directory mode is unknown')
+    current_mode=stat.S_IMODE(current.lstat().st_mode);pin_mode=stat.S_IMODE(pin.lstat().st_mode)
+    if current_mode not in (0o400,0o600) or pin_mode not in (0o400,0o600):
+        raise ValueError('MemoryD rollout receipt mode is unknown')
+    current_raw=_memoryd_read_owned(current,mode=current_mode)
+    pin_raw=_memoryd_read_owned(pin,mode=pin_mode)
+    old=_memoryd_read_owned(root/(rollout_id+'.old-pin.json'))
+    if (hashlib.sha256(current_raw).hexdigest()!=intent.get('current_sha256')
+            or hashlib.sha256(old).hexdigest()!=intent.get('old_pin_sha256')):
+        raise ValueError('MemoryD rollout saved evidence changed')
+    old_value=_memoryd_json(old)
+    if old_value.get('image')!=intent.get('adapter_image') or old_value.get('adapter_sha256')!=intent.get('old_adapter_sha256'):
+        raise ValueError('MemoryD rollout saved pin is invalid')
+    new=(json.dumps({**old_value,'adapter_sha256':intent['new_adapter_sha256']})+'\n').encode()
+    if pin_raw not in (old,new) or (pin_raw==old and intent['status'] not in ('prepared','aborted')):
+        raise ValueError('MemoryD rollout pin state is unknown')
+    _memoryd_rollout_exclusion(rollout_id)
+    for target,mode in ((STORE,0o500),(current,0o400),(pin,0o400),(bootstrap,0o500)):
+        fd=os.open(target,os.O_RDONLY|os.O_NOFOLLOW)
+        try:os.fchmod(fd,mode);os.fsync(fd)
+        finally:os.close(fd)
+    if (_memoryd_read_owned(current,mode=0o400)!=current_raw
+            or _memoryd_read_owned(pin,mode=0o400)!=pin_raw
+            or not _memoryd_rollout_workers_clear()):
+        raise ValueError('MemoryD rollout fence reconciliation requires inspection')
+    _memoryd_rollout_exclusion(rollout_id)
+    if pin_raw==new and intent['status']!='selected':
+        intent['status']='selected';write(path,intent)
+    elif pin_raw==old and intent['status']=='aborted':
+        intent['status']='prepared';write(path,intent)
+    return {'status':'fenced','rollout_id':rollout_id,'pin':'new' if pin_raw==new else 'old',
+            'requires_acceptance':pin_raw==new,'automatic_reboot':False}
+
+
+def memoryd_rollout_wait(data,timeout=180):
+    _,intent,_=_memoryd_rollout_intent(data)
+    deadline=time.monotonic()+timeout
+    while time.monotonic()<deadline:
+        _memoryd_rollout_exclusion(data['rollout_id'])
+        live=_memoryd_rollout_live_adapter()
+        if (live['adapter_sha256']!=intent['new_adapter_sha256']
+                or live['image']!=intent['adapter_image'] or live['state']!='running'):
+            raise ValueError('MemoryD rollout live adapter identity or state is unexpected')
+        if live['health']=='healthy':return {'status':'healthy','adapter_sha256':live['adapter_sha256']}
+        if live['health'] not in ('starting',None):raise ValueError('MemoryD rollout adapter became unhealthy')
+        time.sleep(2)
+    raise ValueError('MemoryD rollout adapter did not become healthy')
+
+
+def memoryd_rollout_release_check(data):
+    """Verify a completed or never-started rollout before releasing its lock."""
+    if (not isinstance(data,dict) or set(data)!={'rollout_id'}
+            or not re.fullmatch(r'[a-f0-9]{32}',str(data.get('rollout_id','')))):
+        raise ValueError('MemoryD rollout identity is invalid')
+    root=STATE/'memoryd-adapter-rollouts'
+    if os.path.lexists(root/'active.json'):
+        raise ValueError('MemoryD rollout is still active; reconcile before lock release')
+    _verify_private_directory(STATE);_verify_private_directory(STORE);_verify_private_directory(STATE/'bootstrap')
+    _memoryd_rollout_exclusion(data['rollout_id'])
+    if not _memoryd_rollout_workers_clear():raise ValueError('MemoryD rollout workers are active')
+    current_raw=_memoryd_read_owned(STORE/'current.json')
+    pin_raw=_memoryd_read_owned(STATE/'bootstrap/memoryd-adapter-image.json')
+    health=memoryd_health();after=snapshot();_verify_registered_memoryd_app()
+    current=_memoryd_json(current_raw);pin=_memoryd_json(pin_raw)
+    _memoryd_adapter_image(current,pin)
+    if (health.get('status')!='PASS' or after.get('authority')!='kamal' or after.get('tunnel_count')!=1
+            or current.get('authority')!='kamal' or current.get('identity')!=after.get('identity')
+            or health.get('adapter_sha256')!=pin.get('adapter_sha256')
+            or health.get('adapter_image')!=pin.get('image')):
+        raise ValueError('MemoryD rollout release health is invalid')
+    path=root/(data['rollout_id']+'.json')
+    status='not-started'
+    if os.path.lexists(path):
+        _verify_private_directory(root)
+        intent=_memoryd_json(_memoryd_read_owned(path))
+        if (intent.get('schema_version')!=1 or intent.get('rollout_id')!=data['rollout_id']
+                or intent.get('status') not in ('prepared','complete','aborted')
+                or hashlib.sha256(current_raw).hexdigest()!=intent.get('current_sha256')):
+            raise ValueError('MemoryD rollout release intent is invalid')
+        old=_memoryd_read_owned(root/(data['rollout_id']+'.old-pin.json'))
+        if hashlib.sha256(old).hexdigest()!=intent.get('old_pin_sha256'):
+            raise ValueError('MemoryD rollout release saved pin changed')
+        before=intent['before']
+        if (after.get('identity')!=before.get('identity') or after.get('inventory')!=before.get('inventory')
+                or after.get('source_sha')!=before.get('source_sha')
+                or _memoryd_rollout_container_identities()!=intent.get('container_identities')):
+            raise ValueError('MemoryD rollout release identity changed')
+        if intent['status']=='complete':
+            new=(json.dumps({**_memoryd_json(old),'adapter_sha256':intent['new_adapter_sha256']})+'\n').encode()
+            if (pin_raw!=new or health.get('adapter_sha256')!=intent['new_adapter_sha256']
+                    or health.get('adapter_image')!=intent['adapter_image']
+                    or _memoryd_rollout_executor_accept().get('status')!='PASS'):
+                raise ValueError('MemoryD rollout release acceptance changed')
+            status='complete'
+        elif pin_raw!=old:
+            raise ValueError('MemoryD rollout unstarted pin changed')
+        elif intent['status']=='aborted':
+            status='aborted'
+    _memoryd_rollout_exclusion(data['rollout_id'])
+    if not _memoryd_rollout_workers_clear():raise ValueError('MemoryD rollout workers are active')
+    return {'status':status,'rollout_id':data['rollout_id'],'safe_to_release':True}
 
 
 def memoryd_inventory():
@@ -3751,6 +4328,12 @@ def main():
     action,instance=invocation_profile()
     configure_profile(instance)
     os.umask(0o077)
+    if action=='memoryd-rollout-lock':
+        data=json.loads(sys.stdin.readline())
+        fd=_memoryd_rollout_recovery_lock(data)
+        try:print('LOCKED',flush=True);sys.stdin.read()
+        finally:os.close(fd)
+        return
     if action=='lock':_ensure_private_state_store()
     elif action!='activation-plan' and action.startswith('activation-'):
         _verify_private_directory(STATE);_verify_private_directory(STORE)
@@ -3759,7 +4342,7 @@ def main():
                         'devsy-tap-reconcile-plan','devsy-tap-reconcile',
                         'devsy-tap-rollback-plan','devsy-tap-rollback'):
         STORE.mkdir(mode=0o700,exist_ok=True)
-    data=json.load(sys.stdin) if action in ('images','image-check','network','network-check','wait','commit','baseline','set-current','rollback-commit','restart-local','activation-plan','activation-preflight','activation-begin','activation-pull-images','activation-install','activation-track','activation-seed','activation-network','activation-identity','activation-cleanup','activation-record','activation-memoryd-wait','activation-memoryd-network','activation-memoryd-restore','smoke','memoryd-adapter-prepare','memoryd-adapter-finalize','memoryd-transfer-prepare','memoryd-import-bundles','memoryd-network-allow','memoryd-app-register','memoryd-registration-reconcile','memoryd-legacy-reconcile','memoryd-identity-reconcile','devsy-plan','devsy-check','devsy-rollback-plan','devsy-apply','devsy-rollback','devsy-scope-rebind-check','devsy-scope-rebind','devsy-bridge-path-check','devsy-bridge-path-apply','devsy-tap-reconcile-plan','devsy-tap-reconcile','devsy-tap-rollback-plan','devsy-tap-rollback') else {}
+    data=json.load(sys.stdin) if action in ('images','image-check','network','network-check','wait','commit','baseline','set-current','rollback-commit','restart-local','activation-plan','activation-preflight','activation-begin','activation-pull-images','activation-install','activation-track','activation-seed','activation-network','activation-identity','activation-cleanup','activation-record','activation-memoryd-wait','activation-memoryd-network','activation-memoryd-restore','smoke','memoryd-adapter-prepare','memoryd-adapter-finalize','memoryd-transfer-prepare','memoryd-import-bundles','memoryd-network-allow','memoryd-app-register','memoryd-registration-reconcile','memoryd-legacy-reconcile','memoryd-identity-reconcile','memoryd-rollout-lock-check','memoryd-rollout-begin','memoryd-rollout-wait','memoryd-rollout-select','memoryd-rollout-accept','memoryd-rollout-finish','memoryd-rollout-abort','memoryd-rollout-reconcile','memoryd-rollout-release-check','devsy-plan','devsy-check','devsy-rollback-plan','devsy-apply','devsy-rollback','devsy-scope-rebind-check','devsy-scope-rebind','devsy-bridge-path-check','devsy-bridge-path-apply','devsy-tap-reconcile-plan','devsy-tap-reconcile','devsy-tap-rollback-plan','devsy-tap-rollback') else {}
     if action == 'backup':
         raw = sys.stdin.read()
         data = json.loads(raw) if raw else {}
@@ -3800,6 +4383,18 @@ def main():
     elif action=='memoryd-inventory':result=memoryd_inventory()
     elif action=='memoryd-adapter-prepare':result=memoryd_adapter_prepare(data)
     elif action=='memoryd-adapter-finalize':result=memoryd_adapter_finalize(data)
+    elif action=='memoryd-rollout-lock-check':
+        if not isinstance(data,dict) or set(data)!={'rollout_id'} or not re.fullmatch(r'[a-f0-9]{32}',str(data.get('rollout_id',''))):
+            raise ValueError('MemoryD rollout identity is invalid')
+        _memoryd_rollout_exclusion(data['rollout_id']);result={'owned':True}
+    elif action=='memoryd-rollout-begin':result=memoryd_rollout_begin(data)
+    elif action=='memoryd-rollout-wait':result=memoryd_rollout_wait(data)
+    elif action=='memoryd-rollout-select':result=memoryd_rollout_select(data)
+    elif action=='memoryd-rollout-accept':result=memoryd_rollout_accept(data)
+    elif action=='memoryd-rollout-finish':result=memoryd_rollout_finish(data)
+    elif action=='memoryd-rollout-abort':result=memoryd_rollout_abort(data)
+    elif action=='memoryd-rollout-reconcile':result=memoryd_rollout_reconcile(data)
+    elif action=='memoryd-rollout-release-check':result=memoryd_rollout_release_check(data)
     elif action=='memoryd-transfer-preflight':result=memoryd_transfer_preflight()
     elif action=='memoryd-transfer-prepare':result=memoryd_transfer_prepare(data)
     elif action=='memoryd-import-bundles':result=memoryd_import_bundles(data)

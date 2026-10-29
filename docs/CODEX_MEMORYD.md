@@ -76,6 +76,70 @@ MemoryD as it was. To start it again, first start the core stack, then run
 exist. The existing Executor identity and tunnel are checked before and after
 deployment.
 
+### Update the read-only adapter
+
+Before updating, verify that no deployment, recovery, registration, transfer,
+or other controller is still running on any authorized controller or on the
+VM. Check the production workflow as well. This is required because older
+controllers may outlive a lost SSH lock. Use the private local Kamal profile.
+
+```sh
+bin/kamal accessory update memoryd
+```
+
+The command keeps the current adapter image and replaces only the adapter
+accessory. It records the old and new artifact pins, holds a uniquely tagged
+Kamal lock, fences controller admission, and verifies Executor discovery,
+recall options, identity, and the unchanged core/backend containers. It does
+not restart the database, Executor, CAS, or tunnel. The old artifact and pin
+receipt remain available. A failure prints the rollout ID; save it. A failed
+or timed-out reboot has an **unknown outcome** and is never retried or rolled
+back automatically.
+
+To inspect a fenced interrupted rollout without restarting anything:
+
+```sh
+bin/kamal accessory reconcile-update memoryd --rollout-id "$rollout_id"
+```
+
+If the original adapter is present and healthy, the following command checks
+the recorded original state and removes the fence without a reboot:
+
+```sh
+bin/kamal accessory abort-update memoryd --rollout-id "$rollout_id"
+```
+
+If the new adapter is already present and healthy, the following command
+verifies and completes that existing container without rebooting it:
+
+```sh
+bin/kamal accessory complete-update memoryd --rollout-id "$rollout_id"
+```
+
+If the fence has already been removed but the tagged Kamal lock remains,
+verify the recorded rollout and release only its lock:
+
+```sh
+bin/kamal accessory release-update memoryd --rollout-id "$rollout_id"
+```
+
+If an ambiguous reboot left the adapter missing, unhealthy, or of unknown
+identity, none of those recovery commands reboots it or restores the old
+artifact. Keep the fence and lock in place. On the controller, inspect the
+adapter read-only using the SSH config and alias from the private deployment
+profile:
+
+```sh
+ssh -F "$ssh_config" -o BatchMode=yes -o StrictHostKeyChecking=yes -o ForwardAgent=no \
+  "$vm_alias" 'docker inspect --format "{{.Name}} {{.Id}} {{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{end}}" mcp-control-plane-memoryd-mcp'
+```
+
+Record whether the named container is absent and its state if present. Check
+for surviving controller and VM workers before any further action. The
+current managed recovery commands do not support rebooting the old artifact
+in this state; resolve the unknown outcome with a reviewed recovery procedure
+before changing the service or releasing the lock.
+
 ## Portable transfer
 
 Use codex-memoryd's v1 portable bundle format for instance replication; never

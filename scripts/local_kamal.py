@@ -2,6 +2,7 @@
 import argparse
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -12,6 +13,11 @@ import deploy_control_plane as deploy
 
 HELP = '''Usage:
   bin/kamal accessory deploy [all|cas|memoryd] Redeploy pinned images or add isolated MemoryD
+  bin/kamal accessory update memoryd      Update only the content-addressed MemoryD adapter
+  bin/kamal accessory reconcile-update memoryd --rollout-id ID
+  bin/kamal accessory abort-update memoryd --rollout-id ID
+  bin/kamal accessory complete-update memoryd --rollout-id ID
+  bin/kamal accessory release-update memoryd --rollout-id ID
   bin/kamal accessory start [NAME|all]   Start existing containers in health order
   bin/kamal accessory stop [NAME|all]    Stop containers, tunnel first
   bin/kamal accessory details [NAME|all] Show current service health
@@ -53,7 +59,7 @@ def parse_command(argv):
         target = argv[2] if len(argv) == 3 else 'all'
         if operation == 'reboot':
             operation = 'deploy'
-        if operation not in ('deploy', 'start', 'stop', 'details', 'transfer', 'network', 'register', 'reconcile-registration', 'reconcile-legacy'):
+        if operation not in ('deploy', 'update', 'start', 'stop', 'details', 'transfer', 'network', 'register', 'reconcile-registration', 'reconcile-legacy', 'reconcile-update', 'abort-update', 'complete-update', 'release-update'):
             raise ValueError(HELP)
     elif len(argv) == 1 and argv[0] in ('deploy', 'rollback', 'preflight', 'status', 'setup-local'):
         operation, target = argv[0], 'all'
@@ -65,7 +71,7 @@ def parse_command(argv):
         raise ValueError('Unknown control-plane accessory')
     if operation == 'deploy' and target not in ('all', 'cas', 'memoryd'):
         raise ValueError('Use deploy cas, deploy memoryd, or deploy all to retain coordinated state and identity checks')
-    if operation in ('transfer','network','register','reconcile-registration','reconcile-legacy') and target != 'memoryd':
+    if operation in ('update','transfer','network','register','reconcile-registration','reconcile-legacy','reconcile-update','abort-update','complete-update','release-update') and target != 'memoryd':
         raise ValueError('Only managed MemoryD transfer, network, and registration are supported')
     return operation, target
 
@@ -156,6 +162,11 @@ def main(argv=None):
     try:
         confirmed = False
         legacy_approved = False
+        rollout_id = None
+        if len(argv)>=2 and argv[-2]=='--rollout-id':
+            rollout_id=argv[-1];del argv[-2:]
+            if not re.fullmatch(r'[a-f0-9]{32}',rollout_id):
+                raise ValueError('MemoryD rollout ID is invalid')
         if argv and argv[-1] == '--confirm-import-quiescent':
             if argv[:-1] != ['accessory','reconcile-registration','memoryd']:
                 raise ValueError('--confirm-import-quiescent is only valid for MemoryD registration reconciliation')
@@ -167,6 +178,9 @@ def main(argv=None):
             argv.pop()
             legacy_approved = True
         operation, target = parse_command(argv)
+        recovery_operations=('reconcile-update','abort-update','complete-update','release-update')
+        if (operation in recovery_operations) != (rollout_id is not None):
+            raise ValueError('MemoryD rollout recovery requires exactly one --rollout-id')
         bundle_environment()
         if operation == 'setup-local':
             return subprocess.run(['bundle', '_2.6.9_', 'install'], cwd=deploy.ROOT).returncode
@@ -178,6 +192,11 @@ def main(argv=None):
             result = deploy.execute(argparse.Namespace(
                 operation='cas' if operation == 'deploy' and target == 'cas' else
                           'memoryd' if operation == 'deploy' and target == 'memoryd' else
+                          'memoryd-upgrade' if operation == 'update' and target == 'memoryd' else
+                          'memoryd-rollout-reconcile' if operation == 'reconcile-update' else
+                          'memoryd-rollout-abort' if operation == 'abort-update' else
+                          'memoryd-rollout-complete' if operation == 'complete-update' else
+                          'memoryd-rollout-release' if operation == 'release-update' else
                           'memoryd-transfer' if operation == 'transfer' and target == 'memoryd' else
                           'memoryd-network' if operation == 'network' and target == 'memoryd' else
                           'memoryd-register' if operation == 'register' and target == 'memoryd' else
@@ -185,6 +204,7 @@ def main(argv=None):
                           'memoryd-legacy-reconcile' if operation == 'reconcile-legacy' else operation,
                 confirm_import_quiescent=confirmed,
                 approve_legacy_abandon=legacy_approved,
+                rollout_id=rollout_id,
                 local=True, approve_full_stack=True, cas_digest='', cas_revision='',
             ))
         print(json.dumps(result, indent=2))
