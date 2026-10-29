@@ -73,7 +73,17 @@ Capture rejects a NULL or different value in any database table's `profile_id` o
 
 Capture refuses a database with any `sessions` or `visible_turns` rows. This excludes raw session and conversation history from recovery captures.
 
-An in-progress legacy transfer receipt blocks capture even if a later transfer used the same source database and scope. Preserve the receipts and staging files until their selections and any omitted records are reconciled.
+An in-progress legacy transfer blocks capture even if a later transfer used the same source database and scope. For an abandoned archived-inclusive transfer followed by an approved active-only transfer, retain both source manifests, the frozen source backup, and both staged bundle sets. Stop any unmanaged importers, then run this command from the private operator checkout only after deciding to leave the archived selection unimported:
+
+```sh
+CODEX_MEMORYD_HOME="$HOME/.codex-memoryd/dakota-codex-only" \
+  CODEX_MEMORYD_RELEASE_BIN="$HOME/.local/opt/codex-memoryd/v0.1.0/bin/codex-memoryd" \
+  bin/kamal accessory reconcile-legacy memoryd --approve-legacy-abandon
+```
+
+The command verifies the released binary, frozen selections, staged hashes, destination identity, and import ledger. It creates a separate verified private backup before making the original receipt read-only. It preserves the receipt contents and path, records the abandonment, and leaves the old bundles in place. The backup and staging files contain private plaintext. If the command stops, retain the files and inspect the reported state before retrying.
+
+Guarded captures use recovery schema 3. Use the updated recovery tools to prepare and restore them; older tools reject this schema. The read-only receipt blocks known older managed importers, but it is not a security boundary against the file owner or direct Docker access. Do not change its mode or remove the abandonment record to bypass the guard.
 
 ## Configure private MinIO storage and age identities
 
