@@ -130,6 +130,9 @@ def write(path, value):
         with os.fdopen(fd,'w') as f:
             json.dump(value,f);f.write('\n');f.flush();os.fsync(f.fileno())
         os.replace(tempname,path)
+        directory_fd=os.open(path.parent,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+        try:os.fsync(directory_fd)
+        finally:os.close(directory_fd)
     finally:
         if os.path.exists(tempname):os.unlink(tempname)
 

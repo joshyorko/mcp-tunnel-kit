@@ -809,7 +809,7 @@ def load_memoryd_transfer_set(home=None):
     backup_data=json.loads(_read_private_file(backup_manifest,limit=1024*1024))
     backup_digest='sha256:'+_sha256_file(backup)
     backup_wal=Path(str(backup)+'-wal')
-    if backup_wal.exists() and backup_wal.stat().st_size:
+    if backup_wal.is_symlink() or (backup_wal.exists() and backup_wal.stat().st_size):
         raise ValueError('Frozen source backup has uncheckpointed WAL data')
     if (backup_info.get('verified') is not True
             or backup_digest!=backup_info.get('sha256')

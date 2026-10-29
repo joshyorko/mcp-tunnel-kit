@@ -74,6 +74,9 @@ def write_private(path: Path, value: str) -> None:
     private_directory(path.parent)
     if path.exists() or path.is_symlink():
         if read_private(path, strip=False) == value:
+            directory_fd=os.open(path.parent,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+            try:os.fsync(directory_fd)
+            finally:os.close(directory_fd)
             return
     with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, delete=False) as handle:
         temporary = Path(handle.name)
@@ -82,6 +85,9 @@ def write_private(path: Path, value: str) -> None:
             handle.flush()
             os.fsync(handle.fileno())
             os.replace(temporary, path)
+            directory_fd=os.open(path.parent,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+            try:os.fsync(directory_fd)
+            finally:os.close(directory_fd)
         finally:
             temporary.unlink(missing_ok=True)
 

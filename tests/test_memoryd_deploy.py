@@ -2,9 +2,11 @@
 import sys
 import hashlib
 import json
+import os
 from pathlib import Path
 import sqlite3
 import shutil
+import stat
 import zipfile
 
 import pytest
@@ -13,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 import vm_deploy_host
 import deploy_control_plane
+import compose_control
 
 FIXTURE_INSTANCE = 'cmi_' + 'a' * 32
 
@@ -170,6 +173,22 @@ def test_memoryd_receipt_write_survives_an_orphaned_old_temp_file(tmp_path):
     vm_deploy_host.write(receipt,{'status':'in_progress'})
     assert json.loads(vm_deploy_host.private(receipt))=={'status':'in_progress'}
     assert orphan.read_text()=='previous interrupted write'
+
+
+@pytest.mark.parametrize('writer',['vm','registration'])
+def test_memoryd_receipt_write_fsyncs_directory_after_replace(tmp_path,monkeypatch,writer):
+    tmp_path.chmod(0o700);events=[]
+    real_fsync=os.fsync;real_replace=os.replace
+    def sync(fd):
+        events.append('directory' if stat.S_ISDIR(os.fstat(fd).st_mode) else 'file')
+        return real_fsync(fd)
+    def replace(source,target):
+        events.append('replace');return real_replace(source,target)
+    monkeypatch.setattr(os,'fsync',sync);monkeypatch.setattr(os,'replace',replace)
+    path=tmp_path/'receipt.json'
+    if writer=='vm':vm_deploy_host.write(path,{'status':'pending'})
+    else:compose_control.write_private(path,'{"status":"pending"}\n')
+    assert events.index('file')<events.index('replace')<events.index('directory')
 
 
 def test_memoryd_reconciles_only_a_dead_imports_owned_staging_file(tmp_path,monkeypatch):
