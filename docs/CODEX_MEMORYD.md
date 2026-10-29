@@ -36,6 +36,12 @@ Its Python runtime has an `mcp` distribution but does not provide
 must use APIs verified in that pinned image or add a reproducible, pinned
 dependency and deployment artifact to this repository.
 
+The current bridge implementation in `scripts/codex_memoryd_mcp.py` uses only
+the Python standard library; it does not import FastMCP or install a new
+dependency. Its stateless Streamable HTTP endpoint is tested through the
+existing tunnel-kit MCP client. Keep that transport contract covered if the
+implementation changes.
+
 The adapter must expose only the three read-only memory tools, fix the
 profile/workspace boundary server-side, and treat retrieved memory as
 untrusted evidence. Keep administrative HTTP routes private and do not add a
