@@ -343,4 +343,12 @@ If the captured MemoryD registration exists but both MemoryD accessories and the
 
 Recover MemoryD separately from a verified backup or suitable portable bundles, following [MemoryD](CODEX_MEMORYD.md). Inspect the retained registration and transfer receipts before choosing a recovery procedure; this activation does not reconcile them or provide an automatic MemoryD restore. Do not delete those records to bypass the checks. Verify the restored data and Executor discovery separately before treating MemoryD as available.
 
+### MemoryD recovery work
+
+Issue #58 adds a verified MemoryD backup, its content-addressed adapter, and the
+adapter image pin to a recovery generation. Restore must use MemoryD's supported
+backup tooling into a new isolated volume, verify the restored identity and
+scope, and start the read-only provider before the existing tunnel. Older
+generations without those artifacts must continue to report degraded recovery.
+
 A real encrypted bundle has been read back from private MinIO and removable media. The storage check recovered the wrapped identity and compared the restored files. This proves that bundle's encrypted readback and staging path. It does not prove a production VM was activated.
