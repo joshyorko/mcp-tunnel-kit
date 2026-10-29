@@ -226,6 +226,22 @@ def test_recovery_smoke_reports_successful_discovery_without_claiming_restoratio
     assert result["memoryd_restored"] is False
 
 
+def test_recovery_smoke_claims_restoration_only_after_verified_data_and_read_only_discovery(tmp_path,monkeypatch):
+    fake=recovery_smoke_host(tmp_path,monkeypatch,volumes=['codex-memoryd-data'])
+    marker=host.STORE/'activation-in-progress.json'
+    value=json.loads(marker.read_text());value['memoryd']={'status':'captured','record_count':3}
+    host.write(marker,value)
+    monkeypatch.setattr(host,'_verified_memoryd_restore',lambda _marker:{'status':'verified'})
+    monkeypatch.setattr(host,'_memoryd_record_count',lambda:3)
+    monkeypatch.setattr(host,'_memoryd_cli_json',lambda _args:{'active_profiles':['personal'],
+                        'active_workspaces':['dakota-codex-only']})
+    fake.search_memoryd=lambda _session:None
+    fake.probe_memoryd_reads=lambda _session:{'status':'PASS'}
+    fake.probe_memoryd_denials=lambda _url:{'write_blocked':True,'scope_override_blocked':True}
+    result=host.smoke({'activation_id':'c'*32})
+    assert result['memoryd_discovery']=='PASS' and result['memoryd_restored'] is True
+
+
 def test_recovery_smoke_reports_unregistered_memoryd_as_not_restored(tmp_path, monkeypatch):
     recovery_smoke_host(tmp_path, monkeypatch)
     (host.STATE / "bootstrap/memoryd-integration.json").unlink()

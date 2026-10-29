@@ -152,7 +152,7 @@ def _accessory(service, image, host, network, *, options=None, **values):
     return result
 
 
-def render(profile, manifest, *, allow_memoryd_mcp=True):
+def render(profile, manifest, *, allow_memoryd_mcp=True, memoryd_recovery=None):
     """Return a Kamal config as JSON (valid YAML), with no secret contents."""
     profile = _validate_profile(profile)
     images = validate_manifest(manifest)
@@ -162,6 +162,20 @@ def render(profile, manifest, *, allow_memoryd_mcp=True):
     repo = profile["repo_dir"]
     network = profile["network"]["name"]
     gateway = profile["network"]["gateway"]
+    memoryd_image=_CODEX_MEMORYD_IMAGE
+    memoryd_adapter=_memoryd_adapter_digest()
+    memoryd_adapter_image=images['cas']
+    if memoryd_recovery is not None:
+        if (not isinstance(memoryd_recovery,dict) or memoryd_recovery.get('status')!='captured'
+                or memoryd_recovery.get('backend_image')!=_CODEX_MEMORYD_IMAGE
+                or not isinstance(memoryd_recovery.get('adapter_image'),str)
+                or not re.fullmatch(r'ghcr\.io/joshyorko/codex-action-server@sha256:[a-f0-9]{64}',memoryd_recovery['adapter_image'])
+                or not isinstance(memoryd_recovery.get('adapter_sha256'),str)
+                or not re.fullmatch(r'[a-f0-9]{64}',memoryd_recovery['adapter_sha256'])):
+            raise ValueError('MemoryD recovery image or adapter pin is invalid')
+        memoryd_image=memoryd_recovery['backend_image']
+        memoryd_adapter=memoryd_recovery['adapter_sha256']
+        memoryd_adapter_image=memoryd_recovery['adapter_image']
 
     executor = _accessory(
         "mcp-control-plane-executor",
@@ -308,7 +322,7 @@ def render(profile, manifest, *, allow_memoryd_mcp=True):
 
     memoryd = _accessory(
         "mcp-control-plane-memoryd",
-        _CODEX_MEMORYD_IMAGE,
+        memoryd_image,
         host,
         "host",
         options={
@@ -334,10 +348,9 @@ def render(profile, manifest, *, allow_memoryd_mcp=True):
         volumes=["codex-memoryd-data:/data"],
     )
 
-    memoryd_adapter = _memoryd_adapter_digest()
     memoryd_mcp = _accessory(
         "mcp-control-plane-memoryd-mcp",
-        images["cas"],
+        memoryd_adapter_image,
         host,
         "host",
         options={

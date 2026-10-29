@@ -364,9 +364,27 @@ def _memoryd_adapter_image(current, receipt):
     return image
 
 
-def memoryd_health():
-    baseline = status()
-    if baseline.get('authority') != 'kamal' or not baseline.get('healthy') or baseline.get('tunnel_count') != 1:
+def _memoryd_recovery_baseline(activation_id):
+    marker=_activation_marker(activation_id)
+    if marker.get('status')!='activating' or marker.get('original_stopped_attested') is not True:
+        raise ValueError('MemoryD recovery requires an active, attested activation')
+    _verified_memoryd_restore(marker)
+    owner,groups,tunnels=inspect()
+    if owner!='kamal' or tunnels:
+        raise ValueError('MemoryD recovery requires no active tunnel')
+    for name in ('executor','schema-proxy','cas'):
+        row=groups.get('kamal',{}).get(name)
+        state=row.get('State',{}) if row else {}
+        if (not row or state.get('Status')!='running' or state.get('Health',{}).get('Status')!='healthy'
+                or (row.get('Config',{}).get('Labels') or {}).get('service')!=NAMES['kamal'][name]):
+            raise ValueError('MemoryD recovery requires healthy owned core services')
+    return {'authority':'kamal','healthy':True,'tunnel_count':0}
+
+
+def memoryd_health(*, activation_id=None):
+    baseline=_memoryd_recovery_baseline(activation_id) if activation_id else status()
+    if (baseline.get('authority') != 'kamal' or not baseline.get('healthy')
+            or baseline.get('tunnel_count') != (0 if activation_id else 1)):
         raise ValueError('Existing control-plane health or tunnel identity is not acceptable')
     ids = run(['docker', 'ps', '-aq']).decode().split()
     rows = json.loads(run(['docker', 'inspect', *ids])) if ids else []
@@ -510,7 +528,7 @@ def memoryd_executor_origin_check():
     return {'memoryd_origin_allowed':f"http://{NETWORK['gateway']}:8090" in origins}
 
 
-def memoryd_wait(timeout=180):
+def memoryd_wait(timeout=180, *, activation_id=None):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         ids = run(['docker', 'ps', '-aq']).decode().split()
@@ -528,7 +546,7 @@ def memoryd_wait(timeout=180):
                 raise ValueError('A MemoryD accessory exited before becoming healthy')
             if all(state.get('Status') == 'running'
                    and state.get('Health', {}).get('Status') == 'healthy' for state in states):
-                return memoryd_health()
+                return memoryd_health(activation_id=activation_id) if activation_id else memoryd_health()
         time.sleep(2)
     raise ValueError('MemoryD accessories did not become healthy before the deadline')
 
@@ -1531,11 +1549,12 @@ def _is_control_plane_container(row):
     image=row.get('Config',{}).get('Image','')
     mounts=row.get('Mounts',[]) or []
     known_names={item for group in NAMES.values() for item in group.values()}
-    return (name in known_names or name.startswith('mcp-recovery-seed-')
+    return (name in known_names or name in MEMORYD_SERVICES or name.startswith('mcp-recovery-seed-')
             or labels.get('com.docker.compose.project')=='codex-control-plane'
             or labels.get('service') in set(NAMES['kamal'].values())
-            or 'executor-selfhost' in image or 'tunnel-client' in image
-            or any(mount.get('Name')=='codex-control-plane_executor-data' for mount in mounts))
+            or labels.get('service') in MEMORYD_SERVICES
+            or 'executor-selfhost' in image or 'tunnel-client' in image or 'codex-memoryd' in image
+            or any(mount.get('Name') in ('codex-control-plane_executor-data',MEMORYD_VOLUME) for mount in mounts))
 
 
 def _ensure_empty_activation_target(generation_dir, *, allow_lock=False):
@@ -1550,6 +1569,10 @@ def _ensure_empty_activation_target(generation_dir, *, allow_lock=False):
     volumes=set(run(['docker','volume','ls','-q']).decode().split())
     if 'codex-control-plane_executor-data' in volumes:
         raise ValueError('Replacement VM already has the Executor data volume')
+    if MEMORYD_VOLUME in volumes:
+        raise ValueError('Replacement VM already has the MemoryD data volume')
+    if memoryd_listener_addresses(run(['ss','-Hln']).decode()):
+        raise ValueError('Replacement VM already has a MemoryD target listener')
     if network_check(NETWORK):raise ValueError('Replacement VM already has the private control-plane network')
     unit=run(['systemctl','show','--property=LoadState','--value','codex-control-plane-devsy']).decode().strip()
     if unit!='loaded':raise ValueError('Replacement VM Devsy systemd unit is unavailable')
@@ -1560,7 +1583,8 @@ def activation_plan(generation_dir):
     info=_ensure_empty_activation_target(generation_dir,allow_lock=False)
     return {'ready':True,'generation':info['generation'],'expected_identity':info['expected_identity'],
             'prepared_manifest_sha256':info['manifest_sha256'],'inventory_count':len(info['prepared']['inventory']),
-            'repo_source_sha':info['repo_source_sha']}
+            'repo_source_sha':info['repo_source_sha'],
+            'memoryd':info['prepared'].get('memoryd',{'status':'legacy'})}
 
 
 def _activation_marker(activation_id, *, allow_completed=False):
@@ -1572,6 +1596,43 @@ def _activation_marker(activation_id, *, allow_completed=False):
             or marker.get('status') not in (('installing','activating','activated') if allow_completed else ('installing','activating'))):
         raise ValueError('Activation ID does not own the current recovery operation')
     return marker
+
+
+def _verified_memoryd_restore(marker):
+    activation_id=marker.get('activation_id')
+    descriptor=marker.get('memoryd')
+    if (not isinstance(activation_id,str) or not re.fullmatch(r'[a-f0-9]{32}',activation_id)
+            or not isinstance(descriptor,dict) or descriptor.get('status')!='captured'
+            or not isinstance(marker.get('prepared_manifest_sha256'),str)
+            or not re.fullmatch(r'[a-f0-9]{64}',marker['prepared_manifest_sha256'])
+            or not isinstance(descriptor.get('backup_sha256'),str)
+            or not re.fullmatch(r'[a-f0-9]{64}',descriptor['backup_sha256'])
+            or not isinstance(descriptor.get('source_instance_id'),str)
+            or not re.fullmatch(r'cmi_[a-f0-9]{32}',descriptor['source_instance_id'])
+            or descriptor.get('profile')!='personal' or descriptor.get('workspace')!='dakota-codex-only'
+            or any(type(descriptor.get(key)) is not int or descriptor[key]<0
+                   for key in ('record_count','active_record_count','archived_record_count'))
+            or descriptor['active_record_count']+descriptor['archived_record_count']!=descriptor['record_count']):
+        raise ValueError('MemoryD restore receipt has no captured activation')
+    path=STORE/f'memoryd-restore-{activation_id}.json'
+    receipt=json.loads(private(path))
+    expected={'schema_version':1,'status':'verified','activation_id':activation_id,
+              'prepared_manifest_sha256':marker.get('prepared_manifest_sha256'),
+              'backup_sha256':descriptor.get('backup_sha256'),
+              'source_instance_id':descriptor.get('source_instance_id'),
+              'record_count':descriptor.get('record_count'),
+              'active_record_count':descriptor.get('active_record_count'),
+              'archived_record_count':descriptor.get('archived_record_count'),
+              'volume':MEMORYD_VOLUME}
+    if (not isinstance(receipt,dict) or type(receipt.get('schema_version')) is not int
+            or any(type(receipt.get(key)) is not int for key in
+                   ('record_count','active_record_count','archived_record_count'))
+            or not isinstance(receipt.get('owner_nonce'),str)
+            or not re.fullmatch(r'[a-f0-9]{32}',receipt['owner_nonce'])
+            or any(receipt.get(key)!=value for key,value in expected.items())):
+        raise ValueError('MemoryD restore receipt does not match the captured generation')
+    _memoryd_restore_volume(activation_id,receipt['owner_nonce'])
+    return receipt
 
 
 def activation_begin(generation_dir,expected_manifest_sha256,expected_identity,activation_id,original_stopped_attested):
@@ -1586,17 +1647,18 @@ def activation_begin(generation_dir,expected_manifest_sha256,expected_identity,a
     marker={'schema_version':1,'activation_id':activation_id,'status':'installing',
             'source_sha':info['generation']['source_sha'],'expected_identity':expected_identity,
             'prepared_manifest_sha256':expected_manifest_sha256,'original_stopped_attested':True,
-            'started_services':[]}
+            'started_services':[],'memoryd':info['prepared'].get('memoryd',{'status':'legacy'})}
     write(marker_path,marker)
     return {'activation_started':True}
 
 
 def activation_track(activation_id,service):
     marker=_activation_marker(activation_id)
-    if service not in NAMES['kamal']:raise ValueError('Activation service is unsupported')
+    names={**NAMES['kamal'],'memoryd':'mcp-control-plane-memoryd','memoryd-mcp':'mcp-control-plane-memoryd-mcp'}
+    if service not in names:raise ValueError('Activation service is unsupported')
     matching=[row for row in _activation_container_rows()
-              if row.get('Name','').lstrip('/')==NAMES['kamal'][service]]
-    if len(matching)!=1 or matching[0].get('Config',{}).get('Labels',{}).get('service')!=NAMES['kamal'][service]:
+              if row.get('Name','').lstrip('/')==names[service]]
+    if len(matching)!=1 or matching[0].get('Config',{}).get('Labels',{}).get('service')!=names[service]:
         raise ValueError('New Kamal accessory ownership could not be verified')
     if service not in marker['started_services']:
         marker['started_services'].append(service)
@@ -1666,13 +1728,28 @@ def activation_install(generation_dir,expected_manifest_sha256,activation_id):
     return {'state_installed':True,'native_ssh_installed':True,'vm_environment_installed':True}
 
 
-def activation_pull_images(manifest):
+def activation_pull_images(manifest,activation_id):
+    marker=_activation_marker(activation_id)
     with tempfile.TemporaryDirectory(prefix='mcp-activation-docker-') as root:
         config=Path(root)/'config.json'
         fd=os.open(config,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
         with os.fdopen(fd,'wb') as stream:stream.write(b'{}\n')
         env=os.environ.copy();env.pop('DOCKER_AUTH_CONFIG',None);env['DOCKER_CONFIG']=root
-        return {'image_ids':images(manifest,pull=True,pull_env=env),'pulled':True}
+        image_ids=images(manifest,pull=True,pull_env=env)
+        memoryd=marker.get('memoryd',{'status':'legacy'})
+        pulled=False
+        if memoryd.get('status')=='captured':
+            backend=memoryd.get('backend_image');adapter=memoryd.get('adapter_image')
+            if (backend!=MEMORYD_IMAGE or not isinstance(adapter,str)
+                    or not re.fullmatch(r'ghcr\.io/joshyorko/codex-action-server@sha256:[a-f0-9]{64}',adapter)):
+                raise ValueError('Captured MemoryD image pins are invalid')
+            for reference in (backend,adapter):
+                run(['docker','pull','--platform','linux/amd64',reference],timeout=600,env=env)
+                rows=json.loads(run(['docker','image','inspect',reference],env=env))
+                if len(rows)!=1 or rows[0].get('Architecture')!='amd64' or rows[0].get('Os')!='linux':
+                    raise ValueError('Captured MemoryD image architecture is invalid')
+            pulled=True
+        return {'image_ids':image_ids,'pulled':True,'memoryd_images_pulled':pulled}
 
 
 def activation_seed(generation_dir,expected_manifest_sha256,manifest,activation_id):
@@ -1721,29 +1798,42 @@ def activation_record(data):
             or data['source_sha']!=marker['source_sha'] or data['expected_identity']!=marker['expected_identity']):
         raise ValueError('Activation receipt input is invalid')
     discovery=marker.get('memoryd_discovery')
+    captured=marker.get('memoryd',{}).get('status')=='captured'
+    if captured:
+        _verified_memoryd_restore(marker)
     if (marker.get('status')!='activating' or marker.get('original_stopped_attested') is not True
             or discovery not in ('PASS','UNREGISTERED','UNAVAILABLE')
-            or marker.get('memoryd_restored') is not False):
+            or (captured and (discovery!='PASS' or marker.get('memoryd_restored') is not True))
+            or (not captured and marker.get('memoryd_restored') is not False)):
         raise ValueError('Activation receipt requires a completed MemoryD recovery smoke result')
     if (STORE/'recovery-activation.json').exists():raise ValueError('Activation receipt already exists')
     marker['status']='activated';write(STORE/'activation-in-progress.json',marker)
     receipt={**data,'schema_version':1,'recorded_at_ns':time.time_ns(),
-             'memoryd_discovery':discovery,'memoryd_restored':False}
+             'memoryd_discovery':discovery,'memoryd_restored':captured}
     write(STORE/'recovery-activation.json',receipt)
-    return {'activation_recorded':True,'memoryd_discovery':discovery,'memoryd_restored':False}
+    return {'activation_recorded':True,'memoryd_discovery':discovery,'memoryd_restored':captured}
 
 
 def activation_cleanup(activation_id,attempted_services):
     marker=_activation_marker(activation_id,allow_completed=True)
+    names={**NAMES['kamal'],'memoryd':'mcp-control-plane-memoryd','memoryd-mcp':'mcp-control-plane-memoryd-mcp'}
     if (not isinstance(attempted_services,list)
-            or any(service not in NAMES['kamal'] for service in attempted_services)):
+            or any(service not in names for service in attempted_services)):
         raise ValueError('Activation cleanup service set is invalid')
     allowed=set(marker['started_services'])|set(attempted_services)
     rows=_activation_container_rows()
-    selected=[]
+    selected=[];helper_retained=False
+    restore_path=STORE/f'memoryd-restore-{activation_id}.json'
+    restore=json.loads(private(restore_path)) if restore_path.exists() or restore_path.is_symlink() else None
     for row in rows:
         name=row.get('Name','').lstrip('/')
-        service=next((key for key,value in NAMES['kamal'].items() if value==name),None)
+        labels=row.get('Config',{}).get('Labels',{}) or {}
+        if (restore and name==restore.get('helper_name')
+                and labels.get('mcp-control-plane.recovery-activation')==activation_id
+                and labels.get('mcp-control-plane.restore-nonce')==restore.get('owner_nonce')):
+            helper_retained=True
+            continue
+        service=next((key for key,value in names.items() if value==name),None)
         if service in allowed:
             if row.get('Config',{}).get('Labels',{}).get('service')!=name:
                 raise ValueError('Activation cleanup refused a container with foreign ownership')
@@ -1755,7 +1845,9 @@ def activation_cleanup(activation_id,attempted_services):
         if row['State'].get('Running') or row['State'].get('Paused'):run(['docker','stop',cid])
         run(['docker','rm',cid])
     marker['status']='failed-cleanup-complete';write(STORE/'activation-in-progress.json',marker)
-    return {'new_accessories_removed':len(selected),'recovered_state_preserved':True,'executor_volume_preserved':True}
+    return {'new_accessories_removed':len(selected),'recovered_state_preserved':True,
+            'executor_volume_preserved':True,'memoryd_volume_preserved':True,
+            'memoryd_helper_retained':helper_retained}
 
 
 def wait_service(owner,name):
@@ -2001,14 +2093,32 @@ def smoke(request=None):
     _,m=c.executor_session();c.verify_compact(m)
     profile=json.loads(private(STATE/'bootstrap/devsy-integration.json'))['profile'];c.read_devsy(m,profile)
     memoryd_discovery = 'UNREGISTERED'
+    memoryd_restored=False
+    captured=recovery is not None and recovery.get('memoryd',{}).get('status')=='captured'
     memoryd_marker = STATE / 'bootstrap/memoryd-integration.json'
+    if captured and not (memoryd_marker.exists() or memoryd_marker.is_symlink()):
+        raise ValueError('Captured MemoryD registration is missing')
     if memoryd_marker.exists() or memoryd_marker.is_symlink():
         private(memoryd_marker)
         if recovery is not None and _recovery_memoryd_absent():
+            if captured:raise ValueError('Captured MemoryD provider is unavailable')
             memoryd_discovery = 'UNAVAILABLE'
         else:
             c.search_memoryd(m)
             memoryd_discovery = 'PASS'
+            if captured:
+                _verified_memoryd_restore(recovery)
+                status_data=_memoryd_cli_json(['status','--local'])
+                if (status_data.get('active_profiles')!=['personal']
+                        or status_data.get('active_workspaces')!=['dakota-codex-only']
+                        or _memoryd_record_count()!=recovery['memoryd']['record_count']):
+                    raise ValueError('Restored MemoryD scope or record count changed')
+                reads=c.probe_memoryd_reads(m)
+                denials=c.probe_memoryd_denials(f"http://{NETWORK['gateway']}:8090/mcp")
+                if (reads.get('status')!='PASS' or denials.get('write_blocked') is not True
+                        or denials.get('scope_override_blocked') is not True):
+                    raise ValueError('Restored MemoryD read-only checks failed')
+                memoryd_restored=True
     supplied=request.get("native_codex")
     if supplied is None:
         native={"status":"UNCONFIGURED"}
@@ -2021,9 +2131,9 @@ def smoke(request=None):
     result={'catalog':'PASS','native_read':native,'devsy_reads':'PASS',
             'memoryd_discovery':memoryd_discovery}
     if recovery is not None:
-        recovery.update(memoryd_discovery=memoryd_discovery,memoryd_restored=False)
+        recovery.update(memoryd_discovery=memoryd_discovery,memoryd_restored=memoryd_restored)
         write(STORE/'activation-in-progress.json',recovery)
-        result['memoryd_restored']=False
+        result['memoryd_restored']=memoryd_restored
     return result
 
 
@@ -2093,20 +2203,20 @@ def main():
                         'devsy-tap-reconcile-plan','devsy-tap-reconcile',
                         'devsy-tap-rollback-plan','devsy-tap-rollback'):
         STORE.mkdir(mode=0o700,exist_ok=True)
-    data=json.load(sys.stdin) if action in ('images','image-check','network','network-check','wait','commit','baseline','set-current','rollback-commit','restart-local','activation-plan','activation-preflight','activation-begin','activation-pull-images','activation-install','activation-track','activation-seed','activation-network','activation-identity','activation-cleanup','activation-record','smoke','memoryd-adapter-prepare','memoryd-adapter-finalize','memoryd-transfer-prepare','memoryd-import-bundles','memoryd-network-allow','memoryd-app-register','memoryd-registration-reconcile','memoryd-identity-reconcile','devsy-plan','devsy-check','devsy-rollback-plan','devsy-apply','devsy-rollback','devsy-scope-rebind-check','devsy-scope-rebind','devsy-bridge-path-check','devsy-bridge-path-apply','devsy-tap-reconcile-plan','devsy-tap-reconcile','devsy-tap-rollback-plan','devsy-tap-rollback') else {}
+    data=json.load(sys.stdin) if action in ('images','image-check','network','network-check','wait','commit','baseline','set-current','rollback-commit','restart-local','activation-plan','activation-preflight','activation-begin','activation-pull-images','activation-install','activation-track','activation-seed','activation-network','activation-identity','activation-cleanup','activation-record','activation-memoryd-wait','smoke','memoryd-adapter-prepare','memoryd-adapter-finalize','memoryd-transfer-prepare','memoryd-import-bundles','memoryd-network-allow','memoryd-app-register','memoryd-registration-reconcile','memoryd-identity-reconcile','devsy-plan','devsy-check','devsy-rollback-plan','devsy-apply','devsy-rollback','devsy-scope-rebind-check','devsy-scope-rebind','devsy-bridge-path-check','devsy-bridge-path-apply','devsy-tap-reconcile-plan','devsy-tap-reconcile','devsy-tap-rollback-plan','devsy-tap-rollback') else {}
     if action=='activation-plan':result=activation_plan(data['generation_dir'])
     elif action=='activation-preflight':
         info=_ensure_empty_activation_target(data['generation_dir'],allow_lock=True)
         result={'ready':True,'expected_identity':info['expected_identity'],'prepared_manifest_sha256':info['manifest_sha256']}
     elif action=='activation-begin':
         result=activation_begin(data['generation_dir'],data['prepared_manifest_sha256'],data['expected_identity'],data['activation_id'],data['original_stopped_attested'])
-    elif action=='activation-pull-images':
-        _activation_marker(data['activation_id']);result=activation_pull_images(data['manifest'])
+    elif action=='activation-pull-images':result=activation_pull_images(data['manifest'],data['activation_id'])
     elif action=='activation-install':result=activation_install(data['generation_dir'],data['prepared_manifest_sha256'],data['activation_id'])
     elif action=='activation-track':result=activation_track(data['activation_id'],data['service'])
     elif action=='activation-seed':result=activation_seed(data['generation_dir'],data['prepared_manifest_sha256'],data['manifest'],data['activation_id'])
     elif action=='activation-network':result=activation_network(data['activation_id'])
     elif action=='activation-identity':result=activation_identity(data['expected_identity'],data['activation_id'])
+    elif action=='activation-memoryd-wait':result=memoryd_wait(activation_id=data['activation_id'])
     elif action=='activation-cleanup':result=activation_cleanup(data['activation_id'],data['attempted_services'])
     elif action=='activation-record':result=activation_record(data)
     elif action=='lock':

@@ -212,8 +212,8 @@ def kamal(config,operation,name):
     if r.returncode:raise RuntimeError('Kamal accessory '+operation+' '+name+' failed; raw output withheld')
 
 
-def configuration(directory,manifest,*,allow_memoryd_mcp=True):
-    p=Path(directory)/'deploy.yml';p.write_text(render(profile(),manifest,allow_memoryd_mcp=allow_memoryd_mcp));p.chmod(0o600);return p
+def configuration(directory,manifest,*,allow_memoryd_mcp=True,memoryd_recovery=None):
+    p=Path(directory)/'deploy.yml';p.write_text(render(profile(),manifest,allow_memoryd_mcp=allow_memoryd_mcp,memoryd_recovery=memoryd_recovery));p.chmod(0o600);return p
 
 
 def choose_manifest(current, digest, revision):
