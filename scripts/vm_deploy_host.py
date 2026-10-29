@@ -745,46 +745,6 @@ def _memoryd_capture_import_quiescent(*, proc=Path('/proc')):
     return True
 
 
-def _memoryd_superseded_legacy(path, legacy, completed):
-    keys = {'bundles', 'schema_version', 'source_database_sha256', 'source_instance_id',
-            'source_profile', 'source_workspace', 'status', 'target_backup', 'target_profile',
-            'target_workspace', 'transfer_manifest_sha256'}
-    identity_fields = ('source_database_sha256', 'source_instance_id', 'source_profile',
-                       'source_workspace', 'target_profile', 'target_workspace')
-    transfer_id = legacy.get('transfer_manifest_sha256') if isinstance(legacy, dict) else None
-    if (not isinstance(legacy, dict) or set(legacy) != keys
-            or type(legacy.get('schema_version')) is not int or legacy['schema_version'] != 1
-            or legacy.get('status') != 'in_progress' or legacy.get('bundles') != {}
-            or not isinstance(legacy.get('target_backup'), dict)
-            or not isinstance(transfer_id, str) or not re.fullmatch(r'[a-f0-9]{64}', transfer_id)
-            or not isinstance(legacy.get('source_database_sha256'), str)
-            or not re.fullmatch(r'[a-f0-9]{64}', legacy['source_database_sha256'])
-            or not isinstance(legacy.get('source_instance_id'), str)
-            or not re.fullmatch(r'cmi_[a-f0-9]{32}', legacy['source_instance_id'])
-            or legacy.get('source_profile') != 'personal' or legacy.get('target_profile') != 'personal'
-            or legacy.get('source_workspace') != 'dakota-codex-only'
-            or legacy.get('target_workspace') != 'dakota-codex-only'
-            or os.path.lexists(STATE / 'memoryd-transfer' / transfer_id[:16])):
-        return False
-    matches = []
-    for receipt_path, receipt in completed:
-        if not all(receipt.get(key) == legacy[key] for key in identity_fields):
-            continue
-        candidate_id = receipt.get('transfer_manifest_sha256')
-        if (not isinstance(candidate_id, str) or not re.fullmatch(r'[a-f0-9]{64}', candidate_id)
-                or receipt_path.name != 'memoryd-transfer-' + candidate_id + '.json'
-                or candidate_id == transfer_id or receipt.get('status') != 'complete'
-                or type(receipt.get('schema_version')) is not int or receipt['schema_version'] != 1
-                or not isinstance(receipt.get('bundles'), dict) or not receipt['bundles']
-                or 'staging' in receipt or type(receipt.get('completed_at_ns')) is not int
-                or receipt['completed_at_ns'] <= path.lstat().st_mtime_ns
-                or type(receipt.get('imported_record_count')) is not int or receipt['imported_record_count'] < 1
-                or not isinstance(receipt.get('target_backup'), dict)):
-            return False
-        matches.append(receipt_path)
-    return len(matches) == 1 and _memoryd_capture_import_quiescent()
-
-
 def memoryd_capture_preflight():
     """Prove absence or a healthy, fully registered MemoryD before capture."""
     bootstrap = STATE / 'bootstrap'
@@ -792,21 +752,15 @@ def memoryd_capture_preflight():
     pending = bootstrap / 'memoryd-registration-pending.json'
     if os.path.lexists(pending):
         raise ValueError('MemoryD registration is pending; capture refused')
-    completed = []
-    legacy = None
     for pattern in ('memoryd-transfer*.json', 'memoryd-identity-*.json'):
         for path in bootstrap.glob(pattern):
             raw = private(path)
             receipt = json.loads(raw)
             if path.name == 'memoryd-transfer.json' and isinstance(receipt, dict) and receipt.get('status') == 'in_progress':
-                legacy = (path, receipt)
+                raise ValueError('MemoryD legacy transfer requires reconciliation; capture refused')
             elif not isinstance(receipt, dict) or receipt.get('status') != 'complete':
                 raise ValueError('MemoryD work is incomplete; capture refused')
-            elif pattern == 'memoryd-transfer*.json':
-                completed.append((path, receipt))
             evidence['bootstrap/' + path.name] = hashlib.sha256(raw).hexdigest()
-    if legacy is not None and not _memoryd_superseded_legacy(*legacy, completed):
-        raise ValueError('MemoryD legacy transfer is not safely superseded; capture refused')
     inventory = memoryd_status()
     marker = bootstrap / 'memoryd-integration.json'
     adapter_pin = bootstrap / 'memoryd-adapter-image.json'

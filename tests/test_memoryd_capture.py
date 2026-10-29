@@ -145,18 +145,45 @@ def setup_superseded_transfer(tmp_path, monkeypatch):
     return legacy_path, complete_path, legacy, complete, write
 
 
-def test_capture_accepts_only_a_proven_superseded_legacy_receipt(tmp_path, monkeypatch):
+@pytest.mark.parametrize('staged', [False, True])
+def test_capture_refuses_legacy_receipt_without_selection_proof(tmp_path, monkeypatch, staged):
     legacy_path, complete_path, _, _, _ = setup_superseded_transfer(tmp_path, monkeypatch)
+    if staged:
+        directory = tmp_path / 'memoryd-transfer' / ('a' * 16)
+        directory.mkdir(parents=True, mode=0o700)
+        (directory / 'transfer.json').write_text('{"synthetic": true}')
     before = (legacy_path.read_bytes(), legacy_path.stat().st_mtime_ns, complete_path.read_bytes())
-    assert host.memoryd_capture_preflight()['status'] == 'healthy'
+    with pytest.raises(ValueError, match='legacy transfer'):
+        host.memoryd_capture_preflight()
     assert (legacy_path.read_bytes(), legacy_path.stat().st_mtime_ns, complete_path.read_bytes()) == before
 
 
 def test_capture_allows_unrelated_completed_history(tmp_path, monkeypatch):
-    _, complete_path, _, complete, write = setup_superseded_transfer(tmp_path, monkeypatch)
+    legacy_path, complete_path, _, complete, write = setup_superseded_transfer(tmp_path, monkeypatch)
+    legacy_path.unlink()
     write(complete_path.parent / ('memoryd-transfer-' + 'e' * 64 + '.json'),
           {**complete, 'transfer_manifest_sha256': 'e' * 64, 'source_database_sha256': 'f' * 64})
     assert host.memoryd_capture_preflight()['status'] == 'healthy'
+
+
+def test_capture_preserves_staged_archived_selection_when_later_transfer_is_active_only(tmp_path, monkeypatch):
+    legacy_path, complete_path, legacy, complete, write = setup_superseded_transfer(tmp_path, monkeypatch)
+    legacy_dir = tmp_path / 'memoryd-transfer' / legacy['transfer_manifest_sha256'][:16]
+    current_dir = tmp_path / 'memoryd-transfer' / complete['transfer_manifest_sha256'][:16]
+    legacy_dir.mkdir(parents=True, mode=0o700)
+    current_dir.mkdir(mode=0o700)
+    old_manifest = legacy_dir / 'transfer.json'
+    new_manifest = current_dir / 'transfer.json'
+    write(old_manifest, {'include_archived': True, 'source_record_count': 2})
+    write(new_manifest, {'include_archived': False, 'source_record_count': 1})
+    staged = legacy_dir / 'fixture.bundle'
+    staged.write_bytes(b'synthetic staged bytes')
+    staged.chmod(0o600)
+    before = {path: path.read_bytes() for path in (legacy_path, complete_path, old_manifest, new_manifest, staged)}
+
+    with pytest.raises(ValueError, match='legacy transfer'):
+        host.memoryd_capture_preflight()
+    assert {path: path.read_bytes() for path in before} == before
 
 
 @pytest.mark.parametrize('conflict', ['missing_complete', 'different_source', 'different_instance',

@@ -73,7 +73,7 @@ Capture rejects a NULL or different value in any database table's `profile_id` o
 
 Capture refuses a database with any `sessions` or `visible_turns` rows. This excludes raw session and conversation history from recovery captures.
 
-A preserved legacy transfer receipt with zero bundles is accepted only when it has no staging record or directory and exactly one later completed receipt matches its source and destination identity. Capture checks for active imports and leaves both receipts unchanged. Ambiguous or active transfers block capture.
+An in-progress legacy transfer receipt blocks capture even if a later transfer used the same source database and scope. Preserve the receipts and staging files until their selections and any omitted records are reconciled.
 
 ## Configure private MinIO storage and age identities
 
