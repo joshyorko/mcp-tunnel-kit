@@ -66,7 +66,7 @@ class McpContractTests(unittest.TestCase):
                 "workspace": "dakota-codex-only",
                 "query": "Dakota deployment",
                 "limit": 5,
-                "includeArchived": False,
+                "include_archived": False,
             })],
         )
         self.assertFalse(response["result"]["isError"])
@@ -128,7 +128,7 @@ class McpContractTests(unittest.TestCase):
                     "profile": "personal",
                     "workspace": "dakota-codex-only",
                     "query": "runtime",
-                    "includeArchived": False,
+                    "include_archived": False,
                 }),
             )
         finally:
