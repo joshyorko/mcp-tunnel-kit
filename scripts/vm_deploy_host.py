@@ -2104,7 +2104,7 @@ def activation_memoryd_restore(generation_dir,expected_manifest_sha256,activatio
         _memoryd_restore_sources(info,descriptor)
         receipt.update(status='verified',verified_at_ns=time.time_ns())
         write(receipt_path,receipt)
-        return {'memoryd_restored':True,'backup_sha256':descriptor['backup_sha256']}
+        return {'status':'verified','memoryd_restored':True,'backup_sha256':descriptor['backup_sha256']}
     except BaseException:
         # An interrupted Docker exec can remain active. Retain its helper and volume.
         raise
@@ -2536,7 +2536,8 @@ def main():
     if action=='activation-plan':result=activation_plan(data['generation_dir'])
     elif action=='activation-preflight':
         info=_ensure_empty_activation_target(data['generation_dir'],allow_lock=True)
-        result={'ready':True,'expected_identity':info['expected_identity'],'prepared_manifest_sha256':info['manifest_sha256']}
+        result={'ready':True,'expected_identity':info['expected_identity'],'prepared_manifest_sha256':info['manifest_sha256'],
+                'memoryd':info['prepared'].get('memoryd',{'status':'legacy'})}
     elif action=='activation-begin':
         result=activation_begin(data['generation_dir'],data['prepared_manifest_sha256'],data['expected_identity'],data['activation_id'],data['original_stopped_attested'])
     elif action=='activation-pull-images':result=activation_pull_images(data['manifest'],data['activation_id'])
