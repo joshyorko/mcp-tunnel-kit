@@ -236,6 +236,11 @@ def test_capture_refuses_ambiguous_superseded_legacy_receipt(tmp_path, monkeypat
     (b'/usr/local/bin/codex-memoryd\0--local\0bundle\0import\0--apply\0', True),
     (b'python3\0-c\0fixture\0memoryd-import-bundles\0', True),
     (b'docker\0exec\0memoryd\0/usr/local/bin/codex-memoryd\0bundle\0import\0', True),
+    (b'/usr/local/bin/codex-memoryd\0--local\0backup\0create\0', True),
+    (b'docker\0exec\0memoryd\0/usr/local/bin/codex-memoryd\0--local\0backup\0verify\0', True),
+    (b'/usr/local/bin/codex-memoryd\0backup\0restore-preview\0', True),
+    (b'/usr/local/bin/codex-memoryd\0backup\0restore-apply\0', True),
+    (b'/usr/local/bin/codex-memoryd\0sync-local\0--apply\0', True),
 ])
 def test_capture_recognizes_active_import_commands(command, expected):
     assert host._memoryd_import_process_active(command.split(b'\0')) is expected
@@ -251,6 +256,9 @@ def test_capture_proves_import_quiescence_in_host_and_container(tmp_path, monkey
     assert host._memoryd_capture_import_quiescent(proc=tmp_path) is True
     monkeypatch.setattr(host, 'run', lambda *_args, **_kwargs:
                         b'PID COMMAND\n1 codex-memoryd serve\n2 codex-memoryd --local bundle import --apply\n')
+    assert host._memoryd_capture_import_quiescent(proc=tmp_path) is False
+    monkeypatch.setattr(host, 'run', lambda *_args, **_kwargs:
+                        b'PID COMMAND\n1 codex-memoryd serve\n2 codex-memoryd --local backup create\n')
     assert host._memoryd_capture_import_quiescent(proc=tmp_path) is False
     monkeypatch.setattr(host, 'run', lambda *_args, **_kwargs: b'not a process listing')
     with pytest.raises(ValueError):

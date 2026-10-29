@@ -714,8 +714,12 @@ def _memoryd_import_process_active(arguments):
     if b'memoryd-import-bundles' in arguments:
         return True
     binary = any(part.rsplit(b'/', 1)[-1] == b'codex-memoryd' for part in arguments)
-    return binary and any(arguments[index:index + 2] == [b'bundle', b'import']
-                          for index in range(len(arguments) - 1))
+    if not binary:
+        return False
+    commands = ([b'bundle', b'import'], [b'backup', b'create'], [b'backup', b'verify'],
+                [b'backup', b'restore-preview'], [b'backup', b'restore-apply'])
+    return (b'sync-local' in arguments
+            or any(arguments[index:index + 2] in commands for index in range(len(arguments) - 1)))
 
 
 def _memoryd_capture_import_quiescent(*, proc=Path('/proc')):
