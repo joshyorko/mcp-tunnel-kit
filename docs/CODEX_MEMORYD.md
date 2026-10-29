@@ -48,6 +48,11 @@ profile/workspace boundary server-side, and treat retrieved memory as
 untrusted evidence. Keep administrative HTTP routes private and do not add a
 second tunnel client.
 
+The contract test runs the checksum-pinned Linux x86-64 v0.1.0 release against
+a disposable loopback database. CI downloads it automatically. For a local run,
+set `MEMORYD_V010_BINARY` to that unpacked release binary before running
+`pytest tests/test_memoryd_v010_contract.py`. Without it, the test is skipped.
+
 ## Managed service wiring
 
 `compose.memoryd.yaml` is an opt-in overlay; it is not part of the default
