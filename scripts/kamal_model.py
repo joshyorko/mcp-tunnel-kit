@@ -1,9 +1,10 @@
 """Render the checked-in, accessory-only Kamal 2.12 deployment model."""
 
 import json
+import hashlib
 import re
 import sys
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 
 _REPOSITORIES = {
     "cas": "ghcr.io/joshyorko/codex-action-server",
@@ -15,6 +16,11 @@ _CODEX_MEMORYD_IMAGE = (
     "ghcr.io/joshyorko/codex-memoryd@sha256:"
     "70465d5250f693d15408fe904d30e3035360d8a46ac6f1caea8c3660eac09996"
 )
+
+
+def _memoryd_adapter_digest():
+    source = Path(__file__).resolve().parent / "codex_memoryd_mcp.py"
+    return hashlib.sha256(source.read_bytes()).hexdigest()
 _PROFILE_KEYS = {
     "host",
     "network",
@@ -328,6 +334,7 @@ def render(profile, manifest, *, allow_memoryd_mcp=True):
         volumes=["codex-memoryd-data:/data"],
     )
 
+    memoryd_adapter = _memoryd_adapter_digest()
     memoryd_mcp = _accessory(
         "mcp-control-plane-memoryd-mcp",
         images["cas"],
@@ -362,7 +369,8 @@ def render(profile, manifest, *, allow_memoryd_mcp=True):
             }
         },
         volumes=[
-            f"{repo}/scripts/codex_memoryd_mcp.py:/opt/tunnel-kit/codex_memoryd_mcp.py:ro"
+            f"{state}/memoryd-adapter/{memoryd_adapter}/codex_memoryd_mcp.py:"
+            "/opt/tunnel-kit/codex_memoryd_mcp.py:ro"
         ],
     )
 

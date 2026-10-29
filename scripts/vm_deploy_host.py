@@ -299,10 +299,28 @@ def memoryd_health():
                      if mount.get('Name') == MEMORYD_VOLUME and mount.get('Destination') == '/data']
     bridge_mounts = [mount for mount in bridge.get('Mounts', [])
                      if mount.get('Destination') == '/opt/tunnel-kit/codex_memoryd_mcp.py'
-                     and mount.get('Source') == str(ROOT / 'scripts/codex_memoryd_mcp.py')
+                     and mount.get('Source','').startswith(str(STATE / 'memoryd-adapter') + '/')
                      and mount.get('RW') is False]
     if len(volume_mounts) != 1 or len(bridge_mounts) != 1:
         raise ValueError('MemoryD persistence or read-only source mount failed')
+    adapter_path=Path(bridge_mounts[0]['Source'])
+    if (adapter_path.name!='codex_memoryd_mcp.py'
+            or not re.fullmatch(r'[a-f0-9]{64}',adapter_path.parent.name)):
+        raise ValueError('MemoryD bridge source path is not content-addressed')
+    adapter_root=STATE/'memoryd-adapter'
+    for directory in (adapter_root,adapter_path.parent):
+        directory_info=directory.lstat()
+        if (directory.is_symlink() or not directory.is_dir() or directory_info.st_uid!=os.getuid()
+                or stat.S_IMODE(directory_info.st_mode)!=0o700):
+            raise ValueError('MemoryD adapter artifact directories must be private')
+    adapter_stat=adapter_path.lstat()
+    if (adapter_path.is_symlink() or not adapter_path.is_file()
+            or adapter_stat.st_uid!=os.getuid() or stat.S_IMODE(adapter_stat.st_mode)!=0o600
+            or file_sha256(adapter_path)!=adapter_path.parent.name):
+        raise ValueError('Staged MemoryD bridge source does not match its private content address')
+    adapter_receipt=json.loads(private(adapter_path.parent/'artifact.json'))
+    if adapter_receipt.get('adapter_sha256')!=adapter_path.parent.name:
+        raise ValueError('Staged MemoryD bridge receipt does not match its content address')
     listeners = set()
     for line in run(['ss', '-Hln']).decode().splitlines():
         columns = line.split()
@@ -314,6 +332,7 @@ def memoryd_health():
         'status': 'PASS',
         'memoryd_image': MEMORYD_IMAGE,
         'adapter_image': expected_bridge_image,
+        'adapter_sha256': adapter_path.parent.name,
         'backend_bind': '127.0.0.1:8787',
         'mcp_bind': f'{gateway}:8090',
         'persistent_volume': MEMORYD_VOLUME,
@@ -343,6 +362,74 @@ def memoryd_wait(timeout=180):
                 return memoryd_health()
         time.sleep(2)
     raise ValueError('MemoryD accessories did not become healthy before the deadline')
+
+
+def _memoryd_adapter_dir(adapter_sha256):
+    if not isinstance(adapter_sha256,str) or not re.fullmatch(r'[a-f0-9]{64}',adapter_sha256):
+        raise ValueError('MemoryD adapter checksum is invalid')
+    return STATE/'memoryd-adapter'/adapter_sha256
+
+
+def memoryd_adapter_prepare(data):
+    if (not isinstance(data,dict) or set(data)!={'adapter_sha256','size_bytes','controller_sha'}
+            or not isinstance(data.get('controller_sha'),str)
+            or not re.fullmatch(r'[a-f0-9]{40}',data['controller_sha'])
+            or type(data.get('size_bytes')) is not int or not 0<data['size_bytes']<=1024*1024):
+        raise ValueError('MemoryD adapter staging request is invalid')
+    root=STATE/'memoryd-adapter'
+    if not root.exists():root.mkdir(mode=0o700)
+    root_info=root.lstat()
+    if root.is_symlink() or not root.is_dir() or root_info.st_uid!=os.getuid() or stat.S_IMODE(root_info.st_mode)!=0o700:
+        raise ValueError('MemoryD adapter staging root must be private')
+    directory=_memoryd_adapter_dir(data['adapter_sha256'])
+    if not directory.exists():directory.mkdir(mode=0o700)
+    info=directory.lstat()
+    if directory.is_symlink() or not directory.is_dir() or info.st_uid!=os.getuid() or stat.S_IMODE(info.st_mode)!=0o700:
+        raise ValueError('MemoryD adapter artifact directory must be private')
+    path=directory/'codex_memoryd_mcp.py'
+    present=False
+    if path.exists() or path.is_symlink():
+        info=path.lstat()
+        if (path.is_symlink() or not path.is_file() or info.st_uid!=os.getuid()
+                or info.st_size!=data['size_bytes'] or file_sha256(path)!=data['adapter_sha256']):
+            raise ValueError('Existing MemoryD adapter artifact does not match its immutable digest')
+        if stat.S_IMODE(info.st_mode)!=0o600:path.chmod(0o600)
+        present=True
+    metadata={'adapter_sha256':data['adapter_sha256'],'size_bytes':data['size_bytes'],
+              'controller_sha':data['controller_sha']}
+    marker=directory/'artifact.json'
+    if marker.exists() or marker.is_symlink():
+        existing=json.loads(private(marker))
+        if (existing.get('adapter_sha256')!=data['adapter_sha256']
+                or existing.get('size_bytes')!=data['size_bytes']):
+            raise ValueError('MemoryD adapter receipt does not match the immutable artifact')
+        if existing.get('controller_sha')!=data['controller_sha']:
+            write(marker,metadata)
+    else:
+        write(marker,metadata)
+    return {'directory':str(directory),'path':str(path),'present':present,
+            'needs_upload':not present,'adapter_sha256':data['adapter_sha256']}
+
+
+def memoryd_adapter_finalize(data):
+    if (not isinstance(data,dict) or set(data)!={'adapter_sha256','size_bytes','controller_sha'}
+            or type(data.get('size_bytes')) is not int
+            or not isinstance(data.get('controller_sha'),str)
+            or not re.fullmatch(r'[a-f0-9]{40}',data['controller_sha'])):
+        raise ValueError('MemoryD adapter finalization request is invalid')
+    directory=_memoryd_adapter_dir(data['adapter_sha256'])
+    path=directory/'codex_memoryd_mcp.py'
+    info=path.lstat()
+    if (path.is_symlink() or not path.is_file() or info.st_uid!=os.getuid()
+            or info.st_size!=data['size_bytes'] or file_sha256(path)!=data['adapter_sha256']):
+        raise ValueError('Staged MemoryD adapter failed its SHA-256 check')
+    path.chmod(0o600)
+    marker=directory/'artifact.json'
+    metadata={'adapter_sha256':data['adapter_sha256'],'size_bytes':data['size_bytes'],
+              'controller_sha':data['controller_sha']}
+    if json.loads(private(marker))!=metadata:
+        raise ValueError('MemoryD adapter receipt does not match its staged file')
+    return {'staged':True,'adapter_sha256':data['adapter_sha256'],'size_bytes':data['size_bytes']}
 
 
 def memoryd_status():
@@ -665,7 +752,9 @@ def register_memoryd_app():
     registered = c.ensure_memoryd_app(http, url, receipt)
     write(marker, registered)
     c.search_memoryd(session)
-    return {'registered': True, 'app_id': registered['id'], 'tool_count': 3, 'executor_discovery': 'PASS'}
+    reads = c.probe_memoryd_reads(session)
+    return {'registered': True, 'app_id': registered['id'], 'tool_count': 3,
+            'executor_discovery': 'PASS', 'read_smoke': reads}
 
 
 def lifecycle_check():
@@ -1387,7 +1476,7 @@ def main():
                         'devsy-tap-reconcile-plan','devsy-tap-reconcile',
                         'devsy-tap-rollback-plan','devsy-tap-rollback'):
         STORE.mkdir(mode=0o700,exist_ok=True)
-    data=json.load(sys.stdin) if action in ('images','image-check','network','network-check','wait','commit','baseline','set-current','rollback-commit','restart-local','activation-plan','activation-preflight','activation-begin','activation-pull-images','activation-install','activation-track','activation-seed','activation-network','activation-identity','activation-cleanup','activation-record','smoke','memoryd-transfer-prepare','memoryd-import-bundles','devsy-plan','devsy-check','devsy-rollback-plan','devsy-apply','devsy-rollback','devsy-scope-rebind-check','devsy-scope-rebind','devsy-bridge-path-check','devsy-bridge-path-apply','devsy-tap-reconcile-plan','devsy-tap-reconcile','devsy-tap-rollback-plan','devsy-tap-rollback') else {}
+    data=json.load(sys.stdin) if action in ('images','image-check','network','network-check','wait','commit','baseline','set-current','rollback-commit','restart-local','activation-plan','activation-preflight','activation-begin','activation-pull-images','activation-install','activation-track','activation-seed','activation-network','activation-identity','activation-cleanup','activation-record','smoke','memoryd-adapter-prepare','memoryd-adapter-finalize','memoryd-transfer-prepare','memoryd-import-bundles','devsy-plan','devsy-check','devsy-rollback-plan','devsy-apply','devsy-rollback','devsy-scope-rebind-check','devsy-scope-rebind','devsy-bridge-path-check','devsy-bridge-path-apply','devsy-tap-reconcile-plan','devsy-tap-reconcile','devsy-tap-rollback-plan','devsy-tap-rollback') else {}
     if action=='activation-plan':result=activation_plan(data['generation_dir'])
     elif action=='activation-preflight':
         info=_ensure_empty_activation_target(data['generation_dir'],allow_lock=True)
@@ -1426,6 +1515,8 @@ def main():
     elif action=='memoryd-health':result=memoryd_health()
     elif action=='memoryd-wait':result=memoryd_wait()
     elif action=='memoryd-status':result=memoryd_status()
+    elif action=='memoryd-adapter-prepare':result=memoryd_adapter_prepare(data)
+    elif action=='memoryd-adapter-finalize':result=memoryd_adapter_finalize(data)
     elif action=='memoryd-transfer-preflight':result=memoryd_transfer_preflight()
     elif action=='memoryd-transfer-prepare':result=memoryd_transfer_prepare(data)
     elif action=='memoryd-import-bundles':result=memoryd_import_bundles(data)

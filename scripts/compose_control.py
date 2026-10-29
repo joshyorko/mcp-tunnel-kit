@@ -764,6 +764,24 @@ def search_memoryd(session):
         raise ControlError("Executor MemoryD discovery lacks the expected read-only tools.")
 
 
+def probe_memoryd_reads(session):
+    code = '''const values = await Promise.all([
+  tools.memoryd.memory_status({}),
+  tools.memoryd.memory_recall({query: "Dakota Codex durable memory"}),
+  tools.memoryd.memory_search({query: "Dakota Codex durable memory", limit: 3}),
+])
+return {read_only_tools: values.map(value => ({
+  isError: value?.isError === true,
+  contentBlocks: Array.isArray(value?.content) ? value.content.length : 0,
+}))}'''
+    data = execution(session.call("tools/call", {"name": "execute", "arguments": {"code": code}}))
+    values = data.get("execution", {}).get("value", {}).get("read_only_tools", [])
+    if (data.get("status") != "completed" or not data.get("execution", {}).get("ok")
+            or len(values) != 3 or any(item.get("isError") or item.get("contentBlocks", 0) < 1 for item in values)):
+        raise ControlError("Executor MemoryD status, recall, or search smoke failed.")
+    return {"status": "PASS", "tools_called": 3, "content_blocks": [item["contentBlocks"] for item in values]}
+
+
 def verify_devsy_catalog(tools):
     names = {tool["name"] for tool in tools}
     if not DEVSY_TOOLS.issubset(names) or len(names) != len(tools):

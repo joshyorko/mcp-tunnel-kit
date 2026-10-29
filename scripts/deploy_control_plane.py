@@ -162,7 +162,7 @@ def lock():
 
 def remote_source():
     bootstrap='import sys,types\n'
-    for name in ('instance_profile','prepare_recovery_generation','devsy_vm_bootstrap','scope_binding_rebind','bridge_kubectl_path'):
+    for name in ('instance_profile','prepare_recovery_generation','devsy_vm_bootstrap','scope_binding_rebind','bridge_kubectl_path','compose_control'):
         source=(ROOT/'scripts'/(name+'.py')).read_text()
         bootstrap+=('_module=types.ModuleType('+repr(name)+')\n'
                     +'_module.__file__='+repr(str(ROOT/'scripts'/(name+'.py')))+'\n'
@@ -938,12 +938,29 @@ def deploy_memoryd(source_sha, directory):
     profile_value = profile()
     remote('profile')
     remote('network-check',profile_value['network'])
+    adapter_path=ROOT/'scripts/codex_memoryd_mcp.py'
+    adapter_stat=adapter_path.lstat()
+    if adapter_path.is_symlink() or not adapter_path.is_file() or adapter_stat.st_uid!=os.getuid():
+        raise ValueError('MemoryD adapter source is not an owned regular file')
+    adapter_sha=_sha256_file(adapter_path)
+    adapter_data={'adapter_sha256':adapter_sha,'size_bytes':adapter_stat.st_size,
+                  'controller_sha':source_sha}
+    staged=remote('memoryd-adapter-prepare',adapter_data)
+    adapter_directory=profile_value['state_dir']+'/memoryd-adapter/'+adapter_sha
+    if staged.get('directory')!=adapter_directory or staged.get('adapter_sha256')!=adapter_sha:
+        raise ValueError('VM returned an unexpected MemoryD adapter staging path')
+    if staged.get('needs_upload') is True:
+        source_args=['scp','-p','-F',str(SSH),'-o','BatchMode=yes',
+                     '-o','StrictHostKeyChecking=yes','-o','ForwardAgent=no',
+                     str(adapter_path),f'{HOST}:{adapter_directory}/codex_memoryd_mcp.py']
+        result=subprocess.run(source_args,capture_output=True,text=True,timeout=120)
+        if result.returncode:
+            raise RuntimeError('Pinned SSH MemoryD adapter staging failed; source output withheld') from None
+    remote('memoryd-adapter-finalize',adapter_data)
     config = configuration(directory,current['manifest'])
-    phase = 'source-sync'
+    phase = 'memoryd-boot'
     executor_reconfigured=False
     try:
-        sync_source(source_sha)
-        phase = 'memoryd-boot'
         kamal(config,'boot','memoryd')
         phase = 'memoryd-mcp-boot'
         kamal(config,'boot','memoryd-mcp')
@@ -965,13 +982,14 @@ def deploy_memoryd(source_sha, directory):
                 or after.get('inventory') != before.get('inventory')
                 or smoke_result.get('catalog')!='PASS'
                 or smoke_result.get('devsy_reads')!='PASS'
-                or health.get('status') != 'PASS'):
+                or health.get('status') != 'PASS'
+                or health.get('adapter_sha256') != adapter_sha):
             raise RuntimeError('post-deploy acceptance mismatch')
         return {'operation':'memoryd','status':'PASS','services':health,
                 'executor_app_registered':False,'executor_origin_updated':True,
                 'existing_identity_preserved':True,
                 'existing_inventory_preserved':True,'tunnel_count':after_status['tunnel_count'],
-                'source_sha':source_sha,'preflight':preflight}
+                'controller_sha':source_sha,'adapter_sha256':adapter_sha,'preflight':preflight}
     except Exception:
         if executor_reconfigured:
             try:

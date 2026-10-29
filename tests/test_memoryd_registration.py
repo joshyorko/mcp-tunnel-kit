@@ -100,3 +100,21 @@ class MemorydRegistrationTests(unittest.TestCase):
         session = Session()
         control.search_memoryd(session)
         self.assertEqual(session.request[0], "tools/call")
+
+    def test_read_smoke_calls_status_recall_and_search_without_returning_memory_content(self):
+        class Session:
+            def call(self, method, params):
+                self.request = (method, params)
+                value = {"read_only_tools": [
+                    {"isError": False, "contentBlocks": 1},
+                    {"isError": False, "contentBlocks": 1},
+                    {"isError": False, "contentBlocks": 1},
+                ]}
+                envelope = {"status": "completed", "execution": {"ok": True, "value": value}}
+                return {"content": [{"type": "text", "text": json.dumps(envelope)}]}
+
+        session = Session()
+        result = control.probe_memoryd_reads(session)
+        self.assertEqual(result["status"], "PASS")
+        self.assertEqual(result["tools_called"], 3)
+        self.assertNotIn("content", result)

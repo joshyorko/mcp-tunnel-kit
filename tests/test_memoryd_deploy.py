@@ -243,6 +243,30 @@ def test_memoryd_transfer_prepare_is_private_idempotent_and_hash_checked(tmp_pat
         vm_deploy_host.memoryd_transfer_prepare(manifest)
 
 
+def test_memoryd_adapter_stage_is_content_addressed_and_owner_only(tmp_path, monkeypatch):
+    tmp_path.chmod(0o700)
+    monkeypatch.setattr(vm_deploy_host,'STATE',tmp_path)
+    payload=b'fixed adapter fixture'
+    digest=hashlib.sha256(payload).hexdigest()
+    request={'adapter_sha256':digest,'size_bytes':len(payload),'controller_sha':'a'*40}
+    prepared=vm_deploy_host.memoryd_adapter_prepare(request)
+    assert prepared['needs_upload'] is True
+    artifact=Path(prepared['path'])
+    assert artifact.parent.name==digest
+    artifact.write_bytes(payload)
+    artifact.chmod(0o644)
+
+    finalized=vm_deploy_host.memoryd_adapter_finalize(request)
+
+    assert finalized=={'staged':True,'adapter_sha256':digest,'size_bytes':len(payload)}
+    assert artifact.stat().st_mode&0o777==0o600
+    assert vm_deploy_host.memoryd_adapter_prepare(request)['present'] is True
+    changed={**request,'adapter_sha256':'b'*64}
+    next_version=vm_deploy_host.memoryd_adapter_prepare(changed)
+    assert next_version['needs_upload'] is True
+    assert next_version['directory']!=prepared['directory']
+
+
 def test_memoryd_import_applies_preview_plans_backs_up_checks_replay_and_preserves_scope(tmp_path, monkeypatch):
     state=tmp_path
     state.chmod(0o700)
@@ -391,19 +415,26 @@ def test_memoryd_deploy_adds_only_its_accessories_then_reboots_executor_without_
         if action=='status':return {'authority':'kamal','healthy':True,'tunnel_count':1,'inventory':inventory}
         if action=='snapshot':return snapshot
         if action=='memoryd-preflight':return {'ready':True,'mutated':False}
+        if action=='memoryd-adapter-prepare':
+            return {'directory':f"/srv/control-plane/memoryd-adapter/{data['adapter_sha256']}",
+                    'needs_upload':True,'adapter_sha256':data['adapter_sha256']}
+        if action=='memoryd-adapter-finalize':return {'staged':True,'adapter_sha256':data['adapter_sha256']}
         if action=='current':return current
         if action=='memoryd-wait':return {'status':'PASS'}
-        if action=='memoryd-health':return {'status':'PASS'}
+        if action=='memoryd-health':return {'status':'PASS','adapter_sha256':adapter_hash}
         return {'status':'PASS'}
+
+    adapter_hash=hashlib.sha256((Path(deploy_control_plane.ROOT)/'scripts/codex_memoryd_mcp.py').read_bytes()).hexdigest()
 
     def kamal(_config,action,name):
         calls.append(('kamal',action,name))
 
     monkeypatch.setattr(deploy_control_plane,'remote',remote)
-    monkeypatch.setattr(deploy_control_plane,'profile',lambda:{'network':{'name':'mcp-control-plane'}})
+    monkeypatch.setattr(deploy_control_plane,'profile',lambda:{'network':{'name':'mcp-control-plane'},'state_dir':'/srv/control-plane'})
     monkeypatch.setattr(deploy_control_plane,'configuration',lambda *_args,**_kwargs:tmp_path/'deploy.yml')
     monkeypatch.setattr(deploy_control_plane,'sync_source',lambda _sha:calls.append(('sync',)))
     monkeypatch.setattr(deploy_control_plane,'kamal',kamal)
+    monkeypatch.setattr(deploy_control_plane.subprocess,'run',lambda *args,**kwargs:type('Result',(),{'returncode':0})())
     monkeypatch.setattr(deploy_control_plane,'smoke',lambda _native:{'catalog':'PASS','devsy_reads':'PASS','memoryd_discovery':'UNREGISTERED'})
 
     result=deploy_control_plane.deploy_memoryd('a'*40,tmp_path)
@@ -411,6 +442,7 @@ def test_memoryd_deploy_adds_only_its_accessories_then_reboots_executor_without_
     assert result['status']=='PASS'
     assert [item for item in calls if item[0]=='kamal']==[
         ('kamal','boot','memoryd'),('kamal','boot','memoryd-mcp'),('kamal','reboot','executor')]
+    assert ('sync',) not in calls
     assert ('kamal','reboot','tunnel') not in calls
     assert result['executor_app_registered'] is False
     assert result['existing_identity_preserved'] is True

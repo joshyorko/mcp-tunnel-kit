@@ -1,4 +1,5 @@
 import json
+import hashlib
 import subprocess
 import sys
 from pathlib import Path
@@ -125,8 +126,9 @@ def test_memoryd_accessories_are_pinned_private_and_resource_limited():
     assert bridge["options"]["cpus"] == "0.25"
     assert bridge["env"]["clear"]["CODEX_MEMORYD_URL"] == "http://127.0.0.1:8787"
     assert bridge["env"]["clear"]["CODEX_MEMORYD_MCP_BIND"] == "172.30.86.1:8090"
+    bridge_sha = hashlib.sha256((ROOT / "scripts/codex_memoryd_mcp.py").read_bytes()).hexdigest()
     assert bridge["volumes"] == [
-        "/home/kdlocpanda/Projects/mcp-tunnel-kit/scripts/codex_memoryd_mcp.py:"
+        f"/home/kdlocpanda/.local/share/codex-control-plane/memoryd-adapter/{bridge_sha}/codex_memoryd_mcp.py:"
         "/opt/tunnel-kit/codex_memoryd_mcp.py:ro"
     ]
     assert "port" not in bridge and "ports" not in bridge

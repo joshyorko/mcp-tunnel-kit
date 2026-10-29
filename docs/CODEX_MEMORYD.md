@@ -55,8 +55,10 @@ and the bridge on the existing control-plane bridge gateway, with no published
 ports. Set `CODEX_MEMORYD_BIND` and the matching `CODEX_MEMORYD_URL` only after
 checking the selected loopback port is free. The deployment runner renders the
 same two services as separate Kamal accessories and checks capacity before
-source sync or accessory boot. Use `bin/kamal accessory deploy memoryd` for
-that managed operation.
+accessory boot. It stages only the hash-addressed adapter file under the VM's
+private deployment state using the pinned SSH path; it does not update the VM's
+runtime repository checkout. Use `bin/kamal accessory deploy memoryd` for that
+managed operation.
 
 `bin/kamal accessory details memoryd` inspects the accessories;
 `bin/kamal accessory stop memoryd` stops the bridge before the database and
@@ -74,6 +76,9 @@ integrity and source/destination scopes, then apply with that import preview's
 plan ID. Transfer the bundle bytes over the pinned SSH path and verify their
 SHA-256 before import. Preserve the source instance ID and bundle manifest
 digests; a repeated import should plan zero creates and exact identity reuse.
+Treat the bundle's archived-record selection as explicit provenance; this
+snapshot includes the one archived MemoryD record and contains no ChatGPT
+conversation archive.
 
 Freeze one source cutoff with the official verified backup before chunking.
 Export every chunk from that backup, and validate the bundle selections against
