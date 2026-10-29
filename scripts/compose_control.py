@@ -649,7 +649,8 @@ def ensure_codex_app(http, url, receipt=None):
     return ensure_mcp_app(http, url, "Codex", receipt)
 
 
-def ensure_mcp_app(http, url, name, receipt=None):
+def ensure_mcp_app(http, url, name, receipt=None, *, expected_organization=None, require_absent=False,
+                   before_import=None):
     if name not in {"Codex", "Devsy", "MemoryD"}:
         raise ControlError("Only the configured Codex, Devsy, and MemoryD integrations are managed.")
     slug = name.lower()
@@ -657,9 +658,13 @@ def ensure_mcp_app(http, url, name, receipt=None):
     organization = context.get("organization")
     if not isinstance(organization, str) or not organization:
         raise ControlError("Use a PAT scoped to the browser-created organization.")
+    if expected_organization is not None and organization != expected_organization:
+        raise ControlError("The MCP app organization changed; no app was imported.")
     prefix = "/api/organizations/" + urllib.parse.quote(organization, safe="")
     inventory, _ = http.request("GET", prefix + "/inventory")
     existing = [app for app in inventory["apps"] if app.get("slug") == slug or app.get("name") == name]
+    if require_absent and existing:
+        raise ControlError("An unreceipted MCP app appeared; no app was imported.")
     if receipt:
         identity = [app for app in inventory["apps"] if app.get("id") == receipt.get("id")]
         if (receipt.get("organization") != organization or receipt.get("url") != url
@@ -671,6 +676,8 @@ def ensure_mcp_app(http, url, name, receipt=None):
     if existing:
         app = existing[0]
     else:
+        if before_import is not None:
+            before_import()
         app, _ = http.request("POST", prefix + "/apps/import", {"source": {"kind": "mcp", "name": name, "url": url}})
     if app.get("slug") != slug or not app.get("id") or not app.get("activeDeployment"):
         raise ControlError("MCP import returned an unexpected or undeployed app; inspect the dashboard.")
@@ -736,7 +743,8 @@ def verify_memoryd_catalog(tools):
             raise ControlError("MemoryD tool scope or read-only annotations are invalid.")
 
 
-def ensure_memoryd_app(http, url, receipt=None):
+def ensure_memoryd_app(http, url, receipt=None, *, expected_organization=None, require_absent=False,
+                       before_import=None):
     parsed = urllib.parse.urlsplit(url)
     try:
         address = ipaddress.ip_address(parsed.hostname)
@@ -749,7 +757,9 @@ def ensure_memoryd_app(http, url, receipt=None):
         raise ControlError("MemoryD MCP must use a private managed HTTP endpoint.")
     upstream = Mcp(Http(url.removesuffix("/mcp")), "/mcp")
     verify_memoryd_catalog(upstream.tools())
-    return ensure_mcp_app(http, url, "MemoryD", receipt)
+    return ensure_mcp_app(http, url, "MemoryD", receipt,
+                          expected_organization=expected_organization, require_absent=require_absent,
+                          before_import=before_import)
 
 
 def probe_memoryd_denials(url):

@@ -151,6 +151,11 @@ def inspect():
     return owner,groups,matching
 
 
+def _valid_memoryd_receipt(receipt):
+    return (isinstance(receipt,dict) and set(receipt)=={'organization','id','url'}
+            and all(isinstance(value,str) and value for value in receipt.values()))
+
+
 def _memoryd_base_apps(apps,org,marker,gateway):
     matches=[app for app in apps if app.get('slug')=='memoryd' or app.get('name')=='MemoryD']
     if matches or marker:
@@ -163,15 +168,69 @@ def _memoryd_base_apps(apps,org,marker,gateway):
     return apps
 
 
+def _memoryd_pending_app(intent,org,apps,get):
+    """Validate an ambiguous import before treating it as our app."""
+    import compose_control as c
+    from urllib.parse import quote
+    url=f"http://{NETWORK['gateway']}:8090/mcp"
+    keys={'status','organization','url','transfer_manifest_sha256','transfer_receipt_sha256',
+          'source_sha256','base_identity'}
+    if (not isinstance(intent,dict) or set(intent)!=keys or intent['status'] not in ('prepared','importing')
+            or intent['organization']!=org or intent['url']!=url
+            or not isinstance(org,str) or not org
+            or any(not isinstance(intent[key],str) or not re.fullmatch(r'[a-f0-9]{64}',intent[key])
+                   for key in ('transfer_manifest_sha256','transfer_receipt_sha256','source_sha256','base_identity'))):
+        raise ValueError('MemoryD pending registration identity changed')
+    transfer_id=intent['transfer_manifest_sha256']
+    _require_completed_memoryd_transfer({'transfer_manifest_sha256':transfer_id})
+    if hashlib.sha256(private(_memoryd_receipt_path(transfer_id))).hexdigest()!=intent['transfer_receipt_sha256']:
+        raise ValueError('MemoryD pending registration transfer receipt changed')
+    source=c.devsy_app_source(url)
+    if hashlib.sha256(source.strip().encode()).hexdigest()!=intent['source_sha256']:
+        raise ValueError('MemoryD pending registration source changed')
+    matches=[app for app in apps if app.get('slug')=='memoryd' or app.get('name')=='MemoryD']
+    if not matches:
+        return None
+    if intent['status']=='prepared':
+        raise ValueError('MemoryD app appeared before the pending import was attempted')
+    if (len(matches)!=1 or matches[0].get('slug')!='memoryd' or matches[0].get('name')!='MemoryD'
+            or not isinstance(matches[0].get('id'),str) or not matches[0]['id']
+            or not matches[0].get('activeDeployment')
+            or sum(app.get('id')==matches[0]['id'] for app in apps)!=1):
+        raise ValueError('MemoryD pending registration app is ambiguous')
+    app=matches[0]
+    path='/api/organizations/'+quote(org,safe='')+'/apps/'+quote(app['id'],safe='')+'/source'
+    actual=get(path)
+    files=actual.get('files',[]) if isinstance(actual,dict) else []
+    if not isinstance(files,list) or sum(isinstance(file,dict) and file.get('path')=='index.ts' for file in files)!=1:
+        raise ValueError('MemoryD pending registration source is ambiguous')
+    c.verify_generated_source(actual,source,'MemoryD')
+    return {'organization':org,'id':app['id'],'url':url}
+
+
 def identity(executor, *, exclude_memoryd=False):
     from urllib.request import Request,urlopen
     pat = private(STATE/'secrets/executor-pat').decode().strip()
     def get(path):
         with urlopen(Request('http://127.0.0.1:4312'+path,headers={'Authorization':'Bearer '+pat}),timeout=15) as r: return json.load(r)
     context=get('/api/context');org=context['organization'];apps=get('/api/organizations/'+org+'/inventory')['apps']
+    intent=None
+    has_intent=False
     if exclude_memoryd:
         marker_path=STATE/'bootstrap/memoryd-integration.json'
-        marker=json.loads(private(marker_path)) if marker_path.exists() or marker_path.is_symlink() else None
+        has_marker=marker_path.exists() or marker_path.is_symlink()
+        marker=json.loads(private(marker_path)) if has_marker else None
+        if has_marker and not _valid_memoryd_receipt(marker):
+            raise ValueError('MemoryD app receipt is invalid')
+        intent_path=STATE/'bootstrap/memoryd-registration-pending.json'
+        has_intent=intent_path.exists() or intent_path.is_symlink()
+        intent=json.loads(private(intent_path)) if has_intent else None
+        if has_intent:
+            pending_app=_memoryd_pending_app(intent,org,apps,get)
+            if marker is not None and marker!=pending_app:
+                raise ValueError('MemoryD pending registration differs from its private receipt')
+            if marker is None:
+                marker=pending_app
         apps=_memoryd_base_apps(apps,org,marker,NETWORK['gateway'])
     proof={'organization':org,'apps':sorted((x['id'],x['slug']) for x in apps),'keys':{},'secrets':{}}
     for name in ('auth-secret.key','encryption.key','install-id'):
@@ -180,7 +239,10 @@ def identity(executor, *, exclude_memoryd=False):
         proof['keys'][name]=hashlib.sha256(data).hexdigest()
     for name in ('control-plane-api-key','control-plane-tunnel-id','executor-auth-header','executor-pat'):
         proof['secrets'][name]=hashlib.sha256(private(STATE/'secrets'/name)).hexdigest()
-    return hashlib.sha256(json.dumps(proof,sort_keys=True).encode()).hexdigest()
+    digest=hashlib.sha256(json.dumps(proof,sort_keys=True).encode()).hexdigest()
+    if has_intent and digest!=intent['base_identity']:
+        raise ValueError('Executor identity drift prevents MemoryD registration recovery')
+    return digest
 
 
 def snapshot():
@@ -983,7 +1045,7 @@ def memoryd_network_allow(data):
 
 
 def register_memoryd_app(data):
-    _require_completed_memoryd_transfer(data)
+    transfer=_require_completed_memoryd_transfer(data)
     memoryd_health()
     sys.path.insert(0, str(ROOT / 'scripts'))
     import compose_control as c
@@ -995,9 +1057,56 @@ def register_memoryd_app(data):
     c.verify_compact(session)
     url = f"http://{NETWORK['gateway']}:8090/mcp"
     marker = STATE / 'bootstrap/memoryd-integration.json'
-    receipt = json.loads(private(marker)) if marker.exists() or marker.is_symlink() else None
-    registered = c.ensure_memoryd_app(http, url, receipt)
-    write(marker, registered)
+    has_marker = marker.exists() or marker.is_symlink()
+    receipt = json.loads(private(marker)) if has_marker else None
+    if has_marker and not _valid_memoryd_receipt(receipt):
+        raise ValueError('MemoryD app receipt is invalid')
+    pending = STATE / 'bootstrap/memoryd-registration-pending.json'
+    has_intent = pending.exists() or pending.is_symlink()
+    intent = json.loads(private(pending)) if has_intent else None
+    if has_intent and not isinstance(intent,dict):
+        raise ValueError('MemoryD pending registration identity changed')
+    if not has_intent and receipt is None:
+        base=identity(NAMES['kamal']['executor'],exclude_memoryd=True)
+        context,_=http.request('GET','/api/context')
+        org=context.get('organization')
+        if not isinstance(org,str) or not org:
+            raise ValueError('MemoryD registration organization is unavailable')
+        transfer_id=transfer['transfer_manifest_sha256']
+        intent={'status':'prepared','organization':org,'url':url,
+                'transfer_manifest_sha256':transfer_id,
+                'transfer_receipt_sha256':hashlib.sha256(private(_memoryd_receipt_path(transfer_id))).hexdigest(),
+                'source_sha256':hashlib.sha256(c.devsy_app_source(url).strip().encode()).hexdigest(),
+                'base_identity':base}
+        c.write_private(pending,json.dumps(intent)+'\n')
+    first_attempt=False
+    if intent is not None:
+        if intent.get('transfer_manifest_sha256')!=transfer['transfer_manifest_sha256']:
+            raise ValueError('MemoryD pending registration transfer changed')
+        identity(NAMES['kamal']['executor'],exclude_memoryd=True)
+        first_attempt=intent['status']=='prepared'
+        if not first_attempt and receipt is None:
+            from urllib.parse import quote
+            org=intent['organization']
+            inventory,_=http.request('GET','/api/organizations/'+quote(org,safe='')+'/inventory')
+            matches=[app for app in inventory['apps'] if app.get('slug')=='memoryd' or app.get('name')=='MemoryD']
+            if len(matches)!=1:
+                raise ValueError('MemoryD pending registration has no unique imported app; inspect before retrying')
+            receipt={'organization':org,'id':matches[0]['id'],'url':url}
+    def mark_importing():
+        identity(NAMES['kamal']['executor'],exclude_memoryd=True)
+        if json.loads(private(pending))!=intent:
+            raise ValueError('MemoryD pending registration changed before import')
+        intent['status']='importing'
+        c.write_private(pending,json.dumps(intent)+'\n')
+    registered = c.ensure_memoryd_app(http, url, receipt,
+        expected_organization=intent['organization'] if intent is not None else None,
+        require_absent=first_attempt, before_import=mark_importing if first_attempt else None)
+    if intent is not None:
+        identity(NAMES['kamal']['executor'],exclude_memoryd=True)
+    c.write_private(marker, json.dumps(registered)+'\n')
+    if intent is not None:
+        pending.unlink()
     c.search_memoryd(session)
     reads = c.probe_memoryd_reads(session)
     denials = c.probe_memoryd_denials(url)
