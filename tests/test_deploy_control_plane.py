@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import shlex
+import subprocess
 import sys
 from contextlib import nullcontext
 from types import SimpleNamespace
@@ -171,6 +172,28 @@ def test_remote_source_receives_only_validated_profile_over_pinned_alias():
     remote_argv=shlex.split(argv[-1])
     assert remote_argv[-2]=='status'
     assert decode(remote_argv[-1])==instance
+
+
+def test_remote_streams_large_controller_source_without_ssh_argument_overflow(monkeypatch):
+    instance=json.loads((ROOT/'config/instance.example.json').read_text())
+    d.configure_instance(instance)
+    source='x'*200000
+    monkeypatch.setattr(d,'remote_source',lambda:source)
+    captured={}
+    def run(argv,**kwargs):
+        captured.update(argv=argv,input=kwargs['input'])
+        return type('Result',(),{'returncode':0,'stdout':'{}','stderr':''})()
+    monkeypatch.setattr(d.subprocess,'run',run)
+    assert d.remote('status',{'fixture':True})=={}
+    assert len(captured['argv'][-1])<10000
+    assert captured['input']==source+'\n'+json.dumps({'fixture':True})
+
+
+def test_remote_stdin_bootstrap_preserves_following_json():
+    source="import json,sys; print(json.dumps(json.load(sys.stdin)))"
+    result=subprocess.run([sys.executable,'-c',d.REMOTE_STDIN_BOOTSTRAP],
+        input=source+'\n'+json.dumps({'fixture':True}),capture_output=True,text=True,check=True)
+    assert json.loads(result.stdout)=={'fixture':True}
 
 
 def test_remote_source_injects_stdlib_generation_validator_without_target_install():

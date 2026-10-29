@@ -63,7 +63,27 @@ The output contains private plaintext. Keep it under the mode-`0700` recovery di
 
 The VM archives include encrypted Executor data, tunnel and service secrets, bootstrap state, Devsy configuration and context, kubeconfig, CAS target configuration, deployment ledgers, database snapshots, and the captured runtime Git bundle. The map at `vm-snapshot/cas-databases/manifest.json` identifies each SQLite snapshot's source path. The tailnet requirements file is not a full policy export. It records only the additive network grant needed by this endpoint. The collector never applies a tailnet change. Do not edit the capture manifest. Do not unpack the inner VM archives into live paths.
 
-When MemoryD is registered, the capture includes its Executor app and integration marker, but not the `codex-memoryd-data` volume or the staged MemoryD adapter. Keep a separate verified MemoryD backup. The portable transfer described in [MemoryD](CODEX_MEMORYD.md) covers active records only, not archived records.
+When the isolated MemoryD installation is healthy and registered, the capture also includes a verified whole-store backup, its manifest, and the content-addressed read-only adapter. The receipt records the store identity, active and archived record counts, approved scope, and pinned images. An absent installation is recorded explicitly; incomplete registration, transfers, or accessories stop capture. The portable transfer described in [MemoryD](CODEX_MEMORYD.md) covers active records only, not archived records.
+
+MemoryD capture requires the source database plus its WAL to total at most 32 MiB and at least 512 MiB of available VM memory. It checks available volume space before starting a memory-limited Python helper with the source volume mounted read-only. The helper uses SQLite's online backup API, including committed WAL data. The released MemoryD CLI creates its backup from that isolated snapshot, never from the live source. Capture verifies a separate writable copy and checks that verification did not alter either copy. The helpers do not restart the live daemon. Capture retains its private `/data/.memoryd-recovery-<id>` staging directory, including on failure, for operator inspection. This staging data and the captured database contain private plaintext; account for their disk use and protect them accordingly.
+
+Keep other operators and unmanaged writers from moving or removing the source database during collection. Capture refuses if the source identity changes or SQLite cannot read the WAL through the read-only mount.
+
+Capture rejects a NULL or different value in any database table's `profile_id` or `workspace_id` column. It also checks the profile and workspace catalog IDs. MemoryD permits global `policy_events` with NULL scope, so such rows block capture until their scope is resolved. Tables without either scope column include global identity and import metadata, `repos`, and FTS tables. The column check cannot establish the scope of their contents; the whole-store snapshot includes them.
+
+Capture refuses a database with any `sessions` or `visible_turns` rows. This excludes raw session and conversation history from recovery captures.
+
+An in-progress legacy transfer blocks capture even if a later transfer used the same source database and scope. For an abandoned archived-inclusive transfer followed by an approved active-only transfer, retain both source manifests, the frozen source backup, and both staged bundle sets. Stop any unmanaged importers, then run this command from the private operator checkout only after deciding to leave the archived selection unimported:
+
+```sh
+CODEX_MEMORYD_HOME="$HOME/.codex-memoryd/dakota-codex-only" \
+  CODEX_MEMORYD_RELEASE_BIN="$HOME/.local/opt/codex-memoryd/v0.1.0/bin/codex-memoryd" \
+  bin/kamal accessory reconcile-legacy memoryd --approve-legacy-abandon
+```
+
+The command verifies the released binary, frozen selections, staged hashes, destination identity, and import ledger. It creates a separate verified private backup before making the original receipt read-only. It preserves the receipt contents and path, records the abandonment, and leaves the old bundles in place. The backup and staging files contain private plaintext. If the command stops, retain the files and inspect the reported state before retrying.
+
+Guarded captures use recovery schema 3. Use the updated recovery tools to prepare and restore them; older tools reject this schema. The read-only receipt blocks known older managed importers, but it is not a security boundary against the file owner or direct Docker access. Do not change its mode or remove the abandonment record to bypass the guard.
 
 ## Configure private MinIO storage and age identities
 
@@ -339,8 +359,10 @@ python3 scripts/activate_recovery.py \
 
 The command rejects a partial approval pair before connecting. It requires the replacement VM's runtime repository to be clean at the captured `source_sha` and the VM operator account to use UID/GID `1000:1000`. The Kamal Executor image runs as that account. Activation seeds the volume with archive-preserved ownership and does not change ownership. It refuses existing Executor volumes or controller containers, non-empty state paths, and a changed Executor identity. It checks image provenance and prepared-manifest digests remotely. It starts non-tunnel services first, checks health and identity, then starts the tunnel. It preserves recovered files and the named volume if activation fails. It never falls back to Compose. Stop the existing tunnel and all writers before activation.
 
-If the captured MemoryD registration exists but both MemoryD accessories and their volume are absent, the authorized activation reports `ACTIVATED_DEGRADED`, `memoryd_discovery: UNAVAILABLE`, and `memoryd_restored: false`. The private VM receipt at `deployment/recovery-activation.json` under the instance state directory records the MemoryD result. Executor identity and single-tunnel checks still apply. Outside active recovery, a registered but unavailable MemoryD still fails the normal smoke check.
+When the generation contains MemoryD, activation restores its verified backup into a new isolated volume, starts the captured adapter, and checks the scoped read-only tools before starting the tunnel. The activation receipt records `memoryd_discovery: PASS` and `memoryd_restored: true` only after those checks succeed.
 
-Recover MemoryD separately from a verified backup or suitable portable bundles, following [MemoryD](CODEX_MEMORYD.md). Inspect the retained registration and transfer receipts before choosing a recovery procedure; this activation does not reconcile them or provide an automatic MemoryD restore. Do not delete those records to bypass the checks. Verify the restored data and Executor discovery separately before treating MemoryD as available.
+Older generations can contain a registration without a MemoryD backup. Those activate as `ACTIVATED_DEGRADED`, with `memoryd_discovery: UNAVAILABLE` and `memoryd_restored: false`; recover their MemoryD separately from a verified backup or suitable portable bundles, following [MemoryD](CODEX_MEMORYD.md). A generation with no registration records MemoryD as unregistered. The private VM receipt at `deployment/recovery-activation.json` records the result. Do not delete retained registration or transfer receipts to bypass a check.
+
+On a failed activation, the new services are stopped where ownership can be verified. The recovered files, persistent volumes, and any uncertain restore helper remain for inspection; a private bridge firewall rule may also remain. Inspect the activation and MemoryD restore receipts before retrying. Do not delete a volume or start another tunnel without verifying which instance owns it.
 
 A real encrypted bundle has been read back from private MinIO and removable media. The storage check recovered the wrapped identity and compared the restored files. This proves that bundle's encrypted readback and staging path. It does not prove a production VM was activated.

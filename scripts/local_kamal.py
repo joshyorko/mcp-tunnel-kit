@@ -20,6 +20,8 @@ HELP = '''Usage:
   bin/kamal accessory register memoryd   Register the imported read-only app
   bin/kamal accessory reconcile-registration memoryd --confirm-import-quiescent
                                        Reconcile a quiescent interrupted import
+  bin/kamal accessory reconcile-legacy memoryd --approve-legacy-abandon
+                                       Fence a proven abandoned legacy transfer
   bin/kamal deploy | rollback | preflight | status
   bin/kamal setup-local                 Install the isolated Kamal bundle
 
@@ -51,7 +53,7 @@ def parse_command(argv):
         target = argv[2] if len(argv) == 3 else 'all'
         if operation == 'reboot':
             operation = 'deploy'
-        if operation not in ('deploy', 'start', 'stop', 'details', 'transfer', 'network', 'register', 'reconcile-registration'):
+        if operation not in ('deploy', 'start', 'stop', 'details', 'transfer', 'network', 'register', 'reconcile-registration', 'reconcile-legacy'):
             raise ValueError(HELP)
     elif len(argv) == 1 and argv[0] in ('deploy', 'rollback', 'preflight', 'status', 'setup-local'):
         operation, target = argv[0], 'all'
@@ -63,7 +65,7 @@ def parse_command(argv):
         raise ValueError('Unknown control-plane accessory')
     if operation == 'deploy' and target not in ('all', 'cas', 'memoryd'):
         raise ValueError('Use deploy cas, deploy memoryd, or deploy all to retain coordinated state and identity checks')
-    if operation in ('transfer','network','register','reconcile-registration') and target != 'memoryd':
+    if operation in ('transfer','network','register','reconcile-registration','reconcile-legacy') and target != 'memoryd':
         raise ValueError('Only managed MemoryD transfer, network, and registration are supported')
     return operation, target
 
@@ -153,11 +155,17 @@ def main(argv=None):
         return 0
     try:
         confirmed = False
+        legacy_approved = False
         if argv and argv[-1] == '--confirm-import-quiescent':
             if argv[:-1] != ['accessory','reconcile-registration','memoryd']:
                 raise ValueError('--confirm-import-quiescent is only valid for MemoryD registration reconciliation')
             argv.pop()
             confirmed = True
+        if argv and argv[-1] == '--approve-legacy-abandon':
+            if argv[:-1] != ['accessory','reconcile-legacy','memoryd']:
+                raise ValueError('--approve-legacy-abandon is only valid for MemoryD legacy reconciliation')
+            argv.pop()
+            legacy_approved = True
         operation, target = parse_command(argv)
         bundle_environment()
         if operation == 'setup-local':
@@ -173,8 +181,10 @@ def main(argv=None):
                           'memoryd-transfer' if operation == 'transfer' and target == 'memoryd' else
                           'memoryd-network' if operation == 'network' and target == 'memoryd' else
                           'memoryd-register' if operation == 'register' and target == 'memoryd' else
-                          'memoryd-registration-reconcile' if operation == 'reconcile-registration' else operation,
+                          'memoryd-registration-reconcile' if operation == 'reconcile-registration' else
+                          'memoryd-legacy-reconcile' if operation == 'reconcile-legacy' else operation,
                 confirm_import_quiescent=confirmed,
+                approve_legacy_abandon=legacy_approved,
                 local=True, approve_full_stack=True, cas_digest='', cas_revision='',
             ))
         print(json.dumps(result, indent=2))

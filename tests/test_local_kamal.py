@@ -50,6 +50,19 @@ def test_registration_reconciliation_flag_is_forwarded_only_for_that_command(mon
     assert len(calls) == 1
 
 
+def test_legacy_reconciliation_approval_is_forwarded_only_for_that_command(monkeypatch):
+    calls = []
+    monkeypatch.setattr(cli, 'bundle_environment', lambda: None)
+    monkeypatch.setattr(cli.deploy, 'configure_local', lambda _path: None)
+    monkeypatch.setattr(cli.deploy, 'trusted_context', lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli.deploy, 'execute', lambda args: calls.append(args) or {'status': 'abandoned'})
+    assert cli.main(['accessory', 'reconcile-legacy', 'memoryd', '--approve-legacy-abandon']) == 0
+    assert calls[0].operation == 'memoryd-legacy-reconcile'
+    assert calls[0].approve_legacy_abandon is True
+    assert cli.main(['accessory', 'register', 'memoryd', '--approve-legacy-abandon']) == 1
+    assert len(calls) == 1
+
+
 @pytest.mark.parametrize('services', [
     {'mcp-control-plane-memoryd': {'state': 'running'},
      'mcp-control-plane-memoryd-mcp': {'state': 'running'}},

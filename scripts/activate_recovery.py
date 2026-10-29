@@ -57,6 +57,9 @@ def _validated_plan(value):
         raise ValueError("Prepared generation inventory is empty")
     if value.get("repo_source_sha") != generation["source_sha"]:
         raise ValueError("Replacement repository does not match the captured source revision")
+    memoryd=value.get('memoryd',{'status':'legacy'})
+    if not isinstance(memoryd,dict) or memoryd.get('status') not in ('legacy','absent','captured'):
+        raise ValueError('Prepared MemoryD recovery descriptor is invalid')
     proof = deploy.prove_images(generation["manifest"], generation)
     return generation, proof, value
 
@@ -85,15 +88,18 @@ def activate(args, generation, prepared):
     phase = "locked-preflight"
     boot_attempted = False
     attempted_services = []
+    memoryd=prepared.get('memoryd',{'status':'legacy'})
+    captured=memoryd.get('status')=='captured'
     activation_id = secrets.token_hex(16)
     with tempfile.TemporaryDirectory(prefix="mcp-recovery-activation-") as scratch:
-        config = deploy.configuration(scratch, manifest)
+        config = deploy.configuration(scratch, manifest,memoryd_recovery=memoryd if captured else None)
         try:
             with deploy.lock():
                 locked = deploy.remote("activation-preflight", {"generation_dir": generation_dir})
                 if (locked.get("ready") is not True
                         or locked.get("expected_identity") != expected
-                        or locked.get("prepared_manifest_sha256") != digest):
+                        or locked.get("prepared_manifest_sha256") != digest
+                        or locked.get('memoryd',{'status':'legacy'})!=memoryd):
                     raise ValueError("Prepared generation or replacement VM changed after PLAN")
 
                 phase = "activation-intent"
@@ -119,6 +125,14 @@ def activate(args, generation, prepared):
                     "manifest": manifest,
                     "activation_id": activation_id,
                 })
+                if captured:
+                    phase='memoryd-restore'
+                    boot_attempted=True
+                    restored=deploy.remote('activation-memoryd-restore',{
+                        'generation_dir':generation_dir,'prepared_manifest_sha256':digest,
+                        'activation_id':activation_id})
+                    if restored.get('status')!='verified':
+                        raise ValueError('MemoryD restore was not verified')
                 phase = "private-network"
                 deploy.remote("activation-network", {"activation_id": activation_id})
                 phase = "recovered-profile-validation"
@@ -134,6 +148,19 @@ def activate(args, generation, prepared):
 
                 phase = "devsy-start"
                 deploy.remote("devsy-start")
+                if captured:
+                    for name in deploy.MEMORYD_ORDER:
+                        phase='boot-'+name
+                        boot_attempted=True;attempted_services.append(name)
+                        deploy.kamal(config,'boot',name)
+                        deploy.remote('activation-track',{'activation_id':activation_id,'service':name})
+                    phase='memoryd-health'
+                    health=deploy.remote('activation-memoryd-wait',{'activation_id':activation_id})
+                    if health.get('status')!='PASS':raise ValueError('Restored MemoryD health failed')
+                    phase='memoryd-private-network'
+                    network=deploy.remote('activation-memoryd-network',{'activation_id':activation_id})
+                    if network.get('status')!='PASS' or network.get('bridge_reachable') is not True:
+                        raise ValueError('Restored MemoryD private network failed')
                 phase = "native-and-devsy-smoke"
                 deploy.remote("smoke", {"activation_id": activation_id})
                 phase = "preserved-identity-check"
@@ -154,7 +181,8 @@ def activate(args, generation, prepared):
                     raise ValueError("Replacement VM did not reach the captured identity and single-tunnel state")
                 smoke = deploy.remote("smoke", {"activation_id": activation_id})
                 if (smoke.get("memoryd_discovery") not in ("PASS", "UNREGISTERED", "UNAVAILABLE")
-                        or smoke.get("memoryd_restored") is not False):
+                        or smoke.get("memoryd_restored") is not captured
+                        or (captured and smoke.get('memoryd_discovery')!='PASS')):
                     raise ValueError("Recovery smoke did not report MemoryD status")
                 receipt = deploy.remote("activation-record", {
                     "activation_id": activation_id,
@@ -164,7 +192,7 @@ def activate(args, generation, prepared):
                     "original_stopped_attested": True,
                 })
                 if (receipt.get("memoryd_discovery") != smoke["memoryd_discovery"]
-                        or receipt.get("memoryd_restored") is not False):
+                        or receipt.get("memoryd_restored") is not captured):
                     raise ValueError("Recovery receipt did not match MemoryD smoke status")
                 return {
                     "mode": "ACTIVATED_DEGRADED" if smoke["memoryd_discovery"] == "UNAVAILABLE" else "ACTIVATED",
@@ -173,7 +201,7 @@ def activate(args, generation, prepared):
                     "single_tunnel": True,
                     "source_sha": generation["source_sha"],
                     "memoryd_discovery": smoke["memoryd_discovery"],
-                    "memoryd_restored": False,
+                    "memoryd_restored": captured,
                 }
         except Exception:
             if boot_attempted:

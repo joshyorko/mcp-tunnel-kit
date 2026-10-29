@@ -143,6 +143,75 @@ def test_successful_activation_checks_identity_before_tunnel_and_tunnel_is_last(
     assert "compose-start" not in names and "compose-stop" not in names
 
 
+def captured_memoryd():
+    return {'status':'captured','backend_image':host.MEMORYD_IMAGE,
+            'adapter_image':'ghcr.io/joshyorko/codex-action-server@sha256:'+'e'*64,
+            'adapter_sha256':'f'*64,'backup_sha256':'d'*64}
+
+
+def test_captured_memoryd_is_restored_and_verified_before_tunnel(tmp_path):
+    controller_setup();events=[];captured=captured_memoryd()
+    def remote(action,data=None):
+        events.append(action)
+        if action=='activation-plan':return {**plan_value(),'memoryd':captured}
+        if action=='activation-preflight':return {'ready':True,'expected_identity':generation()['identity'],
+            'prepared_manifest_sha256':'b'*64,'memoryd':captured}
+        if action=='activation-memoryd-restore':return {'status':'verified'}
+        if action=='activation-memoryd-wait':return {'status':'PASS'}
+        if action=='activation-memoryd-network':return {'status':'PASS','bridge_reachable':True}
+        if action=='activation-identity':return {'identity_preserved':True}
+        if action=='snapshot':return {'authority':'kamal','identity':generation()['identity'],'tunnel_count':1}
+        if action in ('smoke','activation-record'):return {'memoryd_discovery':'PASS','memoryd_restored':True}
+        return {}
+    def kamal(_config,_op,name):events.append('boot:'+name)
+    configure,trust,proof=controller_patches()
+    with configure,trust,proof,patch.object(deploy,'remote',side_effect=remote), \
+         patch.object(deploy,'lock',return_value=nullcontext()),patch.object(deploy,'kamal',side_effect=kamal):
+        result=activation.execute(cli_args(original_stopped=True,approve_activation=True))
+    assert result['memoryd_restored'] is True and result['mode']=='ACTIVATED'
+    assert events.index('activation-memoryd-restore')<events.index('boot:memoryd')
+    assert events.index('activation-memoryd-network')<events.index('activation-identity')<events.index('boot:tunnel')
+
+
+def test_failed_memoryd_restore_never_boots_tunnel(tmp_path):
+    controller_setup();events=[];captured=captured_memoryd()
+    def remote(action,data=None):
+        events.append(action)
+        if action=='activation-plan':return {**plan_value(),'memoryd':captured}
+        if action=='activation-preflight':return {'ready':True,'expected_identity':generation()['identity'],
+            'prepared_manifest_sha256':'b'*64,'memoryd':captured}
+        if action=='activation-memoryd-restore':raise RuntimeError('fixture restore failure')
+        return {}
+    configure,trust,proof=controller_patches()
+    with configure,trust,proof,patch.object(deploy,'remote',side_effect=remote), \
+         patch.object(deploy,'lock',return_value=nullcontext()), \
+         patch.object(deploy,'kamal',side_effect=lambda _c,_op,name:events.append('boot:'+name)):
+        with pytest.raises(RuntimeError,match='retained'):
+            activation.execute(cli_args(original_stopped=True,approve_activation=True))
+    assert 'activation-memoryd-restore' in events
+    assert 'boot:tunnel' not in events and 'activation-cleanup' in events
+
+
+def test_failed_memoryd_network_check_never_boots_tunnel(tmp_path):
+    controller_setup();events=[];captured=captured_memoryd()
+    def remote(action,data=None):
+        events.append(action)
+        if action=='activation-plan':return {**plan_value(),'memoryd':captured}
+        if action=='activation-preflight':return {'ready':True,'expected_identity':generation()['identity'],
+            'prepared_manifest_sha256':'b'*64,'memoryd':captured}
+        if action=='activation-memoryd-restore':return {'status':'verified'}
+        if action=='activation-memoryd-wait':return {'status':'PASS'}
+        if action=='activation-memoryd-network':return {'status':'BLOCKED','bridge_reachable':False}
+        return {}
+    configure,trust,proof=controller_patches()
+    with configure,trust,proof,patch.object(deploy,'remote',side_effect=remote), \
+         patch.object(deploy,'lock',return_value=nullcontext()), \
+         patch.object(deploy,'kamal',side_effect=lambda _c,_op,name:events.append('boot:'+name)):
+        with pytest.raises(RuntimeError,match='retained'):
+            activation.execute(cli_args(original_stopped=True,approve_activation=True))
+    assert 'activation-memoryd-network' in events and 'boot:tunnel' not in events
+
+
 def test_identity_mismatch_never_boots_tunnel_and_cleans_only_new_accessories():
     controller_setup()
     calls=[];booted=[]
@@ -280,6 +349,131 @@ def test_activation_receipt_refuses_missing_memoryd_smoke_result(tmp_path):
     assert not (host.STORE / "recovery-activation.json").exists()
 
 
+def test_activation_receipt_requires_verified_memoryd_restore_for_captured_generation(tmp_path,monkeypatch):
+    generation_tree(tmp_path,lock=True)
+    marker_path=host.STORE/'activation-in-progress.json'
+    marker=json.loads(marker_path.read_text())
+    marker.update(status='activating',memoryd={'status':'captured'},memoryd_discovery='PASS',memoryd_restored=True)
+    host.write(marker_path,marker)
+    monkeypatch.setattr(host,'_verified_memoryd_restore',lambda _marker:{'status':'verified'})
+    data={'activation_id':'c'*32,'source_sha':'a'*40,'expected_identity':generation()['identity'],
+          'identity_preserved':True,'original_stopped_attested':True}
+    result=host.activation_record(data)
+    assert result['memoryd_restored'] is True and result['memoryd_discovery']=='PASS'
+
+
+def test_memoryd_recovery_requires_matching_verified_restore_receipt(tmp_path,monkeypatch):
+    tmp_path.chmod(0o700);monkeypatch.setattr(host,'STORE',tmp_path)
+    activation_id='c'*32
+    descriptor={'status':'captured','backup_sha256':'d'*64,'source_instance_id':'cmi_'+'e'*32,
+                'profile':'personal','workspace':'dakota-codex-only',
+                'record_count':3,'active_record_count':2,'archived_record_count':1}
+    marker={'activation_id':activation_id,'prepared_manifest_sha256':'b'*64,'memoryd':descriptor}
+    receipt={'schema_version':1,'status':'verified','activation_id':activation_id,
+             'prepared_manifest_sha256':'b'*64,'backup_sha256':'d'*64,
+             'source_instance_id':'cmi_'+'e'*32,'record_count':3,'active_record_count':2,
+             'archived_record_count':1,'volume':'codex-memoryd-data','owner_nonce':'f'*32}
+    monkeypatch.setattr(host,'_memoryd_restore_volume',lambda _id,_nonce:None,raising=False)
+    path=tmp_path/f'memoryd-restore-{activation_id}.json';host.write(path,receipt)
+    assert host._verified_memoryd_restore(marker)['status']=='verified'
+    host.write(path,{**receipt,'backup_sha256':'f'*64})
+    with pytest.raises(ValueError,match='restore receipt'):
+        host._verified_memoryd_restore(marker)
+
+
+def test_recovery_memoryd_health_requires_core_and_no_tunnel(monkeypatch):
+    marker={'status':'activating','original_stopped_attested':True,'memoryd':{'status':'captured'}}
+    groups={'kamal':{name:{'State':{'Status':'running','Health':{'Status':'healthy'}},
+                            'Config':{'Labels':{'service':host.NAMES['kamal'][name]}}}
+                     for name in ('executor','schema-proxy','cas')}}
+    monkeypatch.setattr(host,'_activation_marker',lambda _id:marker)
+    monkeypatch.setattr(host,'_verified_memoryd_restore',lambda _marker:{'status':'verified'})
+    monkeypatch.setattr(host,'inspect',lambda:('kamal',groups,[]))
+    assert host._memoryd_recovery_baseline('a'*32)=={'authority':'kamal','healthy':True,'tunnel_count':0}
+    monkeypatch.setattr(host,'inspect',lambda:('kamal',groups,['foreign-tunnel']))
+    with pytest.raises(ValueError,match='tunnel'):
+        host._memoryd_recovery_baseline('a'*32)
+
+
+def test_recovery_cleanup_stops_only_owned_memoryd_and_retains_volume(tmp_path,monkeypatch):
+    tmp_path.chmod(0o700);monkeypatch.setattr(host,'STORE',tmp_path)
+    marker={'started_services':['memoryd'],'status':'activating'}
+    monkeypatch.setattr(host,'_activation_marker',lambda _id,**kwargs:marker)
+    row={'Id':'fixture-container','Name':'/mcp-control-plane-memoryd',
+         'Config':{'Image':'fixture','Labels':{'service':'mcp-control-plane-memoryd'}},
+         'State':{'Running':True}}
+    monkeypatch.setattr(host,'_activation_container_rows',lambda:[row])
+    calls=[];monkeypatch.setattr(host,'run',lambda args,**kwargs:calls.append(args) or b'')
+    result=host.activation_cleanup('c'*32,['memoryd'])
+    assert ['docker','stop','fixture-container'] in calls
+    assert ['docker','rm','fixture-container'] in calls
+    assert not any(args[:3]==['docker','volume','rm'] for args in calls)
+    assert result['recovered_state_preserved'] is True
+
+
+def test_recovery_cleanup_rejects_forged_helper_before_removing_services(tmp_path,monkeypatch):
+    tmp_path.chmod(0o700);monkeypatch.setattr(host,'STORE',tmp_path)
+    activation_id='c'*32;nonce='d'*32
+    marker={'started_services':['memoryd'],'status':'activating','memoryd':{'status':'captured'}}
+    monkeypatch.setattr(host,'_activation_marker',lambda _id,**kwargs:marker)
+    receipt={'helper_name':'foreign-helper','owner_nonce':nonce}
+    (tmp_path/f'memoryd-restore-{activation_id}.json').write_text(json.dumps(receipt))
+    (tmp_path/f'memoryd-restore-{activation_id}.json').chmod(0o600)
+    service={'Id':'fixture-container','Name':'/mcp-control-plane-memoryd',
+             'Config':{'Image':'fixture','Labels':{'service':'mcp-control-plane-memoryd'}},
+             'State':{'Running':True}}
+    helper={'Id':'foreign','Name':'/foreign-helper',
+            'Config':{'Image':host.MEMORYD_IMAGE,'Labels':{
+                'mcp-control-plane.recovery-activation':activation_id,
+                'mcp-control-plane.restore-nonce':nonce}},'State':{'Running':True}}
+    monkeypatch.setattr(host,'_activation_container_rows',lambda:[service,helper])
+    with patch.object(host,'run') as run:
+        with pytest.raises(ValueError,match='helper'):
+            host.activation_cleanup(activation_id,['memoryd'])
+    run.assert_not_called()
+
+
+def test_recovery_cleanup_retains_verified_helper(tmp_path,monkeypatch):
+    tmp_path.chmod(0o700);monkeypatch.setattr(host,'STORE',tmp_path)
+    activation_id='c'*32;nonce='d'*32
+    name='mcp-recovery-memoryd-'+activation_id[:12]+'-'+nonce[:12]
+    marker={'started_services':[],'status':'activating','memoryd':{'status':'captured'}}
+    monkeypatch.setattr(host,'_activation_marker',lambda _id,**kwargs:marker)
+    receipt={'helper_name':name,'owner_nonce':nonce}
+    (tmp_path/f'memoryd-restore-{activation_id}.json').write_text(json.dumps(receipt))
+    (tmp_path/f'memoryd-restore-{activation_id}.json').chmod(0o600)
+    helper={'Id':'helper-id','Name':'/'+name,
+            'Config':{'Labels':{'mcp-control-plane.recovery-activation':activation_id,
+                                'mcp-control-plane.restore-nonce':nonce}},
+            'State':{'Running':True}}
+    monkeypatch.setattr(host,'_activation_container_rows',lambda:[helper])
+    monkeypatch.setattr(host,'_memoryd_restore_image',lambda _descriptor:'image-id')
+    checks=[]
+    monkeypatch.setattr(host,'_memoryd_restore_helper',lambda *args,**kwargs:checks.append((args,kwargs)))
+    monkeypatch.setattr(host,'_memoryd_restore_volume',lambda *args:checks.append(args))
+    result=host.activation_cleanup(activation_id,[])
+    assert result['memoryd_helper_retained'] is True
+    assert checks==[(('helper-id',name,activation_id,nonce,'image-id'),{'running':True}),(activation_id,nonce)]
+
+
+def test_recovery_pulls_captured_memoryd_images_before_restore(monkeypatch):
+    captured={'status':'captured','backend_image':host.MEMORYD_IMAGE,
+              'adapter_image':'ghcr.io/joshyorko/codex-action-server@sha256:'+'e'*64}
+    monkeypatch.setattr(host,'_activation_marker',lambda _id:{'memoryd':captured})
+    monkeypatch.setattr(host,'images',lambda *_args,**_kwargs:{'core':'fixture'})
+    calls=[]
+    def run(args,**kwargs):
+        calls.append(args)
+        if args[:3]==['docker','image','inspect']:
+            return json.dumps([{'Architecture':'amd64','Os':'linux'}]).encode()
+        return b''
+    monkeypatch.setattr(host,'run',run)
+    result=host.activation_pull_images({},'c'*32)
+    assert result['memoryd_images_pulled'] is True
+    assert ['docker','pull','--platform','linux/amd64',captured['backend_image']] in calls
+    assert ['docker','pull','--platform','linux/amd64',captured['adapter_image']] in calls
+
+
 def safe_vm_run(command):
     if command[:3]==["git","-C",str(host.ROOT)]:
         return b"" if command[3]=="status" else b"a"*40
@@ -287,6 +481,7 @@ def safe_vm_run(command):
     if command[:3]==["docker","volume","ls"]:return b""
     if command[:2]==["systemctl","show"]:return b"loaded\n"
     if command[:2]==["docker","network"]:return b""
+    if command[:2]==["ss","-Hln"]:return b""
     raise AssertionError(f"Unexpected non-read-only preflight command: {command}")
 
 
@@ -298,11 +493,24 @@ def test_vm_activation_plan_is_read_only_and_refuses_existing_stopped_project_co
     with patch.object(host,"current_executor_volume_owner",return_value=True):
         result=host.activation_plan(prepared_dir)
     assert result["ready"] is True
+    assert result["memoryd"]=={'status':'legacy'}
     assert not host.STATE.exists() and not host.NATIVE_SSH.exists()
     row={"Name":"/mcp-control-plane-executor-1","Config":{"Image":"executor","Labels":{"service":"mcp-control-plane-executor"}},"Mounts":[],"State":{"Status":"exited"}}
     monkeypatch.setattr(host,"_activation_container_rows",lambda:[row])
     with patch.object(host,"current_executor_volume_owner",return_value=True),pytest.raises(ValueError,match="already has control-plane"):
         host.activation_plan(prepared_dir)
+
+
+def test_vm_activation_plan_carries_the_validated_memoryd_capture(tmp_path,monkeypatch):
+    prepared_dir,prepared,_profile=generation_tree(tmp_path,lock=False)
+    captured={'status':'captured','backup_sha256':'b'*64,'adapter_sha256':'c'*64}
+    prepared['memoryd']=captured
+    monkeypatch.setattr(host,'_recovery_validator',lambda:lambda _path:prepared)
+    monkeypatch.setattr(host,'run',safe_vm_run)
+    monkeypatch.setattr(host,'network_check',lambda _network:False)
+    with patch.object(host,'current_executor_volume_owner',return_value=True):
+        result=host.activation_plan(prepared_dir)
+    assert result['memoryd']==captured
     assert not host.STATE.exists()
 
 
@@ -346,15 +554,18 @@ def test_vm_activation_plan_refuses_source_revision_mismatch_before_mutation(tmp
     assert not host.STATE.exists()
 
 
-@pytest.mark.parametrize("conflict",["volume","network","state"])
+@pytest.mark.parametrize("conflict",["volume","memoryd-volume","memoryd-container","memoryd-listener","network","state"])
 def test_vm_activation_preflight_refuses_volume_network_or_nonempty_state(tmp_path,monkeypatch,conflict):
     prepared_dir,prepared,profile=generation_tree(tmp_path,lock=False)
     monkeypatch.setattr(host,"_recovery_validator",lambda:lambda _path:prepared)
-    monkeypatch.setattr(host,"_activation_container_rows",lambda:[])
+    memoryd_row={'Name':'/mcp-control-plane-memoryd','Config':{'Image':'fixture','Labels':{'service':'mcp-control-plane-memoryd'}},'Mounts':[]}
+    monkeypatch.setattr(host,"_activation_container_rows",lambda:[memoryd_row] if conflict=='memoryd-container' else [])
     if conflict=="state":
         host.STATE.mkdir(mode=0o700);(host.STATE/"existing").write_text("preserve")
     def run(command):
         if command[:3]==["docker","volume","ls"] and conflict=="volume":return b"codex-control-plane_executor-data\n"
+        if command[:3]==["docker","volume","ls"] and conflict=="memoryd-volume":return b"codex-memoryd-data\n"
+        if command[:2]==["ss","-Hln"] and conflict=="memoryd-listener":return b"tcp LISTEN 0 128 127.0.0.1:8787 0.0.0.0:*\n"
         return safe_vm_run(command)
     monkeypatch.setattr(host,"run",run)
     monkeypatch.setattr(host,"network_check",lambda _network: (_ for _ in ()).throw(ValueError("network overlap")) if conflict=="network" else False)

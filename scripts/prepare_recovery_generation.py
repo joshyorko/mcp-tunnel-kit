@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime
 import hashlib
 import io
 import json
@@ -26,6 +27,16 @@ MAX_FILE_BYTES = 50 * 1024**3
 MAX_TOTAL_BYTES = 100 * 1024**3
 SHA256 = re.compile(r"[a-f0-9]{64}\Z")
 SOURCE_SHA = re.compile(r"[a-f0-9]{40}\Z")
+MEMORYD_IMAGE = (
+    "ghcr.io/joshyorko/codex-memoryd@sha256:"
+    "70465d5250f693d15408fe904d30e3035360d8a46ac6f1caea8c3660eac09996"
+)
+MEMORYD_ADAPTER_IMAGE = re.compile(r"ghcr\.io/joshyorko/codex-action-server@sha256:[a-f0-9]{64}\Z")
+MEMORYD_TABLES = (
+    "memory_records", "conclusions", "checkpoints", "subjects", "episodes",
+    "subject_aliases", "relations", "evidence_ledger", "procedures",
+    "memory_sources", "dream_runs", "policy_events",
+)
 TOP_LEVEL = {
     "native-endpoint",
     "instance-config",
@@ -204,7 +215,7 @@ def _sanitized_mode(mode: int, kind: str):
     return 0o700 if mode & 0o111 else 0o600
 
 
-def _scan_tar(path: Path):
+def _scan_tar(path: Path, *, guarded=False, essential=False):
     _hash_regular_file(path, allowed_modes={0o600})
     entries = {}
     total = 0
@@ -247,10 +258,17 @@ def _scan_tar(path: Path):
                     total += consumed
                     if total > MAX_TOTAL_BYTES:
                         raise _fail("A nested archive exceeds the expanded size limit.")
+                latch = essential and name == "bootstrap/memoryd-transfer.json"
+                if mode == 0o400 and (guarded or latch):
+                    if not (guarded and latch and kind == "file"):
+                        raise _fail("Unexpected read-only recovery archive member.")
+                    target_mode = 0o400
+                else:
+                    target_mode = _sanitized_mode(mode, kind)
                 entries[name] = ArchiveEntry(
                     name,
                     kind,
-                    _sanitized_mode(mode, kind),
+                    target_mode,
                     item.size,
                     digest,
                     item.name,
@@ -344,8 +362,14 @@ def _read_generation_receipt(path: Path, executor_tar: Path):
         "single_tunnel",
         "generation",
     }
-    if not expected_keys.issubset(receipt) or type(receipt["schema_version"]) is not int or receipt["schema_version"] != 1:
+    if not expected_keys.issubset(receipt) or type(receipt["schema_version"]) is not int or receipt["schema_version"] not in (1, 2, 3):
         raise _fail("The capture receipt has an unsupported schema.")
+    if receipt["schema_version"] in (2, 3):
+        _validate_memoryd_descriptor(receipt.get("memoryd"))
+    if receipt["schema_version"] == 3:
+        _validate_guard_descriptor(receipt.get("legacy_guard"))
+    elif "legacy_guard" in receipt:
+        raise _fail("A legacy import guard requires recovery schema 3.")
     if not isinstance(receipt["capture_kind"], str) or not receipt["capture_kind"]:
         raise _fail("The capture receipt has no capture kind.")
     if not isinstance(receipt["executor_sha256"], str) or not SHA256.fullmatch(receipt["executor_sha256"]):
@@ -435,6 +459,375 @@ def _validate_sqlite(path: Path):
         raise _fail("A CAS database snapshot failed read-only SQLite integrity_check.")
 
 
+def _validate_memoryd_descriptor(value):
+    if not isinstance(value, dict):
+        raise _fail("The MemoryD capture descriptor is invalid.")
+    if value == {"status": "absent"}:
+        return
+    keys = {
+        "status", "backend_image", "adapter_image", "adapter_sha256", "backup_sha256",
+        "backup_manifest_sha256", "backup_size_bytes", "source_instance_id", "record_count",
+        "active_record_count", "archived_record_count", "profile", "workspace", "captured_at",
+    }
+    if (set(value) != keys or value.get("status") != "captured"
+            or value.get("backend_image") != MEMORYD_IMAGE
+            or not isinstance(value.get("adapter_image"), str)
+            or not MEMORYD_ADAPTER_IMAGE.fullmatch(value["adapter_image"])
+            or any(not isinstance(value.get(key), str) or not SHA256.fullmatch(value[key])
+                   for key in ("adapter_sha256", "backup_sha256", "backup_manifest_sha256"))
+            or type(value.get("backup_size_bytes")) is not int
+            or not 0 < value["backup_size_bytes"] <= MAX_FILE_BYTES
+            or not isinstance(value.get("source_instance_id"), str)
+            or not re.fullmatch(r"cmi_[a-f0-9]{32}", value["source_instance_id"])
+            or any(type(value.get(key)) is not int or value[key] < 0
+                   for key in ("record_count", "active_record_count", "archived_record_count"))
+            or value["record_count"] != value["active_record_count"] + value["archived_record_count"]
+            or value.get("profile") != "personal" or value.get("workspace") != "dakota-codex-only"):
+        raise _fail("The MemoryD capture descriptor is invalid.")
+    try:
+        timestamp = value["captured_at"]
+        if not isinstance(timestamp, str) or len(timestamp) > 64:
+            raise ValueError
+        parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise ValueError
+    except (KeyError, ValueError, TypeError):
+        raise _fail("The MemoryD backup timestamp is invalid.") from None
+
+
+def _memoryd_pin(descriptor):
+    return {"schema_version": 1, "image": descriptor["adapter_image"],
+            "adapter_sha256": descriptor["adapter_sha256"]}
+
+
+def _matches_memoryd_pin(value, descriptor):
+    return (isinstance(value, dict) and type(value.get("schema_version")) is int
+            and value == _memoryd_pin(descriptor))
+
+
+def _memoryd_scope(database, descriptor):
+    tables = database.execute(
+        "SELECT name FROM sqlite_schema WHERE type='table' AND name NOT GLOB 'sqlite_*'"
+    ).fetchall()
+    names = {row[0] for row in tables}
+    if not {"profiles", "workspaces"}.issubset(names):
+        raise _fail("MemoryD backup scope catalogs are missing.")
+    for (table,) in tables:
+        identifier = '"' + table.replace('"', '""') + '"'
+        if table.lower() in {"sessions", "visible_turns"}:
+            if database.execute(f"SELECT 1 FROM {identifier} LIMIT 1").fetchone() is not None:
+                raise _fail("MemoryD backup contains session history.")
+        columns = {row[0].lower(): row[0] for row in database.execute(
+            "SELECT name FROM pragma_table_xinfo(?)", (table,)
+        )}
+        # SQLite and FTS bookkeeping without scope columns carries no scope to
+        # validate. A NULL policy-event scope is not proof of a global event.
+        checks = {"profile_id": descriptor["profile"], "workspace_id": descriptor["workspace"]}
+        if table == "profiles":
+            checks["id"] = descriptor["profile"]
+        elif table == "workspaces":
+            checks["id"] = descriptor["workspace"]
+        if table in {"profiles", "workspaces"} and "id" not in columns:
+            raise _fail("MemoryD backup scope catalogs are invalid.")
+        if table == "workspaces" and "profile_id" not in columns:
+            raise _fail("MemoryD backup workspace catalog has no profile binding.")
+        for column, expected in checks.items():
+            if column not in columns:
+                continue
+            quoted = '"' + columns[column].replace('"', '""') + '"'
+            query = (f"SELECT 1 FROM {identifier} WHERE {quoted} IS NULL "
+                     f"OR typeof({quoted}) != 'text' OR {quoted} COLLATE BINARY != ? LIMIT 1")
+            if database.execute(query, (expected,)).fetchone() is not None:
+                raise _fail("MemoryD backup contains missing or out-of-scope data.")
+
+
+def _memoryd_database(path: Path, descriptor: dict, manifest: dict):
+    try:
+        database = sqlite3.connect(path.as_uri() + "?mode=ro&immutable=1", uri=True)
+        try:
+            if database.execute("PRAGMA integrity_check").fetchall() != [("ok",)]:
+                raise _fail("MemoryD backup integrity validation failed.")
+            versions = database.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchall()
+            instances = database.execute("SELECT singleton_key, instance_id FROM instance_metadata").fetchall()
+            if versions != [("13",)] or instances != [("default", descriptor["source_instance_id"])]:
+                raise _fail("MemoryD backup schema or instance identity does not match its capture.")
+            _memoryd_scope(database, descriptor)
+            actual = {name: database.execute(f'SELECT count(*) FROM "{name}"').fetchone()[0]
+                      for name in MEMORYD_TABLES}
+            active = database.execute(
+                "SELECT count(*) FROM memory_records WHERE profile_id=? AND workspace_id=? AND archived=0",
+                (descriptor["profile"], descriptor["workspace"]),
+            ).fetchone()[0]
+            archived = database.execute(
+                "SELECT count(*) FROM memory_records WHERE profile_id=? AND workspace_id=? AND archived=1",
+                (descriptor["profile"], descriptor["workspace"]),
+            ).fetchone()[0]
+        finally:
+            database.close()
+    except GenerationError:
+        raise
+    except (sqlite3.Error, OSError):
+        raise _fail("MemoryD backup could not be validated read-only.") from None
+    expected = {item["table"]: item["rows"] for item in manifest["tables"]}
+    if (actual != expected or actual["memory_records"] != descriptor["record_count"]
+            or active != descriptor["active_record_count"]
+            or archived != descriptor["archived_record_count"]
+            or active + archived != actual["memory_records"]):
+        raise _fail("MemoryD backup counts or scope do not match its capture.")
+
+
+def _validate_memoryd_payload(backup_dir: Path, adapter_dir: Path, descriptor: dict, *, source: bool):
+    _validate_memoryd_descriptor(descriptor)
+    if descriptor["status"] != "captured":
+        raise _fail("MemoryD backup data is not claimed by the capture.")
+    _private_directory(backup_dir)
+    _private_directory(adapter_dir)
+    expected_backup = {"backup.db", "backup.db.manifest.json"} | ({"adapter"} if source else set())
+    if ({child.name for child in backup_dir.iterdir()} != expected_backup
+            or {child.name for child in adapter_dir.iterdir()} != {"codex_memoryd_mcp.py", "artifact.json"}):
+        raise _fail("The MemoryD backup or adapter inventory is incomplete or unexpected.")
+    backup = backup_dir / "backup.db"
+    sidecar = backup_dir / "backup.db.manifest.json"
+    artifact = adapter_dir / "codex_memoryd_mcp.py"
+    artifact_receipt = adapter_dir / "artifact.json"
+    _, backup_size, backup_hash = _hash_regular_file(backup, allowed_modes={0o600})
+    _, _, sidecar_hash = _hash_regular_file(sidecar, allowed_modes={0o600})
+    _, adapter_size, adapter_hash = _hash_regular_file(artifact, allowed_modes={0o600})
+    _hash_regular_file(artifact_receipt, allowed_modes={0o600})
+    if (backup_size != descriptor["backup_size_bytes"] or backup_hash != descriptor["backup_sha256"]
+            or sidecar_hash != descriptor["backup_manifest_sha256"]
+            or adapter_hash != descriptor["adapter_sha256"] or not 0 < adapter_size <= 1024 * 1024):
+        raise _fail("MemoryD backup or adapter digests do not match the capture.")
+    artifact_info = _read_json(artifact_receipt)
+    if (set(artifact_info) != {"adapter_sha256", "size_bytes", "controller_sha"}
+            or artifact_info["adapter_sha256"] != adapter_hash
+            or type(artifact_info["size_bytes"]) is not int or artifact_info["size_bytes"] != adapter_size
+            or not isinstance(artifact_info["controller_sha"], str)
+            or not SOURCE_SHA.fullmatch(artifact_info["controller_sha"])):
+        raise _fail("MemoryD adapter receipt does not match the captured artifact.")
+    manifest = _read_json(sidecar)
+    expected_fields = {"manifest_version", "tool_version", "created_at", "database_file", "sha256",
+                       "size_bytes", "schema_version", "expected_schema_version", "tables"}
+    tables = manifest.get("tables")
+    if (set(manifest) != expected_fields or type(manifest.get("manifest_version")) is not int
+            or manifest["manifest_version"] != 1 or manifest.get("tool_version") != "0.1.0"
+            or manifest.get("created_at") != descriptor["captured_at"]
+            or manifest.get("database_file") != "backup.db"
+            or manifest.get("sha256") != "sha256:" + backup_hash
+            or type(manifest.get("size_bytes")) is not int or manifest["size_bytes"] != backup_size
+            or type(manifest.get("schema_version")) is not int or manifest["schema_version"] != 13
+            or type(manifest.get("expected_schema_version")) is not int or manifest["expected_schema_version"] != 13
+            or not isinstance(tables, list) or len(tables) != len(MEMORYD_TABLES)):
+        raise _fail("The MemoryD backup manifest is invalid.")
+    if (any(not isinstance(item, dict) or set(item) != {"table", "rows"}
+            or not isinstance(item.get("table"), str) or type(item.get("rows")) is not int
+            or item["rows"] < 0 for item in tables)
+            or {item["table"] for item in tables} != set(MEMORYD_TABLES)):
+        raise _fail("The MemoryD backup manifest table counts are invalid.")
+    _memoryd_database(backup, descriptor, manifest)
+    # SQLite validation runs immutable and the original snapshot must remain unchanged.
+    if _hash_regular_file(backup, allowed_modes={0o600})[2] != backup_hash:
+        raise _fail("The MemoryD backup changed during validation.")
+
+
+def _archive_json(archive_path: Path, entry: ArchiveEntry, *, mode=0o600):
+    if entry.kind != "file" or entry.size > MAX_JSON_BYTES:
+        raise _fail("The captured MemoryD adapter pin is invalid.")
+    try:
+        with tarfile.open(archive_path, "r:") as archive:
+            member = archive.getmember(entry.archive_path)
+            if not member.isfile() or stat.S_IMODE(member.mode) != mode:
+                raise ValueError
+            stream = archive.extractfile(member)
+            if stream is None:
+                raise ValueError
+            body = stream.read(MAX_JSON_BYTES + 1)
+        if len(body) != entry.size or hashlib.sha256(body).hexdigest() != entry.sha256:
+            raise ValueError
+        value = json.loads(body, object_pairs_hook=_no_duplicate_keys)
+        if not isinstance(value, dict):
+            raise ValueError
+        return value
+    except (OSError, tarfile.TarError, KeyError, ValueError, UnicodeDecodeError):
+        raise _fail("The captured MemoryD adapter pin is invalid.") from None
+
+
+def _validate_guard_descriptor(guard):
+    if (not isinstance(guard, dict) or set(guard) != {
+            "legacy_transfer_id", "receipt_sha256", "attestation_sha256"}
+            or any(not isinstance(guard.get(key), str) or not SHA256.fullmatch(guard[key])
+                   for key in guard)):
+        raise _fail("The legacy import guard descriptor is invalid.")
+
+
+def _validate_legacy_guard(guard, receipt, marker, memoryd, database):
+    """Check the attestation and recheck its abandoned IDs in the captured database."""
+    _validate_guard_descriptor(guard)
+    keys = {
+        "schema_version", "status", "policy", "legacy_transfer_id", "legacy_receipt_sha256",
+        "legacy_receipt_backup_sha256", "legacy_staged_manifest_sha256", "legacy_bundles",
+        "legacy_source_record_count", "active_source_record_count", "source_database_record_count",
+        "excluded_archived_record_count", "active_transfer_id", "active_receipt_sha256",
+        "active_staged_manifest_sha256", "source_database_sha256", "source_instance_id",
+        "source_profile", "source_workspace", "target_profile", "target_workspace",
+        "destination_instance_id", "verification_snapshot_sha256", "verification_active_count",
+        "verification_archived_count", "legacy_import_receipt_count", "memoryd_image", "verified_at_ns",
+        "source_backup_manifest_sha256", "legacy_selection_sha256", "active_selection_sha256",
+        "excluded_archived_selection_sha256", "pre_fence_backup_sha256", "pre_fence_manifest_sha256",
+        "pre_fence_backup_size_bytes",
+    }
+    hashes = ("legacy_staged_manifest_sha256", "active_transfer_id", "active_receipt_sha256",
+              "active_staged_manifest_sha256", "source_database_sha256", "verification_snapshot_sha256",
+              "source_backup_manifest_sha256", "legacy_selection_sha256", "active_selection_sha256",
+              "excluded_archived_selection_sha256", "pre_fence_backup_sha256", "pre_fence_manifest_sha256")
+    counts = ("legacy_source_record_count", "active_source_record_count", "source_database_record_count",
+              "excluded_archived_record_count", "verification_active_count", "verification_archived_count",
+              "legacy_import_receipt_count")
+    if (not isinstance(marker, dict) or set(marker) != keys or type(marker.get("schema_version")) is not int
+            or marker["schema_version"] != 1 or marker.get("status") != "abandoned"
+            or marker.get("policy") != "active_only" or marker.get("legacy_transfer_id") != guard["legacy_transfer_id"]
+            or marker.get("legacy_receipt_sha256") != guard["receipt_sha256"]
+            or marker.get("legacy_receipt_backup_sha256") != guard["receipt_sha256"]
+            or any(not isinstance(marker.get(k), str) or not SHA256.fullmatch(marker[k]) for k in hashes)
+            or any(type(marker.get(k)) is not int or marker[k] < 0 for k in counts)
+            or type(marker.get("verified_at_ns")) is not int or marker["verified_at_ns"] <= 0
+            or type(marker.get("pre_fence_backup_size_bytes")) is not int
+            or not 0 < marker["pre_fence_backup_size_bytes"] <= MAX_FILE_BYTES
+            or marker["legacy_import_receipt_count"] != 0
+            or marker["verification_active_count"] != marker["active_source_record_count"]
+            or marker["verification_archived_count"] != 0
+            or marker["legacy_source_record_count"] != marker["source_database_record_count"]
+            or marker["active_source_record_count"] + marker["excluded_archived_record_count"] != marker["legacy_source_record_count"]
+            or marker["active_transfer_id"] == guard["legacy_transfer_id"]
+            or marker.get("memoryd_image") != MEMORYD_IMAGE
+            or marker.get("source_profile") != "personal" or marker.get("target_profile") != "personal"
+            or marker.get("source_workspace") != "dakota-codex-only"
+            or marker.get("target_workspace") != "dakota-codex-only"
+            or not isinstance(marker.get("source_instance_id"), str)
+            or not re.fullmatch(r"cmi_[a-f0-9]{32}", marker["source_instance_id"])
+            or not isinstance(memoryd, dict) or memoryd.get("status") != "captured"
+            or marker.get("destination_instance_id") != memoryd.get("source_instance_id")):
+        raise _fail("The legacy import attestation is invalid.")
+    if (not isinstance(receipt, dict) or type(receipt.get("schema_version")) is not int
+            or receipt["schema_version"] != 1 or receipt.get("status") != "in_progress"
+            or receipt.get("bundles") != {} or "staging" in receipt
+            or receipt.get("transfer_manifest_sha256") != guard["legacy_transfer_id"]
+            or any(receipt.get(k) != marker[k] for k in (
+                "source_database_sha256", "source_instance_id", "source_profile", "source_workspace",
+                "target_profile", "target_workspace"))):
+        raise _fail("The legacy import receipt does not match its attestation.")
+    bundles = marker["legacy_bundles"]
+    if not isinstance(bundles, list) or not bundles:
+        raise _fail("The legacy bundle inventory is invalid.")
+    paths = []
+    ids = []
+    roots = 0
+    for bundle in bundles:
+        if (not isinstance(bundle, dict) or set(bundle) != {
+                "path", "size_bytes", "sha256", "bundle_id", "manifest_digest", "root_count"}
+                or not isinstance(bundle.get("path"), str)
+                or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.bundle", bundle["path"])
+                or not isinstance(bundle.get("sha256"), str) or not SHA256.fullmatch(bundle["sha256"])
+                or any(not isinstance(bundle.get(k), str) or not re.fullmatch(r"sha256:[a-f0-9]{64}", bundle[k])
+                       for k in ("bundle_id", "manifest_digest"))
+                or type(bundle.get("size_bytes")) is not int or not 0 < bundle["size_bytes"] <= 24 * 1024 * 1024
+                or type(bundle.get("root_count")) is not int or not 0 < bundle["root_count"] <= 5000):
+            raise _fail("The legacy bundle inventory is invalid.")
+        paths.append(bundle["path"])
+        ids.append(bundle["bundle_id"])
+        roots += bundle["root_count"]
+    if (paths != sorted(set(paths)) or len(ids) != len(set(ids))
+            or roots != marker["legacy_source_record_count"]):
+        raise _fail("The legacy bundle selection does not match its attestation.")
+    try:
+        db = sqlite3.connect(database.as_uri() + "?mode=ro&immutable=1", uri=True)
+        try:
+            if any(db.execute("SELECT 1 FROM bundle_import_receipts WHERE bundle_id=? LIMIT 1", (item,)).fetchone()
+                   is not None for item in ids):
+                raise _fail("The captured MemoryD ledger contains an abandoned bundle receipt.")
+        finally:
+            db.close()
+    except (sqlite3.Error, OSError):
+        raise _fail("The captured MemoryD import ledger cannot be validated.") from None
+
+
+def _validate_guard_active_receipt(marker, receipt):
+    if (not isinstance(receipt, dict) or type(receipt.get("schema_version")) is not int
+            or receipt["schema_version"] != 1 or receipt.get("status") != "complete"
+            or receipt.get("transfer_manifest_sha256") != marker["active_transfer_id"]
+            or any(receipt.get(key) != marker[key] for key in (
+                "source_database_sha256", "source_instance_id", "source_profile", "source_workspace",
+                "target_profile", "target_workspace", "destination_instance_id"))
+            or type(receipt.get("imported_record_count")) is not int
+            or receipt["imported_record_count"] != marker["active_source_record_count"]):
+        raise _fail("The completed active import receipt does not match the legacy attestation.")
+
+
+def _guard_archive(guard, entries, archive, memoryd, database):
+    _validate_guard_descriptor(guard)
+    transfer_id = guard["legacy_transfer_id"]
+    latch = entries.get("bootstrap/memoryd-transfer.json")
+    backup = entries.get("bootstrap/memoryd-legacy-receipt-" + transfer_id + ".json")
+    attestation = entries.get("bootstrap/memoryd-abandonment-" + transfer_id + ".json")
+    if (not latch or not backup or not attestation or latch.mode != 0o400
+            or backup.mode != 0o600 or attestation.mode != 0o600
+            or latch.sha256 != guard["receipt_sha256"] or backup.sha256 != guard["receipt_sha256"]
+            or attestation.sha256 != guard["attestation_sha256"]
+            or "bootstrap/memoryd-transfer-" + transfer_id + ".json" in entries
+            or any(name == "memoryd-transfer" or name.startswith("memoryd-transfer/") for name in entries)):
+        raise _fail("The legacy import guard archive is incomplete or unsafe.")
+    receipt = _archive_json(archive, latch, mode=0o400)
+    if _archive_json(archive, backup) != receipt:
+        raise _fail("The preserved legacy receipt does not match the latch.")
+    marker = _archive_json(archive, attestation)
+    _validate_legacy_guard(guard, receipt, marker, memoryd, database)
+    active = entries.get("bootstrap/memoryd-transfer-" + marker["active_transfer_id"] + ".json")
+    if not active or active.kind != "file" or active.mode != 0o600 or active.sha256 != marker["active_receipt_sha256"]:
+        raise _fail("The completed active import receipt is missing or changed.")
+    _validate_guard_active_receipt(marker, _archive_json(archive, active))
+    names = {bundle["path"] for bundle in marker["legacy_bundles"]}
+    if any(PurePosixPath(name).name in names for name in entries):
+        raise _fail("The legacy import guard must not archive staged bundle payloads.")
+
+
+def _reject_unguarded_legacy_artifacts(entries):
+    if any(name.startswith(("bootstrap/memoryd-abandonment-", "bootstrap/memoryd-legacy-receipt-"))
+           for name in entries):
+        raise _fail("Legacy import guard artifacts require recovery schema 3.")
+
+
+def _guard_generation(root, prepared, rows):
+    guard = prepared["legacy_guard"]
+    transfer_id = guard["legacy_transfer_id"]
+    latch = "state/bootstrap/memoryd-transfer.json"
+    backup = "state/bootstrap/memoryd-legacy-receipt-" + transfer_id + ".json"
+    marker = "state/bootstrap/memoryd-abandonment-" + transfer_id + ".json"
+    expected = ((latch, 0o400, guard["receipt_sha256"]),
+                (backup, 0o600, guard["receipt_sha256"]),
+                (marker, 0o600, guard["attestation_sha256"]))
+    if any(not isinstance(rows.get(name), dict) or rows[name].get("type") != "file"
+           or rows[name].get("mode") != mode or rows[name].get("sha256") != digest
+           or _hash_regular_file(root / name, allowed_modes={mode})[2] != digest
+           for name, mode, digest in expected):
+        raise _fail("The prepared legacy import guard is incomplete or unsafe.")
+    if ("state/bootstrap/memoryd-transfer-" + transfer_id + ".json" in rows
+            or any(name == "state/memoryd-transfer" or name.startswith("state/memoryd-transfer/") for name in rows)):
+        raise _fail("The prepared legacy import guard contains unexpected transfer state.")
+    attestation = _read_json(root / marker)
+    _validate_legacy_guard(guard, _read_json(root / latch, mode=0o400), attestation,
+                           prepared["memoryd"], root / "memoryd/backup.db")
+    active = "state/bootstrap/memoryd-transfer-" + attestation["active_transfer_id"] + ".json"
+    active_row = rows.get(active)
+    if (not isinstance(active_row, dict) or active_row.get("type") != "file"
+            or active_row.get("mode") != 0o600 or active_row.get("sha256") != attestation["active_receipt_sha256"]
+            or _hash_regular_file(root / active, allowed_modes={0o600})[2] != attestation["active_receipt_sha256"]):
+        raise _fail("The prepared active import receipt is missing or changed.")
+    _validate_guard_active_receipt(attestation, _read_json(root / active))
+    names = {bundle["path"] for bundle in attestation["legacy_bundles"]}
+    if any(PurePosixPath(name).name in names for name in rows):
+        raise _fail("The prepared legacy guard contains a staged bundle payload.")
+
+
 def _add_plan(plan: dict[str, dict], entry: dict):
     path = _safe_relative(entry["path"]).as_posix()
     entry["path"] = path
@@ -512,8 +905,6 @@ def _scan_input(restored_dir: Path):
     snapshot_root = restored_dir / "vm-snapshot"
     snapshot_names = {child.name for child in snapshot_root.iterdir()}
     required_snapshot = {"executor.tar", "essential.tar", "cas-databases"}
-    if not required_snapshot.issubset(snapshot_names) or snapshot_names - required_snapshot - {"runtime-source.bundle"}:
-        raise _fail("The VM snapshot is missing a required archive or contains unknown members.")
     cas_dir = snapshot_root / "cas-databases"
     _private_directory(cas_dir)
     executor_tar = snapshot_root / "executor.tar"
@@ -522,6 +913,11 @@ def _scan_input(restored_dir: Path):
     _hash_regular_file(essential_tar, allowed_modes={0o600})
     receipt_path = restored_dir / "capture-receipt"
     receipt = _read_generation_receipt(receipt_path, executor_tar)
+    memoryd = receipt.get("memoryd") if receipt["schema_version"] in (2, 3) else None
+    if memoryd and memoryd["status"] == "captured":
+        required_snapshot.add("memoryd")
+    if not required_snapshot.issubset(snapshot_names) or snapshot_names - required_snapshot - {"runtime-source.bundle"}:
+        raise _fail("The VM snapshot is missing a required archive or contains unknown members.")
     source_bundle = snapshot_root / "runtime-source.bundle"
     if source_bundle.exists():
         _hash_regular_file(source_bundle, allowed_modes={0o600})
@@ -534,8 +930,25 @@ def _scan_input(restored_dir: Path):
             raise _fail("The retained runtime source bundle cannot be verified.") from None
         if checked.returncode or checked.stdout.strip() != receipt["generation"]["source_sha"] + " HEAD":
             raise _fail("The retained runtime source bundle does not match the captured source revision.")
-    executor_entries = _scan_tar(executor_tar)
-    essential_entries = _scan_tar(essential_tar)
+    guarded = receipt["schema_version"] == 3
+    executor_entries = _scan_tar(executor_tar, guarded=guarded)
+    essential_entries = _scan_tar(essential_tar, guarded=guarded, essential=True)
+    if not guarded:
+        _reject_unguarded_legacy_artifacts(essential_entries)
+    if memoryd is not None:
+        pin_entry = essential_entries.get("bootstrap/memoryd-adapter-image.json")
+        if any(name == "memoryd-adapter" or name.startswith("memoryd-adapter/") for name in essential_entries):
+            raise _fail("MemoryD adapter data must come from the captured artifact.")
+        if memoryd["status"] == "captured":
+            memoryd_root = snapshot_root / "memoryd"
+            _validate_memoryd_payload(memoryd_root, memoryd_root / "adapter", memoryd, source=True)
+            if pin_entry and not _matches_memoryd_pin(_archive_json(essential_tar, pin_entry), memoryd):
+                raise _fail("The captured MemoryD adapter pin does not match its artifact.")
+        elif pin_entry or "bootstrap/memoryd-integration.json" in essential_entries:
+            raise _fail("An absent MemoryD capture contains registration or adapter state.")
+    if guarded:
+        _guard_archive(receipt["legacy_guard"], essential_entries, essential_tar, memoryd,
+                       snapshot_root / "memoryd/backup.db")
     external_manifest_path = cas_dir / "manifest.json"
     manifest = _parse_sqlite_manifest(external_manifest_path)
     archive_manifest_entry = essential_entries.get("cas-databases/manifest.json")
@@ -584,6 +997,7 @@ def _scan_input(restored_dir: Path):
         "cas_manifest_path": external_manifest_path,
         "cas_manifest": manifest,
         "sqlite_sources": sqlite_sources,
+        "memoryd": memoryd,
     }
 
 
@@ -630,15 +1044,41 @@ def _build_plan(restored_dir: Path, scanned: dict):
             if directory not in plan:
                 _add_plan(plan, {"path": directory, "type": "directory", "mode": 0o700, "size": 0})
             parent = parent.parent
+    memoryd = scanned["memoryd"]
+    if memoryd and memoryd["status"] == "captured":
+        source = restored_dir / "vm-snapshot/memoryd"
+        adapter_target = "state/memoryd-adapter/" + memoryd["adapter_sha256"]
+        for directory in ("memoryd", "state/memoryd-adapter", adapter_target):
+            _add_plan(plan, {"path": directory, "type": "directory", "mode": 0o700, "size": 0})
+        for relative, target in (
+            ("backup.db", "memoryd/backup.db"),
+            ("backup.db.manifest.json", "memoryd/backup.db.manifest.json"),
+            ("adapter/codex_memoryd_mcp.py", adapter_target + "/codex_memoryd_mcp.py"),
+            ("adapter/artifact.json", adapter_target + "/artifact.json"),
+        ):
+            path = source / relative
+            _, size, digest = _hash_regular_file(path, allowed_modes={0o600})
+            _add_plan(plan, {"path": target, "type": "file", "mode": 0o600,
+                             "size": size, "sha256": digest, "source": path})
+        pin_path = "state/bootstrap/memoryd-adapter-image.json"
+        if pin_path not in plan:
+            pin_bytes = _json_bytes(_memoryd_pin(memoryd))
+            _add_plan(plan, {"path": pin_path, "type": "file", "mode": 0o600,
+                             "size": len(pin_bytes), "sha256": hashlib.sha256(pin_bytes).hexdigest(),
+                             "bytes": pin_bytes})
     generation = scanned["receipt"]["generation"]
     generation_doc = {
-        "schema_version": 1,
+        "schema_version": scanned["receipt"]["schema_version"],
         "capture_kind": scanned["receipt"]["capture_kind"],
         "executor_sha256": scanned["receipt"]["executor_sha256"],
         "identity_preserved": True,
         "single_tunnel": True,
         "generation": generation,
     }
+    if memoryd is not None:
+        generation_doc["memoryd"] = memoryd
+    if scanned["receipt"]["schema_version"] == 3:
+        generation_doc["legacy_guard"] = scanned["receipt"]["legacy_guard"]
     generation_bytes = _json_bytes(generation_doc)
     if len(generation_bytes) > MAX_JSON_BYTES:
         raise _fail("Generation metadata exceeds the size limit.")
@@ -713,7 +1153,7 @@ def _write_plan_entry(output: Path, plan_entry: dict):
         raise _fail("A recovery source changed while the generation was prepared.")
 
 
-def _scan_generation_tree(path: Path):
+def _scan_generation_tree(path: Path, *, guarded=False):
     _private_directory(path)
     rows = []
     total = 0
@@ -736,9 +1176,10 @@ def _scan_generation_tree(path: Path):
             if info.st_uid != os.getuid() or info.st_nlink != 1:
                 raise _fail("Prepared generation files must be private operator-owned files.")
             mode = stat.S_IMODE(info.st_mode)
-            if mode not in INPUT_FILE_MODES:
+            is_latch = relative.as_posix() == "state/bootstrap/memoryd-transfer.json"
+            if mode not in INPUT_FILE_MODES and not (guarded and is_latch and mode == 0o400):
                 raise _fail("Prepared generation file mode is unsafe.")
-            _, size, digest = _hash_regular_file(current)
+            _, size, digest = _hash_regular_file(current, allowed_modes={mode})
             row = {"path": relative.as_posix(), "type": "file", "mode": mode, "size": size, "sha256": digest}
             rows.append(row)
             total += size
@@ -765,6 +1206,10 @@ def _validate_generation_document(generation_doc: dict):
         "single_tunnel",
         "generation",
     }
+    if generation_doc.get("schema_version") in (2, 3):
+        expected_keys.add("memoryd")
+    if generation_doc.get("schema_version") == 3:
+        expected_keys.add("legacy_guard")
     if set(generation_doc) != expected_keys:
         raise _fail("generation.json has an unsupported schema.")
     _read_generation_receipt_from_value(generation_doc)
@@ -779,8 +1224,12 @@ def _read_generation_receipt_from_value(receipt: dict):
         "single_tunnel",
         "generation",
     }
-    if not expected_keys.issubset(receipt) or type(receipt["schema_version"]) is not int or receipt["schema_version"] != 1:
+    if not expected_keys.issubset(receipt) or type(receipt["schema_version"]) is not int or receipt["schema_version"] not in (1, 2, 3):
         raise _fail("The preserved capture receipt has an unsupported schema.")
+    if receipt["schema_version"] in (2, 3):
+        _validate_memoryd_descriptor(receipt.get("memoryd"))
+    if receipt["schema_version"] == 3:
+        _validate_guard_descriptor(receipt.get("legacy_guard"))
     if not isinstance(receipt["capture_kind"], str) or not receipt["capture_kind"]:
         raise _fail("The preserved capture receipt has no capture kind.")
     if not isinstance(receipt["executor_sha256"], str) or not SHA256.fullmatch(receipt["executor_sha256"]):
@@ -824,23 +1273,33 @@ def _read_generation_receipt_from_value(receipt: dict):
 def _validate_generation(path: Path) -> dict:
     """Verify the complete prepared payload and return its manifest contract."""
     path = Path(path)
-    rows = _scan_generation_tree(path)
     manifest_path = path / "prepared-manifest.json"
     prepared = _read_json(manifest_path)
-    if set(prepared) != {
+    expected_keys = {
         "schema_version",
         "generation_file",
         "generation",
         "expected_identity",
         "inventory",
-    }:
+    }
+    if prepared.get("schema_version") in (2, 3):
+        expected_keys.add("memoryd")
+    if prepared.get("schema_version") == 3:
+        expected_keys.add("legacy_guard")
+    if set(prepared) != expected_keys:
         raise _fail("The prepared generation manifest has an unsupported schema.")
-    if type(prepared["schema_version"]) is not int or prepared["schema_version"] != 1:
+    if type(prepared["schema_version"]) is not int or prepared["schema_version"] not in (1, 2, 3):
         raise _fail("The prepared generation manifest version is unsupported.")
+    if prepared["schema_version"] == 3:
+        _validate_guard_descriptor(prepared["legacy_guard"])
+    rows = _scan_generation_tree(path, guarded=prepared["schema_version"] == 3)
     if prepared["generation_file"] != "generation.json":
         raise _fail("The prepared generation has an invalid generation metadata path.")
     generation_doc = _read_json(path / "generation.json")
-    if generation_doc.get("schema_version") != 1 or prepared["generation"] != generation_doc.get("generation"):
+    if (generation_doc.get("schema_version") != prepared["schema_version"]
+            or prepared["generation"] != generation_doc.get("generation")
+            or (prepared["schema_version"] in (2, 3) and prepared["memoryd"] != generation_doc.get("memoryd"))
+            or (prepared["schema_version"] == 3 and prepared["legacy_guard"] != generation_doc.get("legacy_guard"))):
         raise _fail("Prepared generation metadata does not match its manifest.")
     _validate_generation_document(generation_doc)
     if prepared["expected_identity"] != generation_doc["generation"].get("identity"):
@@ -866,7 +1325,9 @@ def _validate_generation(path: Path) -> dict:
         if row_type == "directory" and (row["mode"] != 0o700 or row["size"] != 0):
             raise _fail("The prepared generation inventory contains an unsafe directory.")
         if row_type == "file" and (
-            row["mode"] not in INPUT_FILE_MODES
+            (row["mode"] not in INPUT_FILE_MODES and not (
+                prepared["schema_version"] == 3 and row["path"] == "state/bootstrap/memoryd-transfer.json"
+                and row["mode"] == 0o400))
             or row["size"] > MAX_FILE_BYTES
             or not isinstance(row.get("sha256"), str)
             or not SHA256.fullmatch(row["sha256"])
@@ -884,6 +1345,8 @@ def _validate_generation(path: Path) -> dict:
         "vm.env",
         "generation.json",
     }
+    if prepared["schema_version"] in (2, 3) and prepared["memoryd"]["status"] == "captured":
+        required_top.add("memoryd")
     actual_top = {row["path"].split("/", 1)[0] for row in actual_payload}
     if actual_top != required_top:
         raise _fail("The prepared generation has missing or unexpected top-level members.")
@@ -901,6 +1364,9 @@ def _validate_generation(path: Path) -> dict:
     if not expected_directories.issubset(actual_directories):
         raise _fail("The prepared generation is missing required captured state directories.")
     row_index = {row["path"]: row for row in actual_payload}
+    if prepared["schema_version"] != 3:
+        _reject_unguarded_legacy_artifacts({name.removeprefix("state/") for name in row_index
+                                            if name.startswith("state/")})
     vm_env = row_index.get("vm.env")
     if vm_env is None or vm_env["type"] != "file" or vm_env["size"] == 0:
         raise _fail("The prepared generation has no usable VM environment file.")
@@ -914,6 +1380,22 @@ def _validate_generation(path: Path) -> dict:
         raise _fail("Prepared state has no complete CAS SQLite database set.")
     for row in database_files:
         _validate_sqlite(path / row["path"])
+    if prepared["schema_version"] in (2, 3):
+        memoryd = prepared["memoryd"]
+        if memoryd["status"] == "captured":
+            adapter_root = path / "state/memoryd-adapter"
+            _private_directory(adapter_root)
+            if {child.name for child in adapter_root.iterdir()} != {memoryd["adapter_sha256"]}:
+                raise _fail("The prepared MemoryD adapter inventory is invalid.")
+            _validate_memoryd_payload(path / "memoryd", adapter_root / memoryd["adapter_sha256"], memoryd, source=False)
+            if not _matches_memoryd_pin(_read_json(path / "state/bootstrap/memoryd-adapter-image.json"), memoryd):
+                raise _fail("The prepared MemoryD adapter pin does not match its artifact.")
+        elif any(item in actual_files for item in (
+            "state/bootstrap/memoryd-adapter-image.json", "state/bootstrap/memoryd-integration.json"
+        )) or "state/memoryd-adapter" in actual_directories:
+            raise _fail("An absent MemoryD generation contains registration or adapter state.")
+    if prepared["schema_version"] == 3:
+        _guard_generation(path, prepared, row_index)
     return prepared
 
 
@@ -947,14 +1429,18 @@ def _prepare_generation(restored_dir: Path, output_dir: Path) -> dict:
             _write_plan_entry(output_dir, plan_entry)
         for relative_path in scanned["sqlite_sources"]:
             _validate_sqlite(output_dir / "state" / PurePosixPath(relative_path))
-        inventory = _scan_generation_tree(output_dir)
+        inventory = _scan_generation_tree(output_dir, guarded=generation_doc["schema_version"] == 3)
         prepared = {
-            "schema_version": 1,
+            "schema_version": generation_doc["schema_version"],
             "generation_file": "generation.json",
             "generation": generation_doc["generation"],
             "expected_identity": generation_doc["generation"]["identity"],
             "inventory": inventory,
         }
+        if generation_doc["schema_version"] in (2, 3):
+            prepared["memoryd"] = generation_doc["memoryd"]
+        if generation_doc["schema_version"] == 3:
+            prepared["legacy_guard"] = generation_doc["legacy_guard"]
         body = _json_bytes(prepared)
         with io.BytesIO(body) as source:
             _write_file(output_dir / "prepared-manifest.json", source, 0o600, hashlib.sha256(body).hexdigest())

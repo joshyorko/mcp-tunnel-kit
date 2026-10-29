@@ -48,7 +48,8 @@ with tempfile.TemporaryDirectory(prefix='.transfer-',dir=base) as temporary:
    p=pathlib.PurePosixPath(member.name)
    if (p.is_absolute() or '..' in p.parts or not p.parts or p.parts[0]!='generation'
        or str(p)!=member.name or member.name in names or not(member.isfile() or member.isdir())
-       or member.mode not in (0o600,0o700)):
+       or (member.mode not in (0o600,0o700) and not (
+        member.isfile() and member.mode==0o400 and member.name=='generation/state/bootstrap/memoryd-transfer.json'))):
     raise ValueError('Unsafe transfer archive member')
    names.add(member.name)
   for member in members:
@@ -56,7 +57,8 @@ with tempfile.TemporaryDirectory(prefix='.transfer-',dir=base) as temporary:
    if member.isdir():p.mkdir(mode=0o700,parents=True,exist_ok=True)
    else:
     p.parent.mkdir(mode=0o700,parents=True,exist_ok=True)
-    with stream.extractfile(member) as source,p.open('xb') as output:shutil.copyfileobj(source,output)
+    fd=os.open(p,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,member.mode)
+    with stream.extractfile(member) as source,os.fdopen(fd,'wb') as output:shutil.copyfileobj(source,output)
     p.chmod(member.mode)
  source=temporary/'generation'
  metadata=module.validate_generation(source)

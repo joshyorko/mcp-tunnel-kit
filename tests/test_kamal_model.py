@@ -134,6 +134,19 @@ def test_memoryd_accessories_are_pinned_private_and_resource_limited():
     assert "port" not in bridge and "ports" not in bridge
 
 
+def test_recovery_renders_the_captured_adapter_and_image_pins():
+    captured={'status':'captured',
+        'backend_image':'ghcr.io/joshyorko/codex-memoryd@sha256:'+'70465d5250f693d15408fe904d30e3035360d8a46ac6f1caea8c3660eac09996',
+        'adapter_image':'ghcr.io/joshyorko/codex-action-server@sha256:'+'e'*64,
+        'adapter_sha256':'f'*64}
+    accessories=json.loads(kamal_model.render(profile(),manifest(),memoryd_recovery=captured))['accessories']
+    assert accessories['memoryd']['image']==captured['backend_image']
+    assert accessories['memoryd-mcp']['image']==captured['adapter_image']
+    assert '/memoryd-adapter/'+'f'*64+'/codex_memoryd_mcp.py:' in accessories['memoryd-mcp']['volumes'][0]
+    with pytest.raises(ValueError,match='MemoryD recovery'):
+        kamal_model.render(profile(),manifest(),memoryd_recovery={**captured,'adapter_image':'untrusted:latest'})
+
+
 def test_executor_origin_allowlist_adds_memoryd_only_for_opt_in_and_can_restore_prior_policy():
     config = rendered()
     executor = config["accessories"]["executor"]
