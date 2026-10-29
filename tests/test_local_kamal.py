@@ -36,43 +36,247 @@ def test_memoryd_deploy_routes_to_its_capacity_gated_controller():
     assert cli.parse_command(['accessory', 'register', 'memoryd']) == ('register', 'memoryd')
 
 
-def test_memoryd_rollback_stops_only_its_accessories_and_preserves_volume(tmp_path):
-    calls = []
-    status_reads = 0
+@pytest.mark.parametrize('services', [
+    {'mcp-control-plane-memoryd': {'state': 'running'},
+     'mcp-control-plane-memoryd-mcp': {'state': 'running'}},
+    {'mcp-control-plane-memoryd': {'state': 'exited'},
+     'mcp-control-plane-memoryd-mcp': {'state': 'running'}},
+    {'mcp-control-plane-memoryd': {'state': 'running'}},
+    {'mcp-control-plane-memoryd-mcp': {'state': 'paused'}},
+    {'mcp-control-plane-memoryd': {'state': 'unknown'}},
+])
+def test_stop_all_refuses_active_or_unknown_memoryd_before_stopping_core(tmp_path, services):
+    stopped = []
 
     def remote(action, data=None):
-        calls.append((action, data))
         if action == 'lifecycle-check':
-            return {'status': 'PASS'}
+            return state()
+        if action == 'memoryd-inventory':
+            return {'services': services, 'volume_exists': True}
         if action == 'current':
-            return {'manifest': {}, 'identity': 'existing'}
-        if action == 'memoryd-status':
-            nonlocal status_reads
-            status_reads += 1
-            if status_reads == 1:
-                return {'status': 'HEALTHY', 'volume_exists': True, 'services': {
-                    'mcp-control-plane-memoryd': {'state': 'running'},
-                    'mcp-control-plane-memoryd-mcp': {'state': 'running'},
-                }}
-            return {'status': 'STOPPED', 'volume_exists': True, 'services': {
-                'mcp-control-plane-memoryd': {'state': 'exited'},
-                'mcp-control-plane-memoryd-mcp': {'state': 'exited'},
-            }}
+            return {'authority': 'kamal', 'manifest': {}, 'identity': 'original'}
+        if action == 'status':
+            return state(running=False)
+        return {}
+
+    with patch.object(cli.deploy, 'lock', return_value=nullcontext()), \
+         patch.object(cli.deploy, 'remote', side_effect=remote), \
+         patch.object(cli.deploy, 'configuration', return_value=tmp_path / 'deploy.yml'), \
+         patch.object(cli.deploy, 'kamal', side_effect=lambda _c, _o, name: stopped.append(name)):
+        with pytest.raises(ValueError, match='stop memoryd'):
+            cli.lifecycle('stop', 'all')
+
+    assert stopped == []
+
+
+def test_stop_memoryd_inspects_owned_labels_when_core_is_down(tmp_path, monkeypatch):
+    rows = [
+        {'Id': 'db', 'Name': '/mcp-control-plane-memoryd',
+         'Config': {'Labels': {'service': 'mcp-control-plane-memoryd'}},
+         'State': {'Status': 'running', 'Running': True, 'Health': {'Status': 'healthy'}}},
+        {'Id': 'bridge', 'Name': '/mcp-control-plane-memoryd-mcp',
+         'Config': {'Labels': {'service': 'mcp-control-plane-memoryd-mcp'}},
+         'State': {'Status': 'running', 'Running': True, 'Health': {'Status': 'healthy'}}},
+    ]
+    stopped = []
+
+    def run(args, **_kwargs):
+        if args == ['docker', 'ps', '-aq']:
+            return b'db bridge'
+        if args == ['docker', 'inspect', 'db', 'bridge']:
+            return json.dumps(rows).encode()
+        if args == ['docker', 'volume', 'ls', '--format', '{{.Name}}']:
+            return b'codex-memoryd-data'
+        raise AssertionError(f'unexpected command: {args}')
+
+    def remote(action, data=None):
+        if action == 'lifecycle-check':
+            raise RuntimeError('core unavailable')
+        if action == 'memoryd-inventory':
+            return host.memoryd_inventory()
+        if action == 'current':
+            return {'authority': 'kamal', 'manifest': {}}
         raise AssertionError(f'unexpected remote action: {action}')
 
     def kamal(_config, operation, name):
-        calls.append(('kamal', (operation, name)))
+        stopped.append((operation, name))
+        stopped_state = next(row for row in rows if row['Config']['Labels']['service'] ==
+                             'mcp-control-plane-' + name)['State']
+        stopped_state.update(Status='exited', Running=False)
 
+    monkeypatch.setattr(host, 'STATE', tmp_path)
+    monkeypatch.setattr(host, 'run', run)
+    monkeypatch.setattr(host, 'memoryd_health', lambda: pytest.fail('core health must not be required'))
     with patch.object(cli.deploy, 'lock', return_value=nullcontext()), \
          patch.object(cli.deploy, 'remote', side_effect=remote), \
          patch.object(cli.deploy, 'configuration', return_value=tmp_path / 'deploy.yml'), \
          patch.object(cli.deploy, 'kamal', side_effect=kamal):
         result = cli.lifecycle('stop', 'memoryd')
 
-    assert [data for action, data in calls if action == 'kamal'] == [
-        ('stop', 'memoryd-mcp'), ('stop', 'memoryd')
-    ]
+    assert stopped == [('stop', 'memoryd-mcp'), ('stop', 'memoryd')]
     assert result['volume_exists'] is True
+    assert all(item['state'] == 'exited' for item in result['services'].values())
+
+
+def test_stop_memoryd_fails_if_an_accessory_remains_running(tmp_path):
+    inventory = {'services': {'mcp-control-plane-memoryd': {'state': 'running'}},
+                 'volume_exists': True}
+
+    def remote(action, data=None):
+        if action == 'current':
+            return {'authority': 'kamal', 'manifest': {}}
+        if action == 'memoryd-inventory':
+            return inventory
+        raise AssertionError(f'unexpected remote action: {action}')
+
+    with patch.object(cli.deploy, 'lock', return_value=nullcontext()), \
+         patch.object(cli.deploy, 'remote', side_effect=remote), \
+         patch.object(cli.deploy, 'configuration', return_value=tmp_path / 'deploy.yml'), \
+         patch.object(cli.deploy, 'kamal') as kamal:
+        with pytest.raises(RuntimeError, match='did not stop'):
+            cli.lifecycle('stop', 'memoryd')
+
+    kamal.assert_called_once_with(tmp_path / 'deploy.yml', 'stop', 'memoryd')
+    assert inventory['volume_exists'] is True
+
+
+@pytest.mark.parametrize('current', [None, {'authority': 'compose'}])
+def test_stop_memoryd_refuses_without_accepted_kamal_ownership(current):
+    def remote(action, data=None):
+        if action == 'current':
+            return current
+        raise AssertionError(f'unexpected remote action: {action}')
+
+    with patch.object(cli.deploy, 'lock', return_value=nullcontext()), \
+         patch.object(cli.deploy, 'remote', side_effect=remote), \
+         patch.object(cli.deploy, 'kamal') as kamal:
+        with pytest.raises(ValueError, match='accepted Kamal ownership'):
+            cli.lifecycle('stop', 'memoryd')
+    kamal.assert_not_called()
+
+
+def test_stop_all_does_not_stop_core_if_memoryd_inventory_fails(tmp_path):
+    def remote(action, data=None):
+        if action == 'memoryd-inventory':
+            raise RuntimeError('inventory unavailable')
+        return state()
+
+    with patch.object(cli.deploy, 'lock', return_value=nullcontext()), \
+         patch.object(cli.deploy, 'remote', side_effect=remote), \
+         patch.object(cli.deploy, 'kamal') as kamal:
+        with pytest.raises(RuntimeError, match='inventory unavailable'):
+            cli.lifecycle('stop', 'all')
+    kamal.assert_not_called()
+
+
+def test_stop_all_reports_failure_if_memoryd_becomes_active_after_preflight(tmp_path):
+    reads = iter([
+        {'services': {'mcp-control-plane-memoryd': {'state': 'exited'}}},
+        {'services': {'mcp-control-plane-memoryd': {'state': 'running'}}},
+    ])
+
+    def remote(action, data=None):
+        if action == 'memoryd-inventory':
+            return next(reads)
+        if action == 'current':
+            return {'manifest': {}, 'identity': 'original'}
+        return state(running=action == 'lifecycle-check')
+
+    with patch.object(cli.deploy, 'lock', return_value=nullcontext()), \
+         patch.object(cli.deploy, 'remote', side_effect=remote), \
+         patch.object(cli.deploy, 'configuration', return_value=tmp_path / 'deploy.yml'), \
+         patch.object(cli.deploy, 'kamal'):
+        with pytest.raises(RuntimeError, match='MemoryD is running'):
+            cli.lifecycle('stop', 'all')
+
+
+@pytest.mark.parametrize('services', [
+    {},
+    {'mcp-control-plane-memoryd': {'state': 'exited'}},
+    {'mcp-control-plane-memoryd': {'state': 'exited'},
+     'mcp-control-plane-memoryd-mcp': {'state': 'created'}},
+])
+def test_stop_all_succeeds_only_with_inactive_memoryd(tmp_path, services):
+    operations = []
+
+    def remote(action, data=None):
+        if action == 'memoryd-inventory':
+            return {'services': services, 'volume_exists': True}
+        if action == 'current':
+            return {'manifest': {}, 'identity': 'original'}
+        return state(running=action == 'lifecycle-check')
+
+    with patch.object(cli.deploy, 'lock', return_value=nullcontext()), \
+         patch.object(cli.deploy, 'remote', side_effect=remote), \
+         patch.object(cli.deploy, 'configuration', return_value=tmp_path / 'deploy.yml'), \
+         patch.object(cli.deploy, 'kamal', side_effect=lambda _c, op, name: operations.append((op, name))):
+        result = cli.lifecycle('stop', 'all')
+
+    assert operations == [('stop', 'tunnel'), ('stop', 'cas'),
+                          ('stop', 'schema-proxy'), ('stop', 'executor')]
+    assert result['memoryd']['services'] == services
+    assert result['memoryd']['volume_exists'] is True
+
+
+@pytest.mark.parametrize('services', [
+    {},
+    {'mcp-control-plane-memoryd': {'state': 'exited'},
+     'mcp-control-plane-memoryd-mcp': {'state': 'exited'}},
+])
+def test_start_all_does_not_start_absent_or_stopped_memoryd(tmp_path, services):
+    calls = []
+    initial = json.loads(json.dumps(services))
+
+    def remote(action, data=None):
+        calls.append((action, data))
+        if action == 'current':
+            return {'manifest': {}, 'identity': 'original'}
+        if action == 'snapshot':
+            return {'identity': 'original'}
+        if action == 'memoryd-inventory':
+            return {'services': services}
+        return state()
+
+    def kamal(_config, operation, name):
+        calls.append(('kamal', (operation, name)))
+        if name in ('memoryd', 'memoryd-mcp'):
+            services['mcp-control-plane-' + name] = {'state': 'running'}
+
+    with patch.object(cli.deploy, 'lock', return_value=nullcontext()), \
+         patch.object(cli.deploy, 'remote', side_effect=remote), \
+         patch.object(cli.deploy, 'configuration', return_value=tmp_path / 'deploy.yml'), \
+         patch.object(cli.deploy, 'kamal', side_effect=kamal):
+        cli.lifecycle('start', 'all')
+
+    assert services == initial
+    assert calls.count(('kamal', ('start', 'tunnel'))) == 1
+    assert calls.index(('identity-check', None)) < calls.index(('kamal', ('start', 'tunnel')))
+
+
+def test_start_all_refuses_a_tunnel_conflict_that_appears_during_startup(tmp_path):
+    started = []
+    lifecycle_checks = 0
+
+    def remote(action, data=None):
+        nonlocal lifecycle_checks
+        if action == 'lifecycle-check':
+            lifecycle_checks += 1
+            if lifecycle_checks == 2:
+                raise ValueError('Duplicate production tunnel identity')
+        if action == 'current':
+            return {'manifest': {}, 'identity': 'original'}
+        if action == 'snapshot':
+            return {'identity': 'original'}
+        return state()
+
+    with patch.object(cli.deploy, 'lock', return_value=nullcontext()), \
+         patch.object(cli.deploy, 'remote', side_effect=remote), \
+         patch.object(cli.deploy, 'configuration', return_value=tmp_path / 'deploy.yml'), \
+         patch.object(cli.deploy, 'kamal', side_effect=lambda _c, _o, name: started.append(name)):
+        with pytest.raises(ValueError, match='Duplicate production tunnel'):
+            cli.lifecycle('start', 'all')
+
+    assert started == ['executor', 'schema-proxy', 'cas']
 
 
 @pytest.mark.parametrize('argv', [
@@ -94,6 +298,8 @@ def test_full_lifecycle_orders_dependencies_and_waits_before_next_start(operatio
             return {'manifest': {}, 'identity': 'original'}
         if action == 'snapshot':
             return {'identity': 'original'}
+        if action == 'memoryd-inventory':
+            return {'services': {}, 'volume_exists': False}
         return state(running=operation == 'start')
     def kamal(config, action, name):
         calls.append(('kamal', (action, name)))

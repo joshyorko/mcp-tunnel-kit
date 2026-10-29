@@ -66,41 +66,53 @@ def parse_command(argv):
     return operation, target
 
 
+def memoryd_stopped(inventory):
+    return all(item['state'] in ('exited', 'created') for item in inventory['services'].values())
+
+
 def lifecycle(operation, target):
     """Stop/start existing containers only; never create another writer/client."""
     with deploy.lock(), tempfile.TemporaryDirectory(prefix='mcp-local-kamal-') as directory:
+        if target == 'memoryd' and operation == 'stop':
+            current = deploy.remote('current')
+            if not current or current.get('authority') != 'kamal':
+                raise ValueError('MemoryD stop requires accepted Kamal ownership')
+            state = deploy.remote('memoryd-inventory')
+            if memoryd_stopped(state):
+                return {'operation': operation, **state}
+            config = deploy.configuration(directory, current['manifest'])
+            for name in reversed(deploy.MEMORYD_ORDER):
+                item = state['services'].get('mcp-control-plane-' + name)
+                if item and item['state'] not in ('exited', 'created'):
+                    deploy.kamal(config, 'stop', name)
+            after = deploy.remote('memoryd-inventory')
+            if not memoryd_stopped(after):
+                raise RuntimeError('MemoryD accessories did not stop; persistent data was retained')
+            return {'operation': operation, **after}
         before = deploy.remote('lifecycle-check')
         if target == 'memoryd':
             state = deploy.remote('memoryd-status')
             if operation == 'details':
                 return state
-            if operation == 'stop' and state['status'] in ('ABSENT', 'VOLUME_ONLY', 'STOPPED'):
-                return {'operation': operation, **state}
             if operation == 'start' and state['status'] == 'HEALTHY':
                 return {'operation': operation, **state}
             current = deploy.remote('current')
             config = deploy.configuration(directory, current['manifest'])
-            if operation == 'stop':
-                if state['status'] not in ('HEALTHY', 'UNHEALTHY', 'PARTIAL'):
-                    raise ValueError('MemoryD state requires inspection before stop')
-                for name in reversed(deploy.MEMORYD_ORDER):
-                    if 'mcp-control-plane-' + name in state.get('services', {}):
-                        deploy.kamal(config, 'stop', name)
-                after = deploy.remote('memoryd-status')
-                if after['status'] not in ('ABSENT', 'VOLUME_ONLY', 'STOPPED'):
-                    raise RuntimeError('MemoryD accessories did not stop; persistent data was retained')
-            else:
-                if state['status'] != 'STOPPED' or state['volume_exists'] is not True:
-                    raise ValueError('MemoryD start requires both existing stopped accessories and their persistent volume')
-                for name in deploy.MEMORYD_ORDER:
-                    deploy.kamal(config, 'start', name)
-                deploy.remote('memoryd-wait')
-                after = deploy.remote('memoryd-status')
-                if after['status'] != 'HEALTHY':
-                    raise RuntimeError('MemoryD accessories did not return healthy')
+            if state['status'] != 'STOPPED' or state['volume_exists'] is not True:
+                raise ValueError('MemoryD start requires both existing stopped accessories and their persistent volume')
+            for name in deploy.MEMORYD_ORDER:
+                deploy.kamal(config, 'start', name)
+            deploy.remote('memoryd-wait')
+            after = deploy.remote('memoryd-status')
+            if after['status'] != 'HEALTHY':
+                raise RuntimeError('MemoryD accessories did not return healthy')
             return {'operation': operation, **after}
         if operation == 'details':
             return before if target == 'all' else before['inventory'][target]
+        if target == 'all' and operation == 'stop':
+            memoryd = deploy.remote('memoryd-inventory')
+            if not memoryd_stopped(memoryd):
+                raise ValueError('Stop MemoryD first: bin/kamal accessory stop memoryd')
         current = deploy.remote('current')
         config = deploy.configuration(directory, current['manifest'])
         names = list(deploy.ORDER) if target == 'all' else [target]
@@ -114,6 +126,7 @@ def lifecycle(operation, target):
                 deploy.remote('devsy-ensure')
             for name in names:
                 if name == 'tunnel':
+                    deploy.remote('lifecycle-check')
                     deploy.remote('identity-check')
                 deploy.kamal(config, 'start', name)
                 deploy.remote('wait', {'owner': 'kamal', 'service': name})
@@ -123,6 +136,11 @@ def lifecycle(operation, target):
         after = deploy.remote('status')
         if operation == 'stop' and any(after['inventory'][name]['state'] not in ('exited', 'created') for name in names):
             raise RuntimeError('A requested accessory did not stop')
+        if target == 'all' and operation == 'stop':
+            memoryd = deploy.remote('memoryd-inventory')
+            if not memoryd_stopped(memoryd):
+                raise RuntimeError('MemoryD is running; stop-all did not complete')
+            after['memoryd'] = memoryd
         return {'operation': operation, **after}
 
 

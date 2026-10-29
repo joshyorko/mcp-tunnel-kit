@@ -406,6 +406,70 @@ def test_memoryd_adapter_image_pin_is_private_and_idempotent(tmp_path,monkeypatc
     assert json.loads(vm_deploy_host.private(receipt))['image']==image
 
 
+@pytest.mark.parametrize('name,label', [
+    ('/unrelated-container', 'mcp-control-plane-memoryd'),
+    ('/mcp-control-plane-memoryd', 'unrelated-service'),
+    ('/mcp-control-plane-memoryd-mcp', 'mcp-control-plane-memoryd'),
+])
+def test_memoryd_inventory_rejects_mismatched_container_name_or_label(tmp_path, monkeypatch, name, label):
+    row = {'Name': name, 'Config': {'Labels': {'service': label}},
+           'State': {'Status': 'running', 'Health': {'Status': 'healthy'}}}
+
+    def run(args, **_kwargs):
+        if args == ['docker', 'ps', '-aq']:
+            return b'container'
+        if args == ['docker', 'inspect', 'container']:
+            return json.dumps([row]).encode()
+        if args == ['docker', 'volume', 'ls', '--format', '{{.Name}}']:
+            return b'codex-memoryd-data'
+        raise AssertionError(f'unexpected command: {args}')
+
+    monkeypatch.setattr(vm_deploy_host, 'STATE', tmp_path)
+    monkeypatch.setattr(vm_deploy_host, 'run', run)
+    with pytest.raises(ValueError, match='MemoryD accessory identity'):
+        vm_deploy_host.memoryd_inventory()
+
+
+def test_memoryd_inventory_action_is_read_only_when_core_is_unavailable(tmp_path, monkeypatch, capsys):
+    rows = [
+        {'Name': '/mcp-control-plane-memoryd',
+         'Config': {'Labels': {'service': 'mcp-control-plane-memoryd'}},
+         'State': {'Status': 'running', 'Health': {'Status': 'healthy'}}},
+        {'Name': '/mcp-control-plane-memoryd-mcp',
+         'Config': {'Labels': {'service': 'mcp-control-plane-memoryd-mcp'}},
+         'State': {'Status': 'running', 'Health': {'Status': 'healthy'}}},
+    ]
+
+    def run(args, **_kwargs):
+        if args == ['docker', 'ps', '-aq']:
+            return b'db bridge'
+        if args == ['docker', 'inspect', 'db', 'bridge']:
+            return json.dumps(rows).encode()
+        if args == ['docker', 'volume', 'ls', '--format', '{{.Name}}']:
+            return b'codex-memoryd-data'
+        raise AssertionError(f'unexpected command: {args}')
+
+    monkeypatch.setattr(vm_deploy_host, 'STATE', tmp_path)
+    monkeypatch.setattr(vm_deploy_host, 'STORE', tmp_path / 'missing-store')
+    monkeypatch.setattr(vm_deploy_host, 'run', run)
+    monkeypatch.setattr(vm_deploy_host, 'invocation_profile', lambda: ('memoryd-inventory', {}))
+    monkeypatch.setattr(vm_deploy_host, 'configure_profile', lambda _profile: None)
+    monkeypatch.setattr(vm_deploy_host.os, 'umask', lambda _mask: None)
+    def core_unavailable():
+        raise ValueError('core unavailable')
+    monkeypatch.setattr(vm_deploy_host, 'memoryd_health', core_unavailable)
+
+    vm_deploy_host.main()
+
+    result = json.loads(capsys.readouterr().out)
+    assert result['status'] == 'UNVERIFIED'
+    assert set(result['services']) == {'mcp-control-plane-memoryd', 'mcp-control-plane-memoryd-mcp'}
+    assert result['volume_exists'] is True
+    assert list(tmp_path.iterdir()) == []
+    with pytest.raises(ValueError, match='core unavailable'):
+        vm_deploy_host.memoryd_status()
+
+
 def sample_remote_manifest():
     return {
         'schema_version': 1,

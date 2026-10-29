@@ -63,9 +63,13 @@ managed operation.
 
 `bin/kamal accessory details memoryd` inspects the accessories;
 `bin/kamal accessory stop memoryd` stops the bridge before the database and
-retains the named `codex-memoryd-data` volume. Starting it again requires both
-accessories and that volume to exist. The existing Executor identity and tunnel
-are checked before and after deployment.
+retains the named `codex-memoryd-data` volume, even if the core stack is down.
+Full-stack `bin/kamal accessory stop` refuses while either MemoryD accessory is
+active. Stop MemoryD first, then stop the stack. Full-stack start leaves
+MemoryD as it was. To start it again, first start the core stack, then run
+`bin/kamal accessory start memoryd`; both accessories and the volume must
+exist. The existing Executor identity and tunnel are checked before and after
+deployment.
 
 ## Portable transfer
 

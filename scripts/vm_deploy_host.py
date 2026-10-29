@@ -496,13 +496,17 @@ def memoryd_adapter_finalize(data):
     return {'staged':True,'adapter_sha256':data['adapter_sha256'],'size_bytes':data['size_bytes']}
 
 
-def memoryd_status():
+def memoryd_inventory():
+    """Inspect labeled accessories without requiring a healthy control plane."""
     ids = run(['docker', 'ps', '-aq']).decode().split()
     rows = json.loads(run(['docker', 'inspect', *ids])) if ids else []
     services = {}
     for row in rows:
         service = (row.get('Config', {}).get('Labels') or {}).get('service')
-        if service in MEMORYD_SERVICES:
+        name = (row.get('Name') or '').lstrip('/')
+        if service in MEMORYD_SERVICES or name in MEMORYD_SERVICES:
+            if service not in MEMORYD_SERVICES or name != service:
+                raise ValueError('MemoryD accessory identity mismatch')
             if service in services:
                 raise ValueError('Duplicate MemoryD accessory identity')
             state = row.get('State', {})
@@ -510,24 +514,30 @@ def memoryd_status():
                                  'health': state.get('Health', {}).get('Status')}
     volumes = set(run(['docker', 'volume', 'ls', '--format', '{{.Name}}']).decode().split())
     marker = STATE / 'bootstrap/memoryd-integration.json'
-    adapter_sha256=None
     if not services:
         state = 'VOLUME_ONLY' if MEMORYD_VOLUME in volumes else 'ABSENT'
     elif set(services) != MEMORYD_SERVICES:
         state = 'PARTIAL'
     elif all(item['state'] in ('exited', 'created') for item in services.values()):
         state = 'STOPPED'
-    elif all(item['state'] == 'running' and item['health'] == 'healthy' for item in services.values()):
-        health=memoryd_health()
-        adapter_sha256=health.get('adapter_sha256')
-        state = 'HEALTHY'
     else:
-        state = 'UNHEALTHY'
-    result={'status': state, 'services': services,
+        state = 'UNVERIFIED'
+    return {'status': state, 'services': services,
             'volume_exists': MEMORYD_VOLUME in volumes,
             'app_registered': marker.exists() and not marker.is_symlink()}
-    if adapter_sha256:
-        result['adapter_sha256']=adapter_sha256
+
+
+def memoryd_status():
+    result = memoryd_inventory()
+    services = result['services']
+    if result['status'] == 'UNVERIFIED':
+        if all(item['state'] == 'running' and item['health'] == 'healthy' for item in services.values()):
+            health=memoryd_health()
+            result['status'] = 'HEALTHY'
+            if health.get('adapter_sha256'):
+                result['adapter_sha256'] = health['adapter_sha256']
+        else:
+            result['status'] = 'UNHEALTHY'
     return result
 
 
@@ -1833,7 +1843,7 @@ def main():
     if action=='lock':_ensure_private_state_store()
     elif action!='activation-plan' and action.startswith('activation-'):
         _verify_private_directory(STATE);_verify_private_directory(STORE)
-    elif action not in ('activation-plan','memoryd-preflight','memoryd-health','memoryd-wait','memoryd-status','memoryd-transfer-preflight','memoryd-executor-origin-check',
+    elif action not in ('activation-plan','memoryd-preflight','memoryd-health','memoryd-wait','memoryd-status','memoryd-inventory','memoryd-transfer-preflight','memoryd-executor-origin-check',
                         'devsy-plan','devsy-check','devsy-rollback-plan',
                         'devsy-tap-reconcile-plan','devsy-tap-reconcile',
                         'devsy-tap-rollback-plan','devsy-tap-rollback'):
@@ -1867,6 +1877,7 @@ def main():
     elif action=='memoryd-executor-origin-check':result=memoryd_executor_origin_check()
     elif action=='memoryd-wait':result=memoryd_wait()
     elif action=='memoryd-status':result=memoryd_status()
+    elif action=='memoryd-inventory':result=memoryd_inventory()
     elif action=='memoryd-adapter-prepare':result=memoryd_adapter_prepare(data)
     elif action=='memoryd-adapter-finalize':result=memoryd_adapter_finalize(data)
     elif action=='memoryd-transfer-preflight':result=memoryd_transfer_preflight()
