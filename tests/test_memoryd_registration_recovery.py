@@ -4,6 +4,8 @@ import io
 import json
 from pathlib import Path
 import tarfile
+from contextlib import contextmanager
+from types import SimpleNamespace
 from urllib.parse import urlsplit
 import urllib.request
 
@@ -250,6 +252,148 @@ def test_pending_import_without_a_visible_app_never_reimports(registration, monk
         host.register_memoryd_app(REQUEST)
     assert executor.imports == 0
     assert not (state / 'bootstrap/memoryd-integration.json').exists()
+
+
+def interrupted_before_post(registration, monkeypatch):
+    executor, state = registration
+    request = executor.request
+    def fail_import(method, path, body=None):
+        if method == 'POST' and path.endswith('/apps/import'):
+            raise RuntimeError('process stopped before POST')
+        return request(method, path, body)
+    monkeypatch.setattr(executor, 'request', fail_import)
+    with pytest.raises(RuntimeError, match='process stopped before POST'):
+        host.register_memoryd_app(REQUEST)
+    monkeypatch.setattr(executor, 'request', request)
+    return state / 'bootstrap/memoryd-registration-pending.json'
+
+
+@pytest.mark.parametrize('attestation', [None, False, 'true'])
+def test_operator_reconciliation_requires_explicit_attestation(registration, monkeypatch, attestation):
+    executor, state = registration
+    pending = interrupted_before_post(registration, monkeypatch)
+    original = host.private(pending)
+    with pytest.raises(ValueError):
+        host.memoryd_reconcile_pending_registration({'confirm_import_quiescent': attestation})
+    assert host.private(pending) == original
+    assert list((state / 'bootstrap').glob('memoryd-registration-intent-backup-*.json')) == []
+    assert executor.imports == 0
+
+
+def test_attested_reconciliation_backs_up_before_retrying_once(registration, monkeypatch):
+    executor, state = registration
+    pending = interrupted_before_post(registration, monkeypatch)
+    original = host.private(pending)
+    assert json.loads(original)['status'] == 'importing'
+
+    result = host.memoryd_reconcile_pending_registration({'confirm_import_quiescent': True})
+
+    backup = Path(result['backup'])
+    assert host.private(backup) == original
+    assert backup.stat().st_mode & 0o777 == 0o600
+    assert json.loads(host.private(pending))['status'] == 'prepared'
+    assert executor.imports == 0
+    assert host.register_memoryd_app(REQUEST)['app_id'] == 'app_memoryd'
+    assert host.register_memoryd_app(REQUEST)['app_id'] == 'app_memoryd'
+    assert executor.imports == 1
+    assert (state / 'bootstrap/memoryd-integration.json').exists()
+
+
+def test_interrupted_reconciliation_preserves_backup_and_can_resume(registration, monkeypatch):
+    executor, state = registration
+    pending = interrupted_before_post(registration, monkeypatch)
+    original = host.private(pending)
+    write = control.write_private
+    def fail_reset(path, value):
+        if path == pending:
+            raise RuntimeError('simulated reset interruption')
+        return write(path, value)
+    monkeypatch.setattr(control, 'write_private', fail_reset)
+    with pytest.raises(RuntimeError, match='simulated reset interruption'):
+        host.memoryd_reconcile_pending_registration({'confirm_import_quiescent': True})
+    backups = list((state / 'bootstrap').glob('memoryd-registration-intent-backup-*.json'))
+    assert len(backups) == 1 and host.private(backups[0]) == original
+    assert host.private(pending) == original and executor.imports == 0
+    monkeypatch.setattr(control, 'write_private', write)
+    result = host.memoryd_reconcile_pending_registration({'confirm_import_quiescent': True})
+    assert host.private(Path(result['backup'])) == original
+    assert json.loads(host.private(pending))['status'] == 'prepared'
+    assert executor.imports == 0
+
+
+@pytest.mark.parametrize('drift', ['matching_app', 'duplicate_apps', 'other_app', 'key',
+                                  'credential', 'recorded_base', 'organization', 'transfer', 'marker'])
+def test_operator_reconciliation_refuses_changed_state(registration, monkeypatch, drift):
+    executor, state = registration
+    pending = interrupted_before_post(registration, monkeypatch)
+    original = host.private(pending)
+    app = {'id': 'app_memoryd', 'slug': 'memoryd', 'name': 'MemoryD', 'activeDeployment': 'deployment_1'}
+    if drift == 'matching_app':
+        executor.apps.append(app)
+    elif drift == 'duplicate_apps':
+        executor.apps.extend([app, {**app, 'id': 'other_memoryd'}])
+    elif drift == 'other_app':
+        executor.apps.append({'id': 'app_extra', 'slug': 'extra', 'name': 'Extra'})
+    elif drift == 'key':
+        executor.keys['install-id'] = b'changed'
+    elif drift == 'credential':
+        (state / 'secrets/control-plane-api-key').write_text('changed')
+    elif drift == 'recorded_base':
+        host.write(state / 'deployment/current.json', {'authority': 'kamal', 'identity': 'changed'})
+    elif drift == 'organization':
+        executor.organization = 'org_other'
+    elif drift == 'transfer':
+        path = host._memoryd_receipt_path(TRANSFER_ID)
+        receipt = json.loads(host.private(path))
+        receipt['source_database_sha256'] = hashlib.sha256(b'drift').hexdigest()
+        host.write(path, receipt)
+    elif drift == 'marker':
+        host.write(state / 'bootstrap/memoryd-integration.json', {'id': 'other'})
+    with pytest.raises((ValueError, control.ControlError)):
+        host.memoryd_reconcile_pending_registration({'confirm_import_quiescent': True})
+    assert host.private(pending) == original
+    assert list((state / 'bootstrap').glob('memoryd-registration-intent-backup-*.json')) == []
+    assert executor.imports == 0
+
+
+def test_reconciliation_controller_requires_attestation_and_holds_deployment_lock(monkeypatch):
+    calls = []
+    locked = False
+    @contextmanager
+    def lock():
+        nonlocal locked
+        locked = True
+        try:
+            yield
+        finally:
+            locked = False
+    def remote(action, data=None):
+        assert locked
+        calls.append((action, data))
+        return {'status': 'prepared'}
+    monkeypatch.setattr(deploy, 'INSTANCE', {})
+    monkeypatch.setattr(deploy, 'LOCAL_CONFIGURED', True)
+    monkeypatch.setattr(deploy, 'trusted_context', lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(deploy, 'lock', lock)
+    monkeypatch.setattr(deploy, 'remote', remote)
+    monkeypatch.setenv('GITHUB_SHA', 'b' * 40)
+    args = SimpleNamespace(operation='memoryd-registration-reconcile', local=True,
+                           approve_full_stack=False, confirm_import_quiescent=False)
+    with pytest.raises(ValueError, match='quiescent'):
+        deploy.execute(args)
+    assert calls == []
+    args.confirm_import_quiescent = True
+    assert deploy.execute(args) == {'status': 'prepared'}
+    assert calls == [('memoryd-registration-reconcile', {'confirm_import_quiescent': True})]
+    calls.clear()
+    @contextmanager
+    def unavailable_lock():
+        raise RuntimeError('deployment lock unavailable')
+        yield
+    monkeypatch.setattr(deploy, 'lock', unavailable_lock)
+    with pytest.raises(RuntimeError, match='deployment lock unavailable'):
+        deploy.execute(args)
+    assert calls == []
 
 
 def test_import_with_lost_response_recovers_without_a_second_post(registration, monkeypatch):

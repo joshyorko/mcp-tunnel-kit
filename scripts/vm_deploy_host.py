@@ -219,12 +219,14 @@ def _memoryd_pending_app(intent,org,apps,get):
     return {'organization':org,'id':app['id'],'url':url}
 
 
-def identity(executor, *, exclude_memoryd=False):
+def identity(executor, *, exclude_memoryd=False, require_memoryd_absent=False):
     from urllib.request import Request,urlopen
     pat = private(STATE/'secrets/executor-pat').decode().strip()
     def get(path):
         with urlopen(Request('http://127.0.0.1:4312'+path,headers={'Authorization':'Bearer '+pat}),timeout=15) as r: return json.load(r)
     context=get('/api/context');org=context['organization'];apps=get('/api/organizations/'+org+'/inventory')['apps']
+    if require_memoryd_absent and any(app.get('slug')=='memoryd' or app.get('name')=='MemoryD' for app in apps):
+        raise ValueError('MemoryD registration reconciliation requires no matching apps')
     intent=None
     has_intent=False
     if exclude_memoryd:
@@ -1214,6 +1216,38 @@ def register_memoryd_app(data):
             'negative_checks': denials}
 
 
+def memoryd_reconcile_pending_registration(data):
+    """Reset only a verified, quiescent empty import under the controller lock."""
+    if (not isinstance(data,dict) or set(data)!={'confirm_import_quiescent'}
+            or data['confirm_import_quiescent'] is not True):
+        raise ValueError('Explicit confirmation that the MemoryD import is quiescent is required')
+    import compose_control as c
+    pending=STATE/'bootstrap/memoryd-registration-pending.json'
+    marker=STATE/'bootstrap/memoryd-integration.json'
+    _verify_private_directory(pending.parent)
+    original=private(pending)
+    intent=json.loads(original)
+    if not isinstance(intent,dict) or intent.get('status')!='importing':
+        raise ValueError('MemoryD reconciliation requires an importing registration intent')
+    if marker.exists() or marker.is_symlink():
+        raise ValueError('MemoryD reconciliation requires no app receipt')
+    identity(NAMES['kamal']['executor'],exclude_memoryd=True,require_memoryd_absent=True)
+    backup=pending.with_name('memoryd-registration-intent-backup-'+uuid.uuid4().hex+'.json')
+    fd=os.open(backup,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+    with os.fdopen(fd,'wb') as stream:
+        stream.write(original);stream.flush();os.fsync(stream.fileno())
+    directory_fd=os.open(backup.parent,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+    try:os.fsync(directory_fd)
+    finally:os.close(directory_fd)
+    if private(pending)!=original or marker.exists() or marker.is_symlink():
+        raise ValueError('MemoryD registration state changed during reconciliation')
+    identity(NAMES['kamal']['executor'],exclude_memoryd=True,require_memoryd_absent=True)
+    if private(pending)!=original or marker.exists() or marker.is_symlink():
+        raise ValueError('MemoryD registration state changed during reconciliation')
+    c.write_private(pending,json.dumps({**intent,'status':'prepared'})+'\n')
+    return {'status':'prepared','backup':str(backup),'app_created':False}
+
+
 def _verify_registered_memoryd_app():
     marker=json.loads(private(STATE/'bootstrap/memoryd-integration.json'))
     import compose_control as c
@@ -2056,7 +2090,7 @@ def main():
                         'devsy-tap-reconcile-plan','devsy-tap-reconcile',
                         'devsy-tap-rollback-plan','devsy-tap-rollback'):
         STORE.mkdir(mode=0o700,exist_ok=True)
-    data=json.load(sys.stdin) if action in ('images','image-check','network','network-check','wait','commit','baseline','set-current','rollback-commit','restart-local','activation-plan','activation-preflight','activation-begin','activation-pull-images','activation-install','activation-track','activation-seed','activation-network','activation-identity','activation-cleanup','activation-record','smoke','memoryd-adapter-prepare','memoryd-adapter-finalize','memoryd-transfer-prepare','memoryd-import-bundles','memoryd-network-allow','memoryd-app-register','memoryd-identity-reconcile','devsy-plan','devsy-check','devsy-rollback-plan','devsy-apply','devsy-rollback','devsy-scope-rebind-check','devsy-scope-rebind','devsy-bridge-path-check','devsy-bridge-path-apply','devsy-tap-reconcile-plan','devsy-tap-reconcile','devsy-tap-rollback-plan','devsy-tap-rollback') else {}
+    data=json.load(sys.stdin) if action in ('images','image-check','network','network-check','wait','commit','baseline','set-current','rollback-commit','restart-local','activation-plan','activation-preflight','activation-begin','activation-pull-images','activation-install','activation-track','activation-seed','activation-network','activation-identity','activation-cleanup','activation-record','smoke','memoryd-adapter-prepare','memoryd-adapter-finalize','memoryd-transfer-prepare','memoryd-import-bundles','memoryd-network-allow','memoryd-app-register','memoryd-registration-reconcile','memoryd-identity-reconcile','devsy-plan','devsy-check','devsy-rollback-plan','devsy-apply','devsy-rollback','devsy-scope-rebind-check','devsy-scope-rebind','devsy-bridge-path-check','devsy-bridge-path-apply','devsy-tap-reconcile-plan','devsy-tap-reconcile','devsy-tap-rollback-plan','devsy-tap-rollback') else {}
     if action=='activation-plan':result=activation_plan(data['generation_dir'])
     elif action=='activation-preflight':
         info=_ensure_empty_activation_target(data['generation_dir'],allow_lock=True)
@@ -2096,6 +2130,7 @@ def main():
     elif action=='memoryd-app-register':result=register_memoryd_app(data)
     elif action=='memoryd-registration-check':
         _verify_registered_memoryd_app();result={'registration_verified':True}
+    elif action=='memoryd-registration-reconcile':result=memoryd_reconcile_pending_registration(data)
     elif action=='memoryd-base-identity':result={'identity':identity(NAMES['kamal']['executor'],exclude_memoryd=True)}
     elif action=='memoryd-identity-reconcile':result=memoryd_reconcile_identity(data)
     elif action=='lifecycle-check':result=lifecycle_check()

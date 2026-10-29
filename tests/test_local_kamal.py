@@ -34,6 +34,20 @@ def test_memoryd_deploy_routes_to_its_capacity_gated_controller():
     assert cli.parse_command(['accessory', 'transfer', 'memoryd']) == ('transfer', 'memoryd')
     assert cli.parse_command(['accessory', 'network', 'memoryd']) == ('network', 'memoryd')
     assert cli.parse_command(['accessory', 'register', 'memoryd']) == ('register', 'memoryd')
+    assert cli.parse_command(['accessory', 'reconcile-registration', 'memoryd']) == ('reconcile-registration', 'memoryd')
+
+
+def test_registration_reconciliation_flag_is_forwarded_only_for_that_command(monkeypatch, capsys):
+    calls = []
+    monkeypatch.setattr(cli, 'bundle_environment', lambda: None)
+    monkeypatch.setattr(cli.deploy, 'configure_local', lambda _path: None)
+    monkeypatch.setattr(cli.deploy, 'trusted_context', lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli.deploy, 'execute', lambda args: calls.append(args) or {'status': 'prepared'})
+    assert cli.main(['accessory', 'reconcile-registration', 'memoryd', '--confirm-import-quiescent']) == 0
+    assert calls[0].operation == 'memoryd-registration-reconcile'
+    assert calls[0].confirm_import_quiescent is True
+    assert cli.main(['accessory', 'register', 'memoryd', '--confirm-import-quiescent']) == 1
+    assert len(calls) == 1
 
 
 @pytest.mark.parametrize('services', [

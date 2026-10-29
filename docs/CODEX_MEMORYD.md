@@ -121,6 +121,36 @@ matches the recorded identity, saves private copies of the current and previous
 deployment receipts, and records the new digest in both receipts. It refuses
 unexplained identity drift and can resume an interrupted receipt update.
 
+### Reconcile an interrupted registration before import
+
+If registration reports an importing intent but no unique MemoryD app, it will
+not retry the import automatically. On the Bluefin host, use the following
+steps from the configured checkout:
+
+1. Verify the previous registration process has exited and the Executor import
+   request cannot still complete. Check the Executor dashboard and operator
+   logs for an in-flight import. If that cannot be established, do not attest
+   or retry. If an app is present, use the normal registration retry instead;
+   it still rejects duplicate or unrelated apps.
+2. Once the import is quiescent and no MemoryD app is present, run:
+
+   ```zsh
+   bin/kamal accessory reconcile-registration memoryd --confirm-import-quiescent
+   ```
+
+   The flag attests the first step; the software cannot prove it. The command
+   holds the deployment lock, verifies the transfer receipt and recorded
+   identity, requires no app receipt or matching app, backs up the private intent,
+   and resets it to prepared. It prints the backup path and creates no app.
+   The VM's remote action is an internal interface; invoke this locked command.
+3. Check the reconciliation result is `prepared`, then separately run
+   `bin/kamal accessory register memoryd`. If the reconciliation result is
+   unknown, inspect the intent and backup before retrying.
+
+The deployment lock coordinates managed commands; it does not prevent dashboard
+changes or a previously issued import from completing. Do not use the attestation
+to guess whether either is still in progress.
+
 For rollback, disable the MemoryD app in Executor and run
 `bin/kamal accessory stop memoryd`. If the private firewall receipt says this
 deployment created the rule, remove only that exact UFW allow using the recorded
