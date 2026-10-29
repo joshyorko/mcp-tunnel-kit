@@ -918,10 +918,9 @@ def load_memoryd_transfer_set(home=None):
 
 
 def _verify_frozen_manifest(original, regenerated):
-    fields=('descriptors','counts','producer','selection','intent','policy',
-            'required_features','format_version','media_type')
-    if any(field not in original or field not in regenerated or original[field]!=regenerated[field]
-           for field in fields):
+    ignored={'created_at','bundle_id'}
+    if ({key:value for key,value in original.items() if key not in ignored}
+            != {key:value for key,value in regenerated.items() if key not in ignored}):
         raise ValueError('Portable bundle contents differ from the frozen backup')
 
 
