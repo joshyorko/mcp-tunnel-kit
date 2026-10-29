@@ -1,5 +1,7 @@
 """Capacity and non-disruption gates for the additive MemoryD deployment."""
 import sys
+import argparse
+import contextlib
 import hashlib
 import json
 import os
@@ -7,6 +9,7 @@ from pathlib import Path
 import sqlite3
 import shutil
 import stat
+import subprocess
 import zipfile
 
 import pytest
@@ -49,7 +52,7 @@ def write_transfer_fixture(home, source_root, selected_ids, archived_ids=()):
     backup.chmod(0o600)
     bundle = home / 'exports/one.bundle'
     bundle_manifest = {
-        'bundle_id': 'sha256:bundle-fixture',
+        'bundle_id': 'sha256:' + 'c' * 64,
         'producer': {'instance_id': FIXTURE_INSTANCE},
         'source_scope': {'profile': 'personal', 'workspace': 'dakota-codex-only', 'repo_id': None},
         'intent': {
@@ -101,7 +104,7 @@ def write_transfer_fixture(home, source_root, selected_ids, archived_ids=()):
             'sha256': hashlib.sha256(bundle.read_bytes()).hexdigest(),
             'size_bytes': bundle.stat().st_size,
             'bundle_id': bundle_manifest['bundle_id'],
-            'manifest_digest': 'sha256:fixture',
+            'manifest_digest': 'sha256:' + hashlib.sha256(json.dumps(bundle_manifest).encode()).hexdigest(),
             'source_instance_id': FIXTURE_INSTANCE,
             'source_scope': bundle_manifest['source_scope'],
             'destination_scope': {'profile': 'personal', 'workspace': 'dakota-codex-only', 'repo_id': None},
@@ -114,6 +117,150 @@ def write_transfer_fixture(home, source_root, selected_ids, archived_ids=()):
     (home / 'exports/kamal-test-deploy-transfer-manifest-active.json').write_text(json.dumps(metadata))
     (home / 'exports/kamal-test-deploy-transfer-manifest-active.json').chmod(0o600)
     return metadata
+
+
+def write_legacy_transfer_fixture(home, metadata, record_ids):
+    legacy = json.loads(json.dumps(metadata))
+    legacy['include_archived'] = True
+    legacy['source_record_count'] = len(record_ids)
+    bundle = home / 'exports/legacy.bundle'
+    manifest = {
+        'bundle_id': 'sha256:' + 'e' * 64, 'producer': {'instance_id': FIXTURE_INSTANCE},
+        'source_scope': {'profile': 'personal', 'workspace': 'dakota-codex-only', 'repo_id': None},
+        'intent': {'source_profile': 'personal', 'source_workspace': 'dakota-codex-only',
+                   'target_profile': 'personal', 'target_workspace': 'dakota-codex-only'},
+        'selection': {'record_ids': [public_memory_id(item) for item in record_ids], 'include_archived': True},
+        'counts': {'root_memories': len(record_ids)},
+    }
+    with zipfile.ZipFile(bundle, 'w') as archive:
+        archive.writestr('manifest.json', json.dumps(manifest))
+    bundle.chmod(0o600)
+    legacy['bundles'][0].update(path=bundle.name, sha256=hashlib.sha256(bundle.read_bytes()).hexdigest(),
+                                size_bytes=bundle.stat().st_size, bundle_id=manifest['bundle_id'],
+                                manifest_digest='sha256:' + hashlib.sha256(json.dumps(manifest).encode()).hexdigest())
+    path = home / 'exports/kamal-test-deploy-transfer-manifest.json'
+    path.write_text(json.dumps(legacy)); path.chmod(0o600)
+    return legacy
+
+
+def test_legacy_reconciliation_proves_exact_frozen_source_selection(tmp_path, monkeypatch):
+    home, source = tmp_path / 'home', tmp_path / 'source'
+    active = write_transfer_fixture(home, source, ['active'], ['archived'])
+    write_legacy_transfer_fixture(home, active, ['active', 'archived'])
+    monkeypatch.setattr(deploy_control_plane, '_verify_frozen_bundle_payloads', lambda _transfer: None)
+    monkeypatch.setattr(deploy_control_plane, '_verify_frozen_backup', lambda _transfer: None)
+    payload = deploy_control_plane.memoryd_legacy_reconciliation_payload(home)
+    assert payload['source_proof']['legacy_source_record_count'] == 2
+    assert payload['source_proof']['active_source_record_count'] == 1
+    assert payload['source_proof']['excluded_archived_record_count'] == 1
+    assert payload['source_proof']['source_database_sha256'] == active['source_database_sha256']
+    assert '"archived"' not in json.dumps(payload['source_proof'])
+
+
+def test_legacy_reconciliation_rejects_omitting_the_archived_source_id(tmp_path, monkeypatch):
+    home, source = tmp_path / 'home', tmp_path / 'source'
+    active = write_transfer_fixture(home, source, ['active'], ['archived'])
+    write_legacy_transfer_fixture(home, active, ['active'])
+    monkeypatch.setattr(deploy_control_plane, '_verify_frozen_bundle_payloads', lambda _transfer: None)
+    monkeypatch.setattr(deploy_control_plane, '_verify_frozen_backup', lambda _transfer: None)
+    with pytest.raises(ValueError):
+        deploy_control_plane.memoryd_legacy_reconciliation_payload(home)
+
+
+def test_frozen_backup_verification_only_mutates_a_scratch_copy(tmp_path, monkeypatch):
+    home, source = tmp_path / 'home', tmp_path / 'source'
+    write_transfer_fixture(home, source, ['active'], ['archived'])
+    transfer = deploy_control_plane.load_memoryd_transfer_set(home)
+    original = transfer['backup_path']
+    sidecar = original.with_name(original.name + '.manifest.json')
+    before = (original.read_bytes(), sidecar.read_bytes())
+    monkeypatch.setattr(deploy_control_plane, '_memoryd_release_binary', lambda: Path('/fixture/codex-memoryd'))
+    def verify(command, **kwargs):
+        scratch = Path(command[command.index('--path') + 1])
+        scratch_sidecar = scratch.with_name(scratch.name + '.manifest.json')
+        assert scratch != original and scratch.read_bytes() == before[0]
+        assert scratch_sidecar.read_bytes() == before[1]
+        assert kwargs['env']['CODEX_MEMORYD_DB'] == str(scratch)
+        assert Path(kwargs['env']['CODEX_MEMORYD_HOME']).parent == scratch.parent
+        scratch.write_bytes(b'mutated by verifier')
+        scratch_sidecar.write_bytes(b'mutated by verifier')
+        return subprocess.CompletedProcess(command, 0, json.dumps({
+            'ok': True, 'digest_matches': True, 'integrity_ok': True, 'schema_matches': True,
+            'manifest': {'sha256': 'sha256:' + transfer['manifest']['source_database_sha256']},
+        }).encode(), b'')
+    monkeypatch.setattr(deploy_control_plane.subprocess, 'run', verify)
+    deploy_control_plane._verify_frozen_backup(transfer)
+    assert (original.read_bytes(), sidecar.read_bytes()) == before
+
+
+@pytest.mark.skipif(not os.environ.get('CODEX_MEMORYD_TEST_BINARY'), reason='released MemoryD binary is unavailable')
+def test_frozen_backup_verification_uses_the_pinned_release_on_a_scratch_copy(tmp_path, monkeypatch):
+    binary = os.environ['CODEX_MEMORYD_TEST_BINARY']
+    source = tmp_path / 'source.db'
+    backup = tmp_path / 'backup.db'
+    env = {'PATH': '/usr/bin:/bin', 'HOME': str(tmp_path), 'CODEX_MEMORYD_HOME': str(tmp_path / 'home'),
+           'CODEX_MEMORYD_DB': str(source)}
+    subprocess.run([binary, '--local', '--db', str(source), 'conclude', '--profile', 'personal',
+                    '--workspace', 'dakota-codex-only', '--content', 'synthetic fixture'],
+                   env=env, capture_output=True, check=True, timeout=30)
+    subprocess.run([binary, '--local', '--db', str(source), 'backup', 'create', '--dest', str(backup)],
+                   env=env, capture_output=True, check=True, timeout=30)
+    before = (backup.read_bytes(), backup.with_name(backup.name + '.manifest.json').read_bytes())
+    monkeypatch.setenv('CODEX_MEMORYD_RELEASE_BIN', binary)
+    deploy_control_plane._verify_frozen_backup({'backup_path': backup})
+    assert (backup.read_bytes(), backup.with_name(backup.name + '.manifest.json').read_bytes()) == before
+
+
+def test_frozen_source_accepts_owned_empty_wal_without_touching_sidecars(tmp_path, monkeypatch):
+    home, source = tmp_path / 'home', tmp_path / 'source'
+    write_transfer_fixture(home, source, ['active'], ['archived'])
+    backup = home / 'backups/pre-transfer.db'
+    wal, shm = Path(str(backup) + '-wal'), Path(str(backup) + '-shm')
+    wal.write_bytes(b''); wal.chmod(0o600)
+    shm.write_bytes(b'x' * 32768); shm.chmod(0o600)
+    before = {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in (backup, wal, shm)}
+    real_connect = sqlite3.connect
+    def connect(database_url, **kwargs):
+        assert 'mode=ro&immutable=1' in database_url
+        return real_connect(database_url, **kwargs)
+    monkeypatch.setattr(deploy_control_plane.sqlite3, 'connect', connect)
+    deploy_control_plane.load_memoryd_transfer_set(home)
+    assert {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in before} == before
+
+
+def test_frozen_source_rejects_nonempty_wal(tmp_path):
+    home, source = tmp_path / 'home', tmp_path / 'source'
+    write_transfer_fixture(home, source, ['active'], ['archived'])
+    wal = Path(str(home / 'backups/pre-transfer.db') + '-wal')
+    wal.write_bytes(b'uncheckpointed'); wal.chmod(0o600)
+    with pytest.raises(ValueError, match='WAL'):
+        deploy_control_plane.load_memoryd_transfer_set(home)
+
+
+def test_legacy_reconciliation_requires_explicit_local_approval_and_holds_lock(monkeypatch):
+    args = argparse.Namespace(operation='memoryd-legacy-reconcile', local=True, approve_legacy_abandon=False)
+    with pytest.raises(ValueError, match='approval'):
+        deploy_control_plane.execute(args)
+    events = []
+    @contextlib.contextmanager
+    def lock():
+        events.append('lock')
+        yield
+        events.append('unlock')
+    monkeypatch.setattr(deploy_control_plane, 'INSTANCE', {'synthetic': True})
+    monkeypatch.setattr(deploy_control_plane, 'LOCAL_CONFIGURED', True)
+    monkeypatch.setattr(deploy_control_plane, 'trusted_context', lambda *_args: None)
+    monkeypatch.setattr(deploy_control_plane, 'lock', lock)
+    monkeypatch.setenv('GITHUB_SHA', 'a' * 40)
+    monkeypatch.setattr(deploy_control_plane, 'memoryd_legacy_reconciliation_payload',
+                        lambda: {'synthetic': 'proof'})
+    def remote(action, data):
+        events.append((action, data))
+        return {'status': 'abandoned'}
+    monkeypatch.setattr(deploy_control_plane, 'remote', remote)
+    args.approve_legacy_abandon = True
+    assert deploy_control_plane.execute(args)['status'] == 'abandoned'
+    assert events == ['lock', ('memoryd-legacy-reconcile', {'synthetic': 'proof', 'approved': True}), 'unlock']
 
 
 def test_memoryd_gate_blocks_below_threshold_and_reports_minimum_vm_size():
@@ -825,7 +972,7 @@ def test_memoryd_transfer_set_rejects_a_bundle_selection_that_omits_source_recor
     bundle_path = home / 'exports/one.bundle'
     with zipfile.ZipFile(bundle_path, 'w') as archive:
         archive.writestr('manifest.json', json.dumps({
-            'bundle_id': 'sha256:bundle-fixture',
+            'bundle_id': 'sha256:' + 'c' * 64,
             'producer': {'instance_id': FIXTURE_INSTANCE},
             'source_scope': {'profile': 'personal', 'workspace': 'dakota-codex-only', 'repo_id': None},
             'intent': {

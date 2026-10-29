@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import os
 import subprocess
 import sqlite3
 
@@ -65,6 +66,35 @@ def recovery(tmp_path, monkeypatch):
     monkeypatch.setattr(host, "_recovery_validator", lambda: lambda _path: prepared_data)
     return {"prepared": prepared, "sha": manifest_sha, "id": activation_id, "descriptor": descriptor,
             "store": store, "backup": backup, "manifest": manifest}
+
+
+def test_restore_accepts_schema_three_only_with_a_valid_legacy_guard(recovery):
+    guard = {'legacy_transfer_id': '1' * 64, 'receipt_sha256': '2' * 64,
+             'attestation_sha256': '3' * 64}
+    prepared = {'schema_version': 3, 'memoryd': recovery['descriptor'], 'legacy_guard': guard}
+    assert host._memoryd_restore_descriptor(prepared) == recovery['descriptor']
+    with pytest.raises(ValueError):
+        host._memoryd_restore_descriptor({**prepared, 'legacy_guard': {**guard, 'receipt_sha256': 'invalid'}})
+
+
+def test_install_fsyncs_read_only_receipt_and_parent_after_setting_mode(tmp_path, monkeypatch):
+    source = tmp_path / 'source'
+    target = tmp_path / 'target'
+    source.write_bytes(b'preserved receipt')
+    source.chmod(0o400)
+    observed = []
+    real_fsync = os.fsync
+
+    def record(fd):
+        info = os.fstat(fd)
+        observed.append((info.st_ino, info.st_mode & 0o777))
+        real_fsync(fd)
+
+    monkeypatch.setattr(host.os, 'fsync', record)
+    host._copy_verified_file(source, target, {'mode': 0o400, 'size': source.stat().st_size,
+                                             'sha256': sha(source.read_bytes())})
+    assert (target.stat().st_ino, 0o400) in observed
+    assert (tmp_path.stat().st_ino, tmp_path.stat().st_mode & 0o777) in observed
 
 
 def test_existing_volume_refused_before_writing_intent(recovery, monkeypatch):
