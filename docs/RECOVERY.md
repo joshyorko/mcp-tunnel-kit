@@ -347,16 +347,10 @@ python3 scripts/activate_recovery.py \
 
 The command rejects a partial approval pair before connecting. It requires the replacement VM's runtime repository to be clean at the captured `source_sha` and the VM operator account to use UID/GID `1000:1000`. The Kamal Executor image runs as that account. Activation seeds the volume with archive-preserved ownership and does not change ownership. It refuses existing Executor volumes or controller containers, non-empty state paths, and a changed Executor identity. It checks image provenance and prepared-manifest digests remotely. It starts non-tunnel services first, checks health and identity, then starts the tunnel. It preserves recovered files and the named volume if activation fails. It never falls back to Compose. Stop the existing tunnel and all writers before activation.
 
-If the captured MemoryD registration exists but both MemoryD accessories and their volume are absent, the authorized activation reports `ACTIVATED_DEGRADED`, `memoryd_discovery: UNAVAILABLE`, and `memoryd_restored: false`. The private VM receipt at `deployment/recovery-activation.json` under the instance state directory records the MemoryD result. Executor identity and single-tunnel checks still apply. Outside active recovery, a registered but unavailable MemoryD still fails the normal smoke check.
+When the generation contains MemoryD, activation restores its verified backup into a new isolated volume, starts the captured adapter, and checks the scoped read-only tools before starting the tunnel. The activation receipt records `memoryd_discovery: PASS` and `memoryd_restored: true` only after those checks succeed.
 
-Recover MemoryD separately from a verified backup or suitable portable bundles, following [MemoryD](CODEX_MEMORYD.md). Inspect the retained registration and transfer receipts before choosing a recovery procedure; this activation does not reconcile them or provide an automatic MemoryD restore. Do not delete those records to bypass the checks. Verify the restored data and Executor discovery separately before treating MemoryD as available.
+Older generations can contain a registration without a MemoryD backup. Those activate as `ACTIVATED_DEGRADED`, with `memoryd_discovery: UNAVAILABLE` and `memoryd_restored: false`; recover their MemoryD separately from a verified backup or suitable portable bundles, following [MemoryD](CODEX_MEMORYD.md). A generation with no registration records MemoryD as unregistered. The private VM receipt at `deployment/recovery-activation.json` records the result. Do not delete retained registration or transfer receipts to bypass a check.
 
-### MemoryD recovery work
-
-Issue #58 adds a verified MemoryD backup, its content-addressed adapter, and the
-adapter image pin to a recovery generation. Restore must use MemoryD's supported
-backup tooling into a new isolated volume, verify the restored identity and
-scope, and start the read-only provider before the existing tunnel. Older
-generations without those artifacts must continue to report degraded recovery.
+On a failed activation, the new services are stopped where ownership can be verified. The recovered files, persistent volumes, and any uncertain restore helper remain for inspection; a private bridge firewall rule may also remain. Inspect the activation and MemoryD restore receipts before retrying. Do not delete a volume or start another tunnel without verifying which instance owns it.
 
 A real encrypted bundle has been read back from private MinIO and removable media. The storage check recovered the wrapped identity and compared the restored files. This proves that bundle's encrypted readback and staging path. It does not prove a production VM was activated.
