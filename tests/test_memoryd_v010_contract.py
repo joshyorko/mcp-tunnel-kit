@@ -5,13 +5,13 @@ import importlib.util
 import json
 import os
 from pathlib import Path
-import socket
+import re
+import select
 import subprocess
 import tempfile
 import time
 import unittest
-from urllib.error import URLError
-from urllib.request import ProxyHandler, build_opener
+from urllib.request import ProxyHandler, Request, build_opener
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location(
@@ -25,7 +25,7 @@ RELEASE_BINARY_SHA256 = "6bd47e96dc225b88e5bf4eb0d45ef68eaec4df0e1582a0ad62b1930
 
 @unittest.skipUnless(os.environ.get("MEMORYD_V010_BINARY"), "pinned MemoryD v0.1.0 binary not supplied")
 class ReleasedMemorydContractTests(unittest.TestCase):
-    def test_recall_options_reach_released_http_server(self):
+    def test_recall_options_and_search_archive_policy_on_released_server(self):
         binary = Path(os.environ["MEMORYD_V010_BINARY"]).resolve()
         self.assertEqual(hashlib.sha256(binary.read_bytes()).hexdigest(), RELEASE_BINARY_SHA256)
 
@@ -33,10 +33,6 @@ class ReleasedMemorydContractTests(unittest.TestCase):
             root = Path(temp_dir)
             config = root / "config.toml"
             config.write_text("", encoding="utf-8")
-            with socket.socket() as listener:
-                listener.bind(("127.0.0.1", 0))
-                port = listener.getsockname()[1]
-            origin = f"http://127.0.0.1:{port}"
             env = {
                 "HOME": temp_dir,
                 "PATH": "/usr/bin:/bin",
@@ -47,7 +43,7 @@ class ReleasedMemorydContractTests(unittest.TestCase):
             }
             process = subprocess.Popen(
                 [str(binary), "--config", str(config), "--db", str(root / "memory.db"),
-                 "serve", "--bind", f"127.0.0.1:{port}"],
+                 "serve", "--bind", "127.0.0.1:0"],
                 cwd=temp_dir,
                 env=env,
                 stdout=subprocess.DEVNULL,
@@ -56,17 +52,24 @@ class ReleasedMemorydContractTests(unittest.TestCase):
             try:
                 opener = build_opener(ProxyHandler({}))
                 deadline = time.monotonic() + 10
+                startup_log = b""
                 while True:
                     if process.poll() is not None:
-                        self.fail(f"MemoryD exited before readiness: {process.stderr.read().decode(errors='replace')}")
-                    try:
-                        with opener.open(origin + "/healthz", timeout=0.5) as response:
-                            self.assertEqual(response.status, 200)
+                        self.fail("MemoryD exited before readiness")
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0 or not select.select([process.stderr], [], [], remaining)[0]:
+                        self.fail("MemoryD did not become ready")
+                    startup_log += os.read(process.stderr.fileno(), 4096)
+                    address = re.search(
+                        rb"codex-memoryd HTTP server listening[^\n]*127\.0\.0\.1:([0-9]+)",
+                        startup_log,
+                    )
+                    if address:
+                        origin = f"http://127.0.0.1:{int(address.group(1))}"
                         break
-                    except (OSError, URLError):
-                        if time.monotonic() >= deadline:
-                            self.fail("MemoryD did not become ready")
-                        time.sleep(0.05)
+
+                with opener.open(origin + "/healthz", timeout=1) as response:
+                    self.assertEqual(response.status, 200)
 
                 backend = bridge.MemorydBackend(origin)
                 request = {
@@ -90,6 +93,49 @@ class ReleasedMemorydContractTests(unittest.TestCase):
                 pack = json.loads(result["content"][0]["text"])["data"]["pack"]
                 self.assertEqual(pack["max_tokens"], 1200)
                 self.assertEqual(pack["mode"], "default")
+
+                def post(path, payload):
+                    if process.poll() is not None:
+                        self.fail("MemoryD exited before the synthetic request")
+                    req = Request(
+                        origin + path,
+                        data=json.dumps(payload).encode(),
+                        headers={"Content-Type": "application/json"},
+                        method="POST",
+                    )
+                    with opener.open(req, timeout=5) as response:
+                        value = json.load(response)
+                    self.assertTrue(value["ok"])
+                    return value["data"]
+
+                scope = {"profile": "personal", "workspace": "dakota-codex-only"}
+                created = post("/v1/conclusions", {
+                    **scope,
+                    "target": "user",
+                    "conclusions": ["syntheticarchiveprobe active", "syntheticarchiveprobe archived"],
+                })
+                _, archived_id = created["record_ids"]
+                forgotten = post("/v1/forget", {**scope, "ids": [archived_id], "mode": "archive"})
+                self.assertEqual(forgotten["archived"], [archived_id])
+                control = post("/v1/search", {
+                    **scope, "query": "syntheticarchiveprobe", "include_archived": True,
+                })
+                self.assertEqual(
+                    {(item["content"], item["archived"]) for item in control["matches"]},
+                    {("syntheticarchiveprobe active", False), ("syntheticarchiveprobe archived", True)},
+                )
+
+                request["params"] = {
+                    "name": "memory_search",
+                    "arguments": {"query": "syntheticarchiveprobe"},
+                }
+                result = bridge.handle_message(request, backend)["result"]
+                self.assertFalse(result["isError"])
+                matches = json.loads(result["content"][0]["text"])["data"]["matches"]
+                self.assertEqual(
+                    [(item["content"], item["archived"]) for item in matches],
+                    [("syntheticarchiveprobe active", False)],
+                )
             finally:
                 process.terminate()
                 try:
