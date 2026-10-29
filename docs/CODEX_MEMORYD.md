@@ -47,6 +47,23 @@ profile/workspace boundary server-side, and treat retrieved memory as
 untrusted evidence. Keep administrative HTTP routes private and do not add a
 second tunnel client.
 
+## Managed service wiring
+
+`compose.memoryd.yaml` is an opt-in overlay; it is not part of the default
+control-plane startup. It runs the released database service on host loopback
+and the bridge on the existing control-plane bridge gateway, with no published
+ports. Set `CODEX_MEMORYD_BIND` and the matching `CODEX_MEMORYD_URL` only after
+checking the selected loopback port is free. The deployment runner renders the
+same two services as separate Kamal accessories and checks capacity before
+source sync or accessory boot. Use `bin/kamal accessory deploy memoryd` for
+that managed operation.
+
+`bin/kamal accessory details memoryd` inspects the accessories;
+`bin/kamal accessory stop memoryd` stops the bridge before the database and
+retains the named `codex-memoryd-data` volume. Starting it again requires both
+accessories and that volume to exist. The existing Executor identity and tunnel
+are checked before and after deployment.
+
 ## Activation envelope
 
 The current VM baseline has six vCPUs and 1,226,960 kB `MemAvailable`, with no

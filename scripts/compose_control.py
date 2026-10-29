@@ -650,8 +650,8 @@ def ensure_codex_app(http, url, receipt=None):
 
 
 def ensure_mcp_app(http, url, name, receipt=None):
-    if name not in {"Codex", "Devsy"}:
-        raise ControlError("Only the configured Codex and Devsy integrations are managed.")
+    if name not in {"Codex", "Devsy", "MemoryD"}:
+        raise ControlError("Only the configured Codex, Devsy, and MemoryD integrations are managed.")
     slug = name.lower()
     context, _ = http.request("GET", "/api/context")
     organization = context.get("organization")
@@ -717,6 +717,53 @@ def ensure_mcp_app(http, url, name, receipt=None):
     return result
 
 
+def verify_memoryd_catalog(tools):
+    expected = {"memory_status", "memory_recall", "memory_search"}
+    if not isinstance(tools, list) or len(tools) != len(expected):
+        raise ControlError("MemoryD must expose exactly the three read-only tools.")
+    names = {tool.get("name") for tool in tools if isinstance(tool, dict)}
+    if names != expected:
+        raise ControlError("MemoryD tool discovery contains missing, duplicate, or write tools.")
+    for tool in tools:
+        annotations = tool.get("annotations", {})
+        schema = tool.get("inputSchema", {})
+        properties = schema.get("properties", {}) if isinstance(schema, dict) else {}
+        if (annotations.get("readOnlyHint") is not True
+                or annotations.get("destructiveHint") is not False
+                or not isinstance(properties, dict)
+                or "profile" in properties or "workspace" in properties
+                or schema.get("additionalProperties") is not False):
+            raise ControlError("MemoryD tool scope or read-only annotations are invalid.")
+
+
+def ensure_memoryd_app(http, url, receipt=None):
+    parsed = urllib.parse.urlsplit(url)
+    try:
+        address = ipaddress.ip_address(parsed.hostname)
+    except (TypeError, ValueError):
+        address = None
+    if (parsed.scheme != "http" or address is None or not address.is_private
+            or parsed.port is None or not 1 <= parsed.port <= 65535
+            or parsed.path != "/mcp" or parsed.query
+            or parsed.fragment or parsed.username or parsed.password):
+        raise ControlError("MemoryD MCP must use a private managed HTTP endpoint.")
+    upstream = Mcp(Http(url.removesuffix("/mcp")), "/mcp")
+    verify_memoryd_catalog(upstream.tools())
+    return ensure_mcp_app(http, url, "MemoryD", receipt)
+
+
+def search_memoryd(session):
+    data = execution(session.call("tools/call", {"name": "execute", "arguments": {"code":
+        "const result = await tools.search(" + json.dumps({"namespace": "memoryd", "query": "memory", "limit": 100}) + "); return {items: result.items.map(item => ({path: item.path}))};"}}))
+    if (data.get("status") != "completed" or not data.get("execution", {}).get("ok")
+            or data.get("unavailableApps")):
+        raise ControlError("MemoryD discovery through Executor is unavailable; inspect app access and service health.")
+    paths = {item.get("path") for item in data["execution"]["value"].get("items", [])}
+    expected = {"tools.memoryd.memory_status", "tools.memoryd.memory_recall", "tools.memoryd.memory_search"}
+    if not expected.issubset(paths):
+        raise ControlError("Executor MemoryD discovery lacks the expected read-only tools.")
+
+
 def verify_devsy_catalog(tools):
     names = {tool["name"] for tool in tools}
     if not DEVSY_TOOLS.issubset(names) or len(names) != len(tools):
@@ -774,6 +821,9 @@ def bootstrap():
     enabled = os.environ.get("DEVSY_MCP_ENABLED", "false")
     if enabled not in {"true", "false"}:
         raise ControlError("DEVSY_MCP_ENABLED must be true or false.")
+    memoryd_enabled = os.environ.get("MEMORYD_MCP_ENABLED", "false")
+    if memoryd_enabled not in {"true", "false"}:
+        raise ControlError("MEMORYD_MCP_ENABLED must be true or false.")
     if enabled == "true":
         devsy_url = os.environ["DEVSY_MCP_URL"]
         if devsy_url != f"http://{address}:8089/mcp":
@@ -786,7 +836,21 @@ def bootstrap():
         write_private(marker, json.dumps(receipt) + "\n")
         search_devsy(session)
         read_devsy(session, receipt.get('profile'))
+    if memoryd_enabled == "true":
+        memoryd_url = os.environ["MEMORYD_MCP_URL"]
+        if memoryd_url != f"http://{address}:8090/mcp":
+            raise ControlError("MemoryD import must use the private managed gateway at port 8090 and /mcp.")
+        marker = state / "memoryd-integration.json"
+        receipt = json.loads(read_private(marker)) if marker.exists() or marker.is_symlink() else None
+        receipt = ensure_memoryd_app(http, memoryd_url, receipt)
+        write_private(marker, json.dumps(receipt) + "\n")
+        search_memoryd(session)
+    if enabled == "true" and memoryd_enabled == "true":
+        print("Codex, Devsy, and read-only MemoryD retained; Executor discovery ready.")
+    elif enabled == "true":
         print("Codex and Devsy retained; browser MCP, discovery and harmless Devsy reads ready.")
+    elif memoryd_enabled == "true":
+        print("Codex and read-only MemoryD retained; Executor discovery ready. Devsy disabled.")
     else:
         print("Codex import retained; authenticated browser MCP and Codex discovery ready. Devsy disabled.")
 

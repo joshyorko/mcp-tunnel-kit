@@ -27,6 +27,49 @@ def test_local_command_mapping(argv, expected):
     assert cli.parse_command(argv) == expected
 
 
+def test_memoryd_deploy_routes_to_its_capacity_gated_controller():
+    assert cli.parse_command(['accessory', 'deploy', 'memoryd']) == ('deploy', 'memoryd')
+    assert cli.parse_command(['accessory', 'start', 'memoryd']) == ('start', 'memoryd')
+    assert cli.parse_command(['accessory', 'stop', 'memoryd']) == ('stop', 'memoryd')
+
+
+def test_memoryd_rollback_stops_only_its_accessories_and_preserves_volume(tmp_path):
+    calls = []
+    status_reads = 0
+
+    def remote(action, data=None):
+        calls.append((action, data))
+        if action == 'lifecycle-check':
+            return {'status': 'PASS'}
+        if action == 'current':
+            return {'manifest': {}, 'identity': 'existing'}
+        if action == 'memoryd-status':
+            nonlocal status_reads
+            status_reads += 1
+            if status_reads == 1:
+                return {'status': 'HEALTHY', 'volume_exists': True, 'services': {
+                    'memoryd': {'state': 'running'}, 'memoryd-mcp': {'state': 'running'},
+                }}
+            return {'status': 'STOPPED', 'volume_exists': True, 'services': {
+                'memoryd': {'state': 'exited'}, 'memoryd-mcp': {'state': 'exited'},
+            }}
+        raise AssertionError(f'unexpected remote action: {action}')
+
+    def kamal(_config, operation, name):
+        calls.append(('kamal', (operation, name)))
+
+    with patch.object(cli.deploy, 'lock', return_value=nullcontext()), \
+         patch.object(cli.deploy, 'remote', side_effect=remote), \
+         patch.object(cli.deploy, 'configuration', return_value=tmp_path / 'deploy.yml'), \
+         patch.object(cli.deploy, 'kamal', side_effect=kamal):
+        result = cli.lifecycle('stop', 'memoryd')
+
+    assert [data for action, data in calls if action == 'kamal'] == [
+        ('stop', 'memoryd-mcp'), ('stop', 'memoryd')
+    ]
+    assert result['volume_exists'] is True
+
+
 @pytest.mark.parametrize('argv', [
     ['app', 'deploy'], ['accessory', 'remove', 'all'],
     ['accessory', 'deploy', 'tunnel'], ['accessory', 'stop', 'fizzy'],

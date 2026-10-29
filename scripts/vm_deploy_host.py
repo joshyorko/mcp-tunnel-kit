@@ -7,6 +7,7 @@ import importlib.util
 import io
 import ipaddress
 import json
+import math
 import os
 from pathlib import Path
 from pathlib import PurePosixPath
@@ -30,6 +31,11 @@ NATIVE_SSH = None
 DEVSY = None
 NAMES = {'compose': {'executor':'codex-control-plane-executor-1','schema-proxy':'codex-control-plane-executor-schema-proxy-1','cas':'codex-control-plane-codex-action-server-1','tunnel':'codex-control-plane-tunnel-client-1'},
          'kamal': {name:'mcp-control-plane-'+name for name in ('executor','schema-proxy','cas','tunnel')}}
+MEMORYD_MIN_AVAILABLE_KB = 1_572_864
+MEMORYD_SERVICES = {'mcp-control-plane-memoryd', 'mcp-control-plane-memoryd-mcp'}
+MEMORYD_VOLUME = 'codex-memoryd-data'
+MEMORYD_IMAGE = ('ghcr.io/joshyorko/codex-memoryd@sha256:'
+                 '70465d5250f693d15408fe904d30e3035360d8a46ac6f1caea8c3660eac09996')
 
 
 def configure_profile(profile):
@@ -171,6 +177,215 @@ def status():
     if (STORE/'current.json').exists():owner=json.loads(private(STORE/'current.json'))['authority']
     inventory={key:{'name':r['Name'].lstrip('/'),'state':r['State']['Status'],'health':r['State'].get('Health',{}).get('Status'),'image':r['Image'],'restart':r['HostConfig']['RestartPolicy']['Name']} for key,r in groups[owner].items() if r}
     return {'authority':owner,'inventory':inventory,'tunnel_count':len(tunnels),'healthy':len(inventory)==4 and all(x['health']=='healthy' and x['state']=='running' for x in inventory.values())}
+
+
+def memoryd_resource_gate(raw_meminfo):
+    fields = {}
+    for line in raw_meminfo.splitlines():
+        name, separator, value = line.partition(':')
+        if separator:
+            match = re.fullmatch(r'\s*(\d+)\s+kB\s*', value)
+            if match:
+                fields[name] = int(match.group(1))
+    total = fields.get('MemTotal')
+    available = fields.get('MemAvailable')
+    if total is None or available is None:
+        raise ValueError('VM memory inventory is incomplete')
+    ready = available >= MEMORYD_MIN_AVAILABLE_KB
+    return {
+        'ready': ready,
+        'reason': 'ready' if ready else 'insufficient_available_memory',
+        'mem_total_kb': total,
+        'mem_available_kb': available,
+        'required_available_kb': MEMORYD_MIN_AVAILABLE_KB,
+        'swap_total_kb': fields.get('SwapTotal', 0),
+        'minimum_vm_ram_gib': None if ready else math.ceil(total / 1_048_576) + 1,
+    }
+
+
+def memoryd_preflight():
+    existing = status()
+    memory = memoryd_resource_gate(Path('/proc/meminfo').read_text())
+    containers = run(['docker', 'ps', '-aq']).decode().split()
+    rows = json.loads(run(['docker', 'inspect', *containers])) if containers else []
+    owned = [row for row in rows if (row.get('Config', {}).get('Labels') or {}).get('service') in MEMORYD_SERVICES]
+    volumes = set(run(['docker', 'volume', 'ls', '--format', '{{.Name}}']).decode().split())
+    listeners = []
+    for line in run(['ss', '-Hln']).decode().splitlines():
+        columns = line.split()
+        if len(columns) >= 4 and (columns[3].endswith(':8787') or columns[3].endswith(':8090')):
+            listeners.append(columns[3])
+    blockers = []
+    if existing.get('authority') != 'kamal' or not existing.get('healthy'):
+        blockers.append('existing_control_plane_unhealthy_or_unowned')
+    if existing.get('tunnel_count') != 1:
+        blockers.append('expected_exactly_one_existing_tunnel')
+    if not memory['ready']:
+        blockers.append(memory['reason'])
+    if owned:
+        blockers.append('memoryd_container_state_already_exists')
+    if MEMORYD_VOLUME in volumes:
+        blockers.append('memoryd_volume_already_exists')
+    if listeners:
+        blockers.append('memoryd_listener_port_already_in_use')
+    return {
+        **memory,
+        'ready': not blockers,
+        'reason': blockers[0] if blockers else 'ready',
+        'blockers': blockers,
+        'existing_services_healthy': existing.get('healthy') is True,
+        'tunnel_count': existing.get('tunnel_count'),
+        'target_container_count': len(owned),
+        'target_volume_exists': MEMORYD_VOLUME in volumes,
+        'target_listeners': listeners,
+        'mutated': False,
+    }
+
+
+def memoryd_health():
+    baseline = status()
+    if baseline.get('authority') != 'kamal' or not baseline.get('healthy') or baseline.get('tunnel_count') != 1:
+        raise ValueError('Existing control-plane health or tunnel identity is not acceptable')
+    ids = run(['docker', 'ps', '-aq']).decode().split()
+    rows = json.loads(run(['docker', 'inspect', *ids])) if ids else []
+    services = {}
+    for row in rows:
+        service = (row.get('Config', {}).get('Labels') or {}).get('service')
+        if service in MEMORYD_SERVICES:
+            if service in services:
+                raise ValueError('Duplicate MemoryD accessory identity')
+            services[service] = row
+    if set(services) != MEMORYD_SERVICES:
+        raise ValueError('MemoryD accessories are incomplete')
+
+    current = json.loads(private(STORE / 'current.json'))
+    cas = current['manifest']['images']['cas']
+    expected_bridge_image = cas['repository'] + '@' + cas['digest']
+    gateway = NETWORK['gateway']
+    memoryd = services['mcp-control-plane-memoryd']
+    bridge = services['mcp-control-plane-memoryd-mcp']
+
+    def assert_container(row, *, image, memory, nano_cpus):
+        state = row.get('State', {})
+        config = row.get('Config', {})
+        host = row.get('HostConfig', {})
+        if (state.get('Status') != 'running' or state.get('Health', {}).get('Status') != 'healthy'
+                or config.get('Image') != image or host.get('NetworkMode') != 'host'
+                or host.get('Memory') != memory or host.get('NanoCpus') != nano_cpus
+                or host.get('PortBindings')):
+            raise ValueError('MemoryD accessory runtime contract failed')
+        return dict(item.split('=', 1) for item in config.get('Env', []) if '=' in item)
+
+    memory_env = assert_container(
+        memoryd, image=MEMORYD_IMAGE, memory=268_435_456, nano_cpus=500_000_000
+    )
+    bridge_env = assert_container(
+        bridge, image=expected_bridge_image, memory=134_217_728, nano_cpus=250_000_000
+    )
+    if (memory_env.get('CODEX_MEMORYD_BIND') != '127.0.0.1:8787'
+            or memory_env.get('CODEX_MEMORYD_DB') != '/data/memory.db'
+            or bridge_env.get('CODEX_MEMORYD_URL') != 'http://127.0.0.1:8787'
+            or bridge_env.get('CODEX_MEMORYD_MCP_BIND') != f'{gateway}:8090'):
+        raise ValueError('MemoryD bind or scope contract failed')
+    if memoryd.get('Config', {}).get('User') != '10001:10001':
+        raise ValueError('MemoryD container must retain its non-root image user')
+    volume_mounts = [mount for mount in memoryd.get('Mounts', [])
+                     if mount.get('Name') == MEMORYD_VOLUME and mount.get('Destination') == '/data']
+    bridge_mounts = [mount for mount in bridge.get('Mounts', [])
+                     if mount.get('Destination') == '/opt/tunnel-kit/codex_memoryd_mcp.py'
+                     and mount.get('Source') == str(ROOT / 'scripts/codex_memoryd_mcp.py')
+                     and mount.get('RW') is False]
+    if len(volume_mounts) != 1 or len(bridge_mounts) != 1:
+        raise ValueError('MemoryD persistence or read-only source mount failed')
+    listeners = set()
+    for line in run(['ss', '-Hln']).decode().splitlines():
+        columns = line.split()
+        if len(columns) >= 4 and (columns[3].endswith(':8787') or columns[3].endswith(':8090')):
+            listeners.add(columns[3])
+    if listeners != {'127.0.0.1:8787', f'{gateway}:8090'}:
+        raise ValueError('MemoryD listeners do not match the private bind contract')
+    return {
+        'status': 'PASS',
+        'memoryd_image': MEMORYD_IMAGE,
+        'adapter_image': expected_bridge_image,
+        'backend_bind': '127.0.0.1:8787',
+        'mcp_bind': f'{gateway}:8090',
+        'persistent_volume': MEMORYD_VOLUME,
+        'existing_tunnel_count': baseline['tunnel_count'],
+        'existing_control_plane_healthy': baseline['healthy'],
+    }
+
+
+def memoryd_wait(timeout=180):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        ids = run(['docker', 'ps', '-aq']).decode().split()
+        rows = json.loads(run(['docker', 'inspect', *ids])) if ids else []
+        services = {}
+        for row in rows:
+            service = (row.get('Config', {}).get('Labels') or {}).get('service')
+            if service in MEMORYD_SERVICES:
+                if service in services:
+                    raise ValueError('Duplicate MemoryD accessory identity')
+                services[service] = row
+        if len(services) == len(MEMORYD_SERVICES):
+            states = [row.get('State', {}) for row in services.values()]
+            if any(state.get('Status') in ('exited', 'dead') for state in states):
+                raise ValueError('A MemoryD accessory exited before becoming healthy')
+            if all(state.get('Status') == 'running'
+                   and state.get('Health', {}).get('Status') == 'healthy' for state in states):
+                return memoryd_health()
+        time.sleep(2)
+    raise ValueError('MemoryD accessories did not become healthy before the deadline')
+
+
+def memoryd_status():
+    ids = run(['docker', 'ps', '-aq']).decode().split()
+    rows = json.loads(run(['docker', 'inspect', *ids])) if ids else []
+    services = {}
+    for row in rows:
+        service = (row.get('Config', {}).get('Labels') or {}).get('service')
+        if service in MEMORYD_SERVICES:
+            if service in services:
+                raise ValueError('Duplicate MemoryD accessory identity')
+            state = row.get('State', {})
+            services[service] = {'state': state.get('Status'),
+                                 'health': state.get('Health', {}).get('Status')}
+    volumes = set(run(['docker', 'volume', 'ls', '--format', '{{.Name}}']).decode().split())
+    marker = STATE / 'bootstrap/memoryd-integration.json'
+    if not services:
+        state = 'VOLUME_ONLY' if MEMORYD_VOLUME in volumes else 'ABSENT'
+    elif set(services) != MEMORYD_SERVICES:
+        state = 'PARTIAL'
+    elif all(item['state'] in ('exited', 'created') for item in services.values()):
+        state = 'STOPPED'
+    elif all(item['state'] == 'running' and item['health'] == 'healthy' for item in services.values()):
+        memoryd_health()
+        state = 'HEALTHY'
+    else:
+        state = 'UNHEALTHY'
+    return {'status': state, 'services': services,
+            'volume_exists': MEMORYD_VOLUME in volumes,
+            'app_registered': marker.exists() and not marker.is_symlink()}
+
+
+def register_memoryd_app():
+    memoryd_health()
+    sys.path.insert(0, str(ROOT / 'scripts'))
+    import compose_control as c
+    os.environ.update(
+        EXECUTOR_URL='http://127.0.0.1:4312',
+        EXECUTOR_PAT_FILE=str(STATE / 'secrets/executor-pat'),
+    )
+    http, session = c.executor_session()
+    c.verify_compact(session)
+    url = f"http://{NETWORK['gateway']}:8090/mcp"
+    marker = STATE / 'bootstrap/memoryd-integration.json'
+    receipt = json.loads(private(marker)) if marker.exists() or marker.is_symlink() else None
+    registered = c.ensure_memoryd_app(http, url, receipt)
+    write(marker, registered)
+    c.search_memoryd(session)
+    return {'registered': True, 'app_id': registered['id'], 'tool_count': 3, 'executor_discovery': 'PASS'}
 
 
 def lifecycle_check():
@@ -807,6 +1022,12 @@ def smoke(request=None):
     sys.path.insert(0,str(ROOT/'scripts'));import compose_control as c
     _,m=c.executor_session();c.verify_compact(m)
     profile=json.loads(private(STATE/'bootstrap/devsy-integration.json'))['profile'];c.read_devsy(m,profile)
+    memoryd_discovery = False
+    memoryd_marker = STATE / 'bootstrap/memoryd-integration.json'
+    if memoryd_marker.exists() or memoryd_marker.is_symlink():
+        private(memoryd_marker)
+        c.search_memoryd(m)
+        memoryd_discovery = True
     supplied=request.get("native_codex")
     if supplied is None:
         native={"status":"UNCONFIGURED"}
@@ -816,7 +1037,26 @@ def smoke(request=None):
         if native["status"] == "UNCONFIGURED":
             raise ValueError("qualified native read is required")
         raise ValueError("qualified native read failed: " + native.get("error_code", "UNKNOWN"))
-    return {'catalog':'PASS','native_read':native,'devsy_reads':'PASS'}
+    return {'catalog':'PASS','native_read':native,'devsy_reads':'PASS',
+            'memoryd_discovery':'PASS' if memoryd_discovery else 'UNREGISTERED'}
+
+
+def register_memoryd_app():
+    memoryd_health()
+    sys.path.insert(0, str(ROOT / 'scripts'))
+    import compose_control as c
+    os.environ.update(EXECUTOR_URL='http://127.0.0.1:4312',
+                      EXECUTOR_PAT_FILE=str(STATE / 'secrets/executor-pat'))
+    http, session = c.executor_session()
+    c.verify_compact(session)
+    url = f"http://{NETWORK['gateway']}:8090/mcp"
+    marker = STATE / 'bootstrap/memoryd-integration.json'
+    receipt = json.loads(private(marker)) if marker.exists() or marker.is_symlink() else None
+    registered = c.ensure_memoryd_app(http, url, receipt)
+    write(marker, registered)
+    c.search_memoryd(session)
+    return {'registered': True, 'app_id': registered['id'], 'tool_count': 3,
+            'executor_discovery': 'PASS'}
 
 
 def _devsy_bootstrap(data):
@@ -880,7 +1120,8 @@ def main():
     if action=='lock':_ensure_private_state_store()
     elif action!='activation-plan' and action.startswith('activation-'):
         _verify_private_directory(STATE);_verify_private_directory(STORE)
-    elif action not in ('activation-plan','devsy-plan','devsy-check','devsy-rollback-plan',
+    elif action not in ('activation-plan','memoryd-preflight','memoryd-health','memoryd-wait','memoryd-status',
+                        'devsy-plan','devsy-check','devsy-rollback-plan',
                         'devsy-tap-reconcile-plan','devsy-tap-reconcile',
                         'devsy-tap-rollback-plan','devsy-tap-rollback'):
         STORE.mkdir(mode=0o700,exist_ok=True)
@@ -919,6 +1160,11 @@ def main():
         fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB);print('LOCKED',flush=True);sys.stdin.read();return
     elif action=='snapshot':result=snapshot()
     elif action=='status':result=status()
+    elif action=='memoryd-preflight':result=memoryd_preflight()
+    elif action=='memoryd-health':result=memoryd_health()
+    elif action=='memoryd-wait':result=memoryd_wait()
+    elif action=='memoryd-status':result=memoryd_status()
+    elif action=='memoryd-app-register':result=register_memoryd_app()
     elif action=='lifecycle-check':result=lifecycle_check()
     elif action=='identity-check':
         if identity(NAMES['kamal']['executor'])!=json.loads(private(STORE/'current.json'))['identity']:

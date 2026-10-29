@@ -134,6 +134,8 @@ services:
       CAS_MCP_URL: http://${CONTROL_PLANE_GATEWAY:-172.30.86.1}:8088/mcp
       DEVSY_MCP_ENABLED: ${DEVSY_MCP_ENABLED:-false}
       DEVSY_MCP_URL: http://${CONTROL_PLANE_GATEWAY:-172.30.86.1}:8089/mcp
+      MEMORYD_MCP_ENABLED: ${MEMORYD_MCP_ENABLED:-false}
+      MEMORYD_MCP_URL: ${MEMORYD_MCP_URL:-http://${CONTROL_PLANE_GATEWAY:-172.30.86.1}:8090/mcp}
       CONTROL_PLANE_BOOTSTRAP_DIR: /var/lib/tunnel-kit
       CONTROL_PLANE_AUTHORITY_FILE: /var/lib/deployment/current.json
       EXECUTOR_PAT_FILE: /run/secrets/executor-pat

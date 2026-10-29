@@ -11,6 +11,10 @@ _REPOSITORIES = {
     "schema_proxy": "ghcr.io/joshyorko/codex-action-server",
     "tunnel": "ghcr.io/openai/tunnel-client:v0.0.15",
 }
+_CODEX_MEMORYD_IMAGE = (
+    "ghcr.io/joshyorko/codex-memoryd@sha256:"
+    "70465d5250f693d15408fe904d30e3035360d8a46ac6f1caea8c3660eac09996"
+)
 _PROFILE_KEYS = {
     "host",
     "network",
@@ -295,6 +299,69 @@ def render(profile, manifest):
         ],
     )
 
+    memoryd = _accessory(
+        "mcp-control-plane-memoryd",
+        _CODEX_MEMORYD_IMAGE,
+        host,
+        "host",
+        options={
+            "user": "10001:10001",
+            "memory": "256m",
+            "cpus": "0.5",
+            "log-opt": "max-size=10m",
+            "health-cmd": "curl -fsS http://127.0.0.1:8787/healthz || exit 1",
+            "health-interval": "10s",
+            "health-timeout": "3s",
+            "health-start-period": "15s",
+            "health-retries": 6,
+        },
+        env={
+            "clear": {
+                "CODEX_MEMORYD_DB": "/data/memory.db",
+                "CODEX_MEMORYD_BIND": "127.0.0.1:8787",
+                "CODEX_MEMORYD_LOG": "info",
+            }
+        },
+        volumes=["codex-memoryd-data:/data"],
+    )
+
+    memoryd_mcp = _accessory(
+        "mcp-control-plane-memoryd-mcp",
+        images["cas"],
+        host,
+        "host",
+        options={
+            "entrypoint": "python3",
+            "user": "1000:1000",
+            "read-only": True,
+            "cap-drop": ["ALL"],
+            "security-opt": "no-new-privileges:true",
+            "memory": "128m",
+            "cpus": "0.25",
+            "log-opt": "max-size=10m",
+            "health-cmd": (
+                "python3 -c \"import urllib.request; opener=urllib.request.build_opener("
+                "urllib.request.ProxyHandler({})); opener.open('http://"
+                + gateway
+                + ":8090/healthz',timeout=2).read()\""
+            ),
+            "health-interval": "10s",
+            "health-timeout": "3s",
+            "health-start-period": "15s",
+            "health-retries": 6,
+        },
+        cmd="/opt/tunnel-kit/codex_memoryd_mcp.py",
+        env={
+            "clear": {
+                "CODEX_MEMORYD_URL": "http://127.0.0.1:8787",
+                "CODEX_MEMORYD_MCP_BIND": f"{gateway}:8090",
+            }
+        },
+        volumes=[
+            f"{repo}/scripts/codex_memoryd_mcp.py:/opt/tunnel-kit/codex_memoryd_mcp.py:ro"
+        ],
+    )
+
     config = {
         "service": "mcp-control-plane",
         "image": images["cas"],
@@ -323,6 +390,8 @@ def render(profile, manifest):
             "schema-proxy": schema_proxy,
             "cas": cas,
             "tunnel": tunnel,
+            "memoryd": memoryd,
+            "memoryd-mcp": memoryd_mcp,
         },
     }
     return json.dumps(config, indent=2) + "\n"

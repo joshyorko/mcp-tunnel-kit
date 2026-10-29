@@ -11,14 +11,14 @@ import tempfile
 import deploy_control_plane as deploy
 
 HELP = '''Usage:
-  bin/kamal accessory deploy [all|cas]   Redeploy pinned images (default: all)
+  bin/kamal accessory deploy [all|cas|memoryd] Redeploy pinned images or add isolated MemoryD
   bin/kamal accessory start [NAME|all]   Start existing containers in health order
   bin/kamal accessory stop [NAME|all]    Stop containers, tunnel first
   bin/kamal accessory details [NAME|all] Show current service health
   bin/kamal deploy | rollback | preflight | status
   bin/kamal setup-local                 Install the isolated Kamal bundle
 
-NAME: executor, schema-proxy, cas, tunnel. Loads .env.kamal.local.
+NAME: executor, schema-proxy, cas, tunnel, memoryd. Loads .env.kamal.local.
 Deploy/rollback reuse recorded image pins. No application image is built locally.
 '''
 
@@ -54,10 +54,10 @@ def parse_command(argv):
             operation = 'details'
     else:
         raise ValueError(HELP)
-    if target != 'all' and target not in deploy.ORDER:
+    if target != 'all' and target not in (*deploy.ORDER, 'memoryd'):
         raise ValueError('Unknown control-plane accessory')
-    if operation == 'deploy' and target not in ('all', 'cas'):
-        raise ValueError('Use deploy cas or deploy all to retain coordinated state and identity checks')
+    if operation == 'deploy' and target not in ('all', 'cas', 'memoryd'):
+        raise ValueError('Use deploy cas, deploy memoryd, or deploy all to retain coordinated state and identity checks')
     return operation, target
 
 
@@ -65,6 +65,35 @@ def lifecycle(operation, target):
     """Stop/start existing containers only; never create another writer/client."""
     with deploy.lock(), tempfile.TemporaryDirectory(prefix='mcp-local-kamal-') as directory:
         before = deploy.remote('lifecycle-check')
+        if target == 'memoryd':
+            state = deploy.remote('memoryd-status')
+            if operation == 'details':
+                return state
+            if operation == 'stop' and state['status'] in ('ABSENT', 'VOLUME_ONLY', 'STOPPED'):
+                return {'operation': operation, **state}
+            if operation == 'start' and state['status'] == 'HEALTHY':
+                return {'operation': operation, **state}
+            current = deploy.remote('current')
+            config = deploy.configuration(directory, current['manifest'])
+            if operation == 'stop':
+                if state['status'] not in ('HEALTHY', 'UNHEALTHY', 'PARTIAL'):
+                    raise ValueError('MemoryD state requires inspection before stop')
+                for name in reversed(deploy.MEMORYD_ORDER):
+                    if name in state.get('services', {}):
+                        deploy.kamal(config, 'stop', name)
+                after = deploy.remote('memoryd-status')
+                if after['status'] not in ('ABSENT', 'VOLUME_ONLY', 'STOPPED'):
+                    raise RuntimeError('MemoryD accessories did not stop; persistent data was retained')
+            else:
+                if state['status'] != 'STOPPED' or state['volume_exists'] is not True:
+                    raise ValueError('MemoryD start requires both existing stopped accessories and their persistent volume')
+                for name in deploy.MEMORYD_ORDER:
+                    deploy.kamal(config, 'start', name)
+                deploy.remote('memoryd-wait')
+                after = deploy.remote('memoryd-status')
+                if after['status'] != 'HEALTHY':
+                    raise RuntimeError('MemoryD accessories did not return healthy')
+            return {'operation': operation, **after}
         if operation == 'details':
             return before if target == 'all' else before['inventory'][target]
         current = deploy.remote('current')
@@ -108,7 +137,8 @@ def main(argv=None):
             result = lifecycle(operation, target)
         else:
             result = deploy.execute(argparse.Namespace(
-                operation='cas' if operation == 'deploy' and target == 'cas' else operation,
+                operation='cas' if operation == 'deploy' and target == 'cas' else
+                          'memoryd' if operation == 'deploy' and target == 'memoryd' else operation,
                 local=True, approve_full_stack=True, cas_digest='', cas_revision='',
             ))
         print(json.dumps(result, indent=2))
