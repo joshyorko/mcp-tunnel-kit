@@ -812,6 +812,8 @@ def memoryd_capture_preflight():
                         '--format', '{{.Names}}']).decode().split()
     if volume_users != ['mcp-control-plane-memoryd']:
         raise ValueError('MemoryD volume has unexpected users; capture refused')
+    if not _memoryd_capture_import_quiescent():
+        raise ValueError('MemoryD import is still active; capture refused')
     fingerprint = hashlib.sha256(json.dumps(evidence, sort_keys=True).encode()).hexdigest()
     return {'status': 'healthy', 'health': health, 'state_fingerprint': fingerprint}
 

@@ -166,6 +166,14 @@ def test_capture_allows_unrelated_completed_history(tmp_path, monkeypatch):
     assert host.memoryd_capture_preflight()['status'] == 'healthy'
 
 
+def test_capture_refuses_an_active_import_without_an_incomplete_receipt(tmp_path, monkeypatch):
+    legacy_path, _, _, _, _ = setup_superseded_transfer(tmp_path, monkeypatch)
+    legacy_path.unlink()
+    monkeypatch.setattr(host, '_memoryd_capture_import_quiescent', lambda: False)
+    with pytest.raises(ValueError, match='import'):
+        host.memoryd_capture_preflight()
+
+
 def test_capture_preserves_staged_archived_selection_when_later_transfer_is_active_only(tmp_path, monkeypatch):
     legacy_path, complete_path, legacy, complete, write = setup_superseded_transfer(tmp_path, monkeypatch)
     legacy_dir = tmp_path / 'memoryd-transfer' / legacy['transfer_manifest_sha256'][:16]
