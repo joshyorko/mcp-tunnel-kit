@@ -132,6 +132,8 @@ def synthetic_snapshot(root):
           INSERT INTO memory_records VALUES ('personal', 'dakota-codex-only', 1);
           CREATE TABLE workspaces (profile_id TEXT, id TEXT);
           CREATE TABLE fixture_workspace_only (workspace_id TEXT);
+          CREATE TABLE sessions (profile_id TEXT, workspace_id TEXT);
+          CREATE TABLE visible_turns (session_id TEXT, content TEXT);
         ''')
         for table in tables[1:]:
             if table in ('subjects', 'policy_events'):
@@ -165,12 +167,12 @@ def test_capture_facts_are_derived_from_database_and_manifest(tmp_path):
 
 @pytest.mark.parametrize('bad', ['scope', 'schema', 'manifest_digest', 'adapter', 'extra_file',
                                  'subject_scope', 'global_policy_event', 'profile_only', 'workspace_only',
-                                 'workspace_catalog'])
+                                 'workspace_catalog', 'raw_session', 'raw_turn'])
 def test_capture_validation_rejects_inconsistent_artifacts(tmp_path, bad):
     root = tmp_path / 'memoryd'
     manifest = synthetic_snapshot(root)
     if bad in {'scope', 'schema', 'subject_scope', 'global_policy_event', 'profile_only',
-               'workspace_only', 'workspace_catalog'}:
+               'workspace_only', 'workspace_catalog', 'raw_session', 'raw_turn'}:
         with sqlite3.connect(root / 'backup.db') as connection:
             if bad == 'scope':
                 connection.execute("UPDATE memory_records SET workspace_id='other' WHERE archived=1")
@@ -185,6 +187,10 @@ def test_capture_validation_rejects_inconsistent_artifacts(tmp_path, bad):
                 connection.execute("INSERT INTO workspaces VALUES ('work', 'dakota-codex-only')")
             elif bad == 'workspace_only':
                 connection.execute('INSERT INTO fixture_workspace_only VALUES (NULL)')
+            elif bad == 'raw_session':
+                connection.execute("INSERT INTO sessions VALUES ('personal', 'dakota-codex-only')")
+            elif bad == 'raw_turn':
+                connection.execute("INSERT INTO visible_turns VALUES ('synthetic', 'synthetic')")
             else:
                 connection.execute("INSERT INTO workspaces VALUES ('personal', 'other')")
         raw = (root / 'backup.db').read_bytes()

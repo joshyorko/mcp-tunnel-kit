@@ -69,7 +69,9 @@ MemoryD capture requires the source database plus its WAL to total at most 32 Mi
 
 Keep other operators and unmanaged writers from moving or removing the source database during collection. Capture refuses if the source identity changes or SQLite cannot read the WAL through the read-only mount.
 
-Capture rejects a NULL or different value in any database table's `profile_id` or `workspace_id` column. It also checks the profile and workspace catalog IDs. MemoryD permits global `policy_events` with NULL scope, so such rows block capture until their scope is resolved. Tables without either scope column include global identity and import metadata, but also `visible_turns`, `repos`, and FTS tables. The column check cannot establish the scope of their contents; the whole-store snapshot includes them.
+Capture rejects a NULL or different value in any database table's `profile_id` or `workspace_id` column. It also checks the profile and workspace catalog IDs. MemoryD permits global `policy_events` with NULL scope, so such rows block capture until their scope is resolved. Tables without either scope column include global identity and import metadata, `repos`, and FTS tables. The column check cannot establish the scope of their contents; the whole-store snapshot includes them.
+
+Capture refuses a database with any `sessions` or `visible_turns` rows. This excludes raw session and conversation history from recovery captures.
 
 ## Configure private MinIO storage and age identities
 

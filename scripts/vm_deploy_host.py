@@ -858,6 +858,9 @@ def _validate_memoryd_capture(root):
                     or not isinstance(instance[0][1], str)
                     or not re.fullmatch(r'cmi_[a-f0-9]{32}', instance[0][1])):
                 raise ValueError('MemoryD database identity or schema is invalid')
+            for table in ('sessions', 'visible_turns'):
+                if conn.execute(f'SELECT 1 FROM {table} LIMIT 1').fetchone():
+                    raise ValueError('MemoryD capture cannot include raw session history')
             for table in MEMORYD_CAPTURE_TABLES:
                 if conn.execute(f'SELECT count(*) FROM {table}').fetchone()[0] != counts[table]:
                     raise ValueError('MemoryD backup table counts do not match')
