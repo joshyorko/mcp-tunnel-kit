@@ -51,6 +51,10 @@ def captured_fixture(tmp_path, *, essential_changes=()):
         db.execute("INSERT INTO schema_meta VALUES ('schema_version', '13')")
         db.execute("CREATE TABLE instance_metadata (singleton_key TEXT PRIMARY KEY, instance_id TEXT NOT NULL)")
         db.execute("INSERT INTO instance_metadata VALUES ('default', ?)", (INSTANCE_ID,))
+        db.execute("CREATE TABLE profiles (id TEXT)")
+        db.execute("INSERT INTO profiles VALUES ('personal')")
+        db.execute("CREATE TABLE workspaces (id TEXT, profile_id TEXT)")
+        db.execute("INSERT INTO workspaces VALUES ('dakota-codex-only', 'personal')")
         db.execute("CREATE TABLE memory_records (id TEXT, profile_id TEXT, workspace_id TEXT, archived INTEGER, content TEXT)")
         db.executemany("INSERT INTO memory_records VALUES (?, ?, ?, ?, ?)", [
             ("active", "personal", "dakota-codex-only", 0, "synthetic active private content"),
@@ -94,6 +98,9 @@ def refresh_backup_hashes(restored):
     sidecar_path = root / "backup.db.manifest.json"
     sidecar = read_json(sidecar_path)
     sidecar.update(sha256="sha256:" + sha(backup), size_bytes=backup.stat().st_size)
+    with sqlite3.connect(backup) as db:
+        for item in sidecar["tables"]:
+            item["rows"] = db.execute(f'SELECT COUNT(*) FROM "{item["table"]}"').fetchone()[0]
     write_json(sidecar_path, sidecar)
     receipt_path = restored / "capture-receipt"
     receipt = read_json(receipt_path)
@@ -281,6 +288,86 @@ def test_prepared_generation_rejects_changed_image_pin_even_with_updated_invento
 
     with pytest.raises(generation.GenerationError):
         generation.validate_generation(output)
+
+
+@pytest.mark.parametrize("table,column,value", [
+    ("subjects", "profile_id", "work"),
+    ("subjects", "profile_id", None),
+    ("episodes", "workspace_id", "elsewhere"),
+    ("episodes", "workspace_id", None),
+    ("sessions", "profile_id", "work"),
+    ("sessions", "profile_id", "PERSONAL"),
+    ("sessions", "workspace_id", None),
+])
+def test_all_tables_reject_wrong_or_missing_single_scope_columns(tmp_path, table, column, value):
+    restored, _descriptor = captured_fixture(tmp_path)
+    backup = restored / "vm-snapshot/memoryd/backup.db"
+    with sqlite3.connect(backup) as db:
+        if table == "sessions":
+            db.execute(f'CREATE TABLE "{table}" (id TEXT, "{column}" TEXT COLLATE NOCASE)')
+        else:
+            db.execute(f'ALTER TABLE "{table}" ADD COLUMN "{column}" TEXT')
+        db.execute(f'INSERT INTO "{table}" (id, "{column}") VALUES (?, ?)', ("fixture", value))
+    refresh_backup_hashes(restored)
+
+    output = tmp_path / "prepared"
+    with pytest.raises(generation.GenerationError):
+        generation.prepare_generation(restored, output)
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("table,column,value", [
+    ("subjects", "profile_id", "personal"),
+    ("episodes", "workspace_id", "dakota-codex-only"),
+    ("sessions", "workspace_id", "dakota-codex-only"),
+])
+def test_single_scope_columns_accept_the_matching_scope(tmp_path, table, column, value):
+    restored, _descriptor = captured_fixture(tmp_path)
+    backup = restored / "vm-snapshot/memoryd/backup.db"
+    with sqlite3.connect(backup) as db:
+        if table == "sessions":
+            db.execute(f'CREATE TABLE "{table}" (id TEXT, "{column}" TEXT)')
+        else:
+            db.execute(f'ALTER TABLE "{table}" ADD COLUMN "{column}" TEXT')
+        db.execute(f'INSERT INTO "{table}" (id, "{column}") VALUES (?, ?)', ("fixture", value))
+    refresh_backup_hashes(restored)
+
+    result = generation.prepare_generation(restored, tmp_path / "prepared")
+
+    assert result["memoryd"]["status"] == "captured"
+
+
+@pytest.mark.parametrize("table,values", [
+    ("profiles", ("work",)),
+    ("profiles", (None,)),
+    ("workspaces", ("other", "personal")),
+    ("workspaces", (None, "personal")),
+    ("workspaces", ("dakota-codex-only", None)),
+])
+def test_profile_and_workspace_catalogs_reject_other_or_unknown_scope(tmp_path, table, values):
+    restored, _descriptor = captured_fixture(tmp_path)
+    backup = restored / "vm-snapshot/memoryd/backup.db"
+    with sqlite3.connect(backup) as db:
+        placeholders = ",".join("?" for _ in values)
+        db.execute(f'INSERT INTO "{table}" VALUES ({placeholders})', values)
+    refresh_backup_hashes(restored)
+
+    with pytest.raises(generation.GenerationError):
+        generation.prepare_generation(restored, tmp_path / "prepared")
+
+
+def test_workspace_catalog_requires_a_profile_binding(tmp_path):
+    restored, _descriptor = captured_fixture(tmp_path)
+    backup = restored / "vm-snapshot/memoryd/backup.db"
+    with sqlite3.connect(backup) as db:
+        db.execute("ALTER TABLE workspaces RENAME TO old_workspaces")
+        db.execute("CREATE TABLE workspaces (id TEXT)")
+        db.execute("INSERT INTO workspaces VALUES ('dakota-codex-only')")
+        db.execute("DROP TABLE old_workspaces")
+    refresh_backup_hashes(restored)
+
+    with pytest.raises(generation.GenerationError):
+        generation.prepare_generation(restored, tmp_path / "prepared")
 
 
 def test_cli_refusal_never_prints_memory_content(tmp_path):

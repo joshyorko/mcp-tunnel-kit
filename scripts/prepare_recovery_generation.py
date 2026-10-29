@@ -494,6 +494,39 @@ def _matches_memoryd_pin(value, descriptor):
             and value == _memoryd_pin(descriptor))
 
 
+def _memoryd_scope(database, descriptor):
+    tables = database.execute(
+        "SELECT name FROM sqlite_schema WHERE type='table' AND name NOT GLOB 'sqlite_*'"
+    ).fetchall()
+    names = {row[0] for row in tables}
+    if not {"profiles", "workspaces"}.issubset(names):
+        raise _fail("MemoryD backup scope catalogs are missing.")
+    for (table,) in tables:
+        columns = {row[0].lower(): row[0] for row in database.execute(
+            "SELECT name FROM pragma_table_xinfo(?)", (table,)
+        )}
+        # SQLite and FTS bookkeeping without scope columns carries no scope to
+        # validate. A NULL policy-event scope is not proof of a global event.
+        checks = {"profile_id": descriptor["profile"], "workspace_id": descriptor["workspace"]}
+        if table == "profiles":
+            checks["id"] = descriptor["profile"]
+        elif table == "workspaces":
+            checks["id"] = descriptor["workspace"]
+        if table in {"profiles", "workspaces"} and "id" not in columns:
+            raise _fail("MemoryD backup scope catalogs are invalid.")
+        if table == "workspaces" and "profile_id" not in columns:
+            raise _fail("MemoryD backup workspace catalog has no profile binding.")
+        identifier = '"' + table.replace('"', '""') + '"'
+        for column, expected in checks.items():
+            if column not in columns:
+                continue
+            quoted = '"' + columns[column].replace('"', '""') + '"'
+            query = (f"SELECT 1 FROM {identifier} WHERE {quoted} IS NULL "
+                     f"OR typeof({quoted}) != 'text' OR {quoted} COLLATE BINARY != ? LIMIT 1")
+            if database.execute(query, (expected,)).fetchone() is not None:
+                raise _fail("MemoryD backup contains missing or out-of-scope data.")
+
+
 def _memoryd_database(path: Path, descriptor: dict, manifest: dict):
     try:
         database = sqlite3.connect(path.as_uri() + "?mode=ro&immutable=1", uri=True)
@@ -504,6 +537,7 @@ def _memoryd_database(path: Path, descriptor: dict, manifest: dict):
             instances = database.execute("SELECT singleton_key, instance_id FROM instance_metadata").fetchall()
             if versions != [("13",)] or instances != [("default", descriptor["source_instance_id"])]:
                 raise _fail("MemoryD backup schema or instance identity does not match its capture.")
+            _memoryd_scope(database, descriptor)
             actual = {name: database.execute(f'SELECT count(*) FROM "{name}"').fetchone()[0]
                       for name in MEMORYD_TABLES}
             active = database.execute(
