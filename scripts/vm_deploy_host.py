@@ -1507,7 +1507,7 @@ def memoryd_import_bundles(data):
                 ['docker','exec','--user','10001:10001','mcp-control-plane-memoryd','rm','-f',*target_tmp],timeout=60)
 
 
-def _require_completed_memoryd_transfer(data):
+def _require_completed_memoryd_transfer(data, *, check_live_count=True):
     if not isinstance(data,dict) or set(data)!={'transfer_manifest_sha256'}:
         raise ValueError('MemoryD registration request shape is invalid')
     transfer_id=data['transfer_manifest_sha256']
@@ -1517,14 +1517,74 @@ def _require_completed_memoryd_transfer(data):
     if not receipt_path.exists() or receipt_path.is_symlink():
         raise ValueError('A completed MemoryD transfer is required for registration')
     receipt=json.loads(private(receipt_path))
-    if (receipt.get('status')!='complete' or receipt.get('transfer_manifest_sha256')!=transfer_id
+    if (not isinstance(receipt,dict) or receipt.get('status')!='complete' or receipt.get('transfer_manifest_sha256')!=transfer_id
             or receipt.get('source_profile')!='personal' or receipt.get('source_workspace')!='dakota-codex-only'
             or receipt.get('target_profile')!='personal' or receipt.get('target_workspace')!='dakota-codex-only'
             or type(receipt.get('imported_record_count')) is not int
             or receipt['imported_record_count']<1
-            or _memoryd_record_count()!=receipt['imported_record_count']):
+            or (check_live_count and _memoryd_record_count()!=receipt['imported_record_count'])):
         raise ValueError('A completed MemoryD transfer is required for registration')
     return receipt
+
+
+def _recovered_memoryd_transfer(data, firewall):
+    activation_id=firewall.get('activation_id')
+    marker=_activation_marker(activation_id,allow_completed=True)
+    if (marker.get('status')!='activated' or marker.get('original_stopped_attested') is not True
+            or not isinstance(marker.get('source_sha'),str)
+            or not re.fullmatch(r'[a-f0-9]{40}',marker['source_sha'])
+            or not isinstance(marker.get('expected_identity'),str)
+            or not re.fullmatch(r'[a-f0-9]{64}',marker['expected_identity'])
+            or marker.get('memoryd_restored') is not True or marker.get('memoryd_discovery')!='PASS'):
+        raise ValueError('MemoryD recovery activation is not complete')
+    recorded=json.loads(private(STORE/'recovery-activation.json'))
+    if (not isinstance(recorded,dict) or type(recorded.get('schema_version')) is not int
+            or recorded.get('schema_version')!=1
+            or recorded.get('activation_id')!=activation_id
+            or recorded.get('source_sha')!=marker.get('source_sha')
+            or recorded.get('expected_identity')!=marker.get('expected_identity')
+            or recorded.get('original_stopped_attested') is not True
+            or recorded.get('identity_preserved') is not True
+            or recorded.get('memoryd_restored') is not True or recorded.get('memoryd_discovery')!='PASS'):
+        raise ValueError('MemoryD recovery activation receipt does not match')
+    _verified_memoryd_restore(marker)
+    transfer=_require_completed_memoryd_transfer(data,check_live_count=False)
+    descriptor=marker.get('memoryd')
+    if (not isinstance(descriptor,dict) or descriptor.get('status')!='captured'
+            or transfer.get('destination_instance_id')!=descriptor.get('source_instance_id')):
+        raise ValueError('MemoryD transfer destination does not match the verified restore')
+    return transfer
+
+
+def _verify_captured_memoryd_firewall_transfer(activation_id,digest,transfer_id):
+    """Follow retained firewall receipts to the transfer, including earlier recoveries."""
+    seen=set()
+    while digest is not None:
+        if (not isinstance(activation_id,str) or not re.fullmatch(r'[a-f0-9]{32}',activation_id)
+                or activation_id in seen or not isinstance(digest,str)
+                or not re.fullmatch(r'[a-f0-9]{64}',digest)):
+            raise ValueError('Captured MemoryD firewall receipt chain is invalid')
+        seen.add(activation_id)
+        path=STATE/'bootstrap'/f'memoryd-firewall-captured-{activation_id}.json'
+        raw=private(path)
+        if hashlib.sha256(raw).hexdigest()!=digest:
+            raise ValueError('Captured MemoryD firewall receipt changed')
+        previous=json.loads(raw)
+        if (not isinstance(previous,dict) or previous.get('subnet')!=NETWORK['subnet']
+                or previous.get('gateway')!=NETWORK['gateway'] or previous.get('port')!=8090
+                or previous.get('status') not in ('pending','active')
+                or type(previous.get('created')) is not bool):
+            raise ValueError('Captured MemoryD firewall receipt is invalid')
+        _memoryd_firewall_commands(NETWORK,previous.get('bridge'))
+        if 'transfer_manifest_sha256' in previous:
+            if previous['transfer_manifest_sha256']!=transfer_id:
+                raise ValueError('Captured MemoryD firewall transfer does not match')
+            return
+        if (previous.get('schema_version')!=1 or previous.get('status')!='active'
+                or 'activation_id' not in previous or 'captured_receipt_sha256' not in previous):
+            raise ValueError('Captured MemoryD firewall receipt chain is invalid')
+        activation_id=previous['activation_id']
+        digest=previous['captured_receipt_sha256']
 
 
 def _memoryd_firewall_commands(network, bridge):
@@ -1547,7 +1607,13 @@ def _memoryd_firewall_commands(network, bridge):
 
 
 def memoryd_network_allow(data):
-    transfer=_require_completed_memoryd_transfer(data)
+    path=STATE/'bootstrap/memoryd-firewall.json'
+    previous=json.loads(private(path)) if path.exists() or path.is_symlink() else None
+    if previous is not None and not isinstance(previous,dict):
+        raise ValueError('MemoryD firewall receipt is invalid')
+    recovered=previous is not None and 'activation_id' in previous
+    transfer=(_recovered_memoryd_transfer(data,previous) if recovered
+              else _require_completed_memoryd_transfer(data))
     memoryd_health()
     if not network_check(NETWORK):
         raise ValueError('MemoryD private network is not owned by Kamal')
@@ -1571,16 +1637,22 @@ def memoryd_network_allow(data):
         if result.returncode not in (0,1):
             raise ValueError('MemoryD firewall rule check failed')
         return result.returncode==0
-    path=STATE/'bootstrap/memoryd-firewall.json'
-    previous=json.loads(private(path)) if path.exists() or path.is_symlink() else None
     identity={'bridge':bridge,'subnet':NETWORK['subnet'],'gateway':NETWORK['gateway'],
               'port':8090,'transfer_manifest_sha256':transfer['transfer_manifest_sha256']}
-    if previous and any(previous.get(key)!=value for key,value in identity.items()):
+    if recovered:
+        activation_id=previous['activation_id']
+        recovery_identity={'schema_version':1,'activation_id':activation_id,'bridge':bridge,
+                           'subnet':NETWORK['subnet'],'gateway':NETWORK['gateway'],'port':8090}
+        _,previous,captured=_activation_memoryd_firewall_receipt(activation_id,recovery_identity)
+        if previous is None:raise ValueError('MemoryD activation firewall receipt is missing')
+        _verify_captured_memoryd_firewall_transfer(activation_id,captured,identity['transfer_manifest_sha256'])
+    elif previous and any(previous.get(key)!=value for key,value in identity.items()):
         raise ValueError('MemoryD firewall receipt identity changed')
     exists=rule_exists()
     created_now=False
     if not exists:
-        previous={**identity,'status':'pending','created':True}
+        previous=({**previous,'status':'pending','created':True} if recovered
+                  else {**identity,'status':'pending','created':True})
         write(path,previous)
         run(allow,timeout=60)
         created_now=True
@@ -1589,10 +1661,12 @@ def memoryd_network_allow(data):
     if not previous:
         previous={**identity,'status':'active','created':False}
         write(path,previous)
-    elif previous.get('status')!='active':
+    elif previous.get('status')!='active' and not recovered:
         previous['status']='active';write(path,previous)
     probe='import socket,sys; s=socket.create_connection((sys.argv[1],8090),timeout=5); s.close()'
     run(['docker','exec','mcp-control-plane-schema-proxy','python3','-c',probe,NETWORK['gateway']],timeout=15)
+    if recovered and previous['status']!='active':
+        previous['status']='active';write(path,previous)
     return {**identity,'status':'PASS','rule_created':created_now,
             'rule_owned':previous['created'],'bridge_reachable':True}
 

@@ -13,6 +13,8 @@ sys.path.insert(0, str(ROOT / 'scripts'))
 import vm_deploy_host as host
 
 ACTIVATION = 'c' * 32
+TRANSFER = 'a' * 64
+INSTANCE = 'cmi_' + 'd' * 32
 NETWORK_ID = '123456789abc' + '0' * 52
 NETWORK = {'name': 'mcp-control-plane', 'subnet': '172.30.86.0/24', 'gateway': '172.30.86.1'}
 BRIDGE = 'br-123456789abc'
@@ -44,6 +46,10 @@ class FirewallVM:
         self.allow_calls = 0
         self.probes = 0
         self.commands = []
+        self.volume = {'Name': 'codex-memoryd-data', 'Driver': 'local', 'Scope': 'local',
+                       'Options': {}, 'Labels': {
+                           'mcp-control-plane.recovery-activation': ACTIVATION,
+                           'mcp-control-plane.restore-nonce': 'e' * 32}}
 
     def run(self, command, **_kwargs):
         self.commands.append(command)
@@ -58,6 +64,8 @@ class FirewallVM:
             return json.dumps(self.addresses).encode()
         if command == ['docker', 'inspect', 'mcp-control-plane-schema-proxy']:
             return json.dumps([self.proxy]).encode()
+        if command == ['docker', 'volume', 'inspect', 'codex-memoryd-data']:
+            return json.dumps([self.volume]).encode()
         if command == ['sudo', '-n', 'ufw', 'status']:
             return b'Status: active\n' if self.ufw_active else b'Status: inactive\n'
         if command == ['sudo', '-n', 'iptables', '-S', 'ufw-user-input']:
@@ -102,12 +110,14 @@ def recovery(tmp_path, monkeypatch):
     (bootstrap / 'memoryd-firewall.json').write_bytes(CAPTURED)
     (bootstrap / 'memoryd-firewall.json').chmod(0o600)
     verified = []
+    real_restore_validator = getattr(host, '_verified_memoryd_restore', None)
     monkeypatch.setattr(host, '_verified_memoryd_restore', lambda value: verified.append(value), raising=False)
     monkeypatch.setattr(host, 'memoryd_health', lambda *, activation_id: {'status': 'PASS'})
     vm = FirewallVM()
     monkeypatch.setattr(host, 'run', vm.run)
     monkeypatch.setattr(host.subprocess, 'run', vm.subprocess_run)
-    return {'state': state, 'store': store, 'bootstrap': bootstrap, 'vm': vm, 'verified': verified}
+    return {'state': state, 'store': store, 'bootstrap': bootstrap, 'vm': vm, 'verified': verified,
+            'real_restore_validator': real_restore_validator}
 
 
 def activate(recovery):
@@ -120,6 +130,184 @@ def receipt(recovery):
 
 def archive(recovery):
     return recovery['bootstrap'] / f'memoryd-firewall-captured-{ACTIVATION}.json'
+
+
+def finish_activation(recovery, monkeypatch):
+    activate(recovery)
+    marker_path = recovery['store'] / 'activation-in-progress.json'
+    marker = json.loads(marker_path.read_text())
+    marker.update(status='activated', memoryd_restored=True, memoryd_discovery='PASS',
+                  source_sha='1' * 40, expected_identity='2' * 64,
+                  memoryd={'status': 'captured', 'source_instance_id': INSTANCE})
+    host.write(marker_path, marker)
+    host.write(recovery['store'] / 'recovery-activation.json', {
+        'schema_version': 1, 'activation_id': ACTIVATION, 'source_sha': '1' * 40,
+        'expected_identity': '2' * 64, 'original_stopped_attested': True,
+        'identity_preserved': True, 'memoryd_restored': True, 'memoryd_discovery': 'PASS',
+        'recorded_at_ns': 1,
+    })
+    host.write(recovery['bootstrap'] / f'memoryd-transfer-{TRANSFER}.json', {
+        'status': 'complete', 'transfer_manifest_sha256': TRANSFER,
+        'source_profile': 'personal', 'source_workspace': 'dakota-codex-only',
+        'target_profile': 'personal', 'target_workspace': 'dakota-codex-only',
+        'destination_instance_id': INSTANCE, 'imported_record_count': 5,
+    })
+    monkeypatch.setattr(host, '_memoryd_record_count', lambda: 8)
+    monkeypatch.setattr(host, 'memoryd_health', lambda **_kwargs: {'status': 'PASS'})
+
+
+def test_normal_network_reuses_recovered_receipt_after_memories_grow(recovery, monkeypatch):
+    finish_activation(recovery, monkeypatch)
+    prior = receipt(recovery)
+    result = host.memoryd_network_allow({'transfer_manifest_sha256': TRANSFER})
+    assert result['status'] == 'PASS' and result['bridge_reachable'] is True
+    assert result['rule_created'] is False and result['rule_owned'] is True
+    assert receipt(recovery) == prior and archive(recovery).read_bytes() == CAPTURED
+    assert recovery['vm'].allow_calls == 1 and recovery['vm'].probes == 2
+
+
+def test_normal_network_reinstalls_only_private_rule_without_losing_recovery_provenance(recovery, monkeypatch):
+    finish_activation(recovery, monkeypatch)
+    prior = receipt(recovery)
+    recovery['vm'].rule_present = False
+    result = host.memoryd_network_allow({'transfer_manifest_sha256': TRANSFER})
+    assert result['rule_created'] is True and result['rule_owned'] is True
+    assert receipt(recovery) == prior and archive(recovery).read_bytes() == CAPTURED
+    assert recovery['vm'].allow_calls == 2 and recovery['vm'].probes == 2
+
+
+@pytest.mark.parametrize('when', ['before', 'after', 'probe'])
+def test_normal_network_failure_preserves_pending_receipt_and_rule_for_retry(recovery, monkeypatch, when):
+    finish_activation(recovery, monkeypatch)
+    vm = recovery['vm']
+    vm.rule_present = False
+    if when == 'probe':
+        vm.probe_failure = True
+    else:
+        vm.allow_failure = when
+    with pytest.raises(RuntimeError):
+        host.memoryd_network_allow({'transfer_manifest_sha256': TRANSFER})
+    assert receipt(recovery)['status'] == 'pending'
+    assert archive(recovery).read_bytes() == CAPTURED
+    vm.allow_failure = None
+    vm.probe_failure = False
+    result = host.memoryd_network_allow({'transfer_manifest_sha256': TRANSFER})
+    assert result['status'] == 'PASS' and receipt(recovery)['status'] == 'active'
+    assert vm.allow_calls == (3 if when == 'before' else 2)
+
+
+def test_normal_network_never_claims_foreign_preexisting_rule(recovery, monkeypatch):
+    recovery['vm'].rule_present = True
+    finish_activation(recovery, monkeypatch)
+    result = host.memoryd_network_allow({'transfer_manifest_sha256': TRANSFER})
+    assert result['rule_owned'] is False and result['rule_created'] is False
+    assert receipt(recovery)['created'] is False and recovery['vm'].allow_calls == 0
+
+
+def test_normal_network_accepts_a_second_recovery_with_intact_receipt_history(recovery, monkeypatch):
+    finish_activation(recovery, monkeypatch)
+    older_id = 'b' * 32
+    older_archive = recovery['bootstrap'] / f'memoryd-firewall-captured-{older_id}.json'
+    older_archive.write_bytes(CAPTURED)
+    older_archive.chmod(0o600)
+    older_receipt = {**receipt(recovery), 'activation_id': older_id,
+                     'captured_receipt_sha256': hashlib.sha256(CAPTURED).hexdigest()}
+    host.write(archive(recovery), older_receipt)
+    current = receipt(recovery)
+    current['captured_receipt_sha256'] = hashlib.sha256(archive(recovery).read_bytes()).hexdigest()
+    host.write(recovery['bootstrap'] / 'memoryd-firewall.json', current)
+    assert host.memoryd_network_allow({'transfer_manifest_sha256': TRANSFER})['status'] == 'PASS'
+    assert older_archive.read_bytes() == CAPTURED and receipt(recovery) == current
+
+
+def test_normal_network_accepts_absent_captured_firewall_receipt(recovery, monkeypatch):
+    (recovery['bootstrap'] / 'memoryd-firewall.json').unlink()
+    finish_activation(recovery, monkeypatch)
+    assert host.memoryd_network_allow({'transfer_manifest_sha256': TRANSFER})['status'] == 'PASS'
+    assert receipt(recovery)['captured_receipt_sha256'] is None
+    assert not archive(recovery).exists()
+
+
+def test_normal_network_rejects_different_captured_firewall_transfer(recovery, monkeypatch):
+    finish_activation(recovery, monkeypatch)
+    old = json.loads(archive(recovery).read_text())
+    old['transfer_manifest_sha256'] = 'f' * 64
+    host.write(archive(recovery), old)
+    current = receipt(recovery)
+    current['captured_receipt_sha256'] = hashlib.sha256(archive(recovery).read_bytes()).hexdigest()
+    host.write(recovery['bootstrap'] / 'memoryd-firewall.json', current)
+    with pytest.raises(ValueError, match='transfer does not match'):
+        host.memoryd_network_allow({'transfer_manifest_sha256': TRANSFER})
+    assert receipt(recovery) == current and recovery['vm'].allow_calls == 1
+
+
+@pytest.mark.parametrize('damage', ['transfer_missing', 'transfer_incomplete', 'transfer_instance',
+                                  'archive', 'activation_missing', 'activation_unattested',
+                                  'marker_incomplete', 'marker_identity', 'volume_unverified'])
+def test_normal_network_refuses_unproven_recovered_state(recovery, monkeypatch, damage):
+    finish_activation(recovery, monkeypatch)
+    transfer_path = recovery['bootstrap'] / f'memoryd-transfer-{TRANSFER}.json'
+    activation_path = recovery['store'] / 'recovery-activation.json'
+    marker_path = recovery['store'] / 'activation-in-progress.json'
+    if damage == 'transfer_missing':
+        transfer_path.unlink()
+    elif damage in ('transfer_incomplete', 'transfer_instance'):
+        value = json.loads(transfer_path.read_text())
+        value['status' if damage == 'transfer_incomplete' else 'destination_instance_id'] = (
+            'in_progress' if damage == 'transfer_incomplete' else 'cmi_' + 'e' * 32)
+        host.write(transfer_path, value)
+    elif damage == 'archive':
+        archive(recovery).write_bytes(b'tampered\n')
+    elif damage == 'activation_missing':
+        activation_path.unlink()
+    elif damage == 'activation_unattested':
+        value = json.loads(activation_path.read_text())
+        value['original_stopped_attested'] = False
+        host.write(activation_path, value)
+    elif damage in ('marker_incomplete', 'marker_identity'):
+        value = json.loads(marker_path.read_text())
+        if damage == 'marker_incomplete':
+            value['status'] = 'activating'
+        else:
+            value.pop('expected_identity')
+            record = json.loads(activation_path.read_text())
+            record.pop('expected_identity')
+            host.write(activation_path, record)
+        host.write(marker_path, value)
+    else:
+        def refuse(_marker):
+            raise ValueError('MemoryD recovery volume ownership could not be verified')
+        monkeypatch.setattr(host, '_verified_memoryd_restore', refuse)
+    prior = receipt(recovery)
+    with pytest.raises((ValueError, FileNotFoundError)):
+        host.memoryd_network_allow({'transfer_manifest_sha256': TRANSFER})
+    assert receipt(recovery) == prior
+    assert recovery['vm'].allow_calls == 1 and recovery['vm'].probes == 1
+
+
+def test_normal_network_checks_actual_restore_receipt_and_volume_labels(recovery, monkeypatch):
+    validator = recovery['real_restore_validator']
+    if validator is None:
+        pytest.skip('Restore validator is supplied by the recovery integration')
+    finish_activation(recovery, monkeypatch)
+    marker_path = recovery['store'] / 'activation-in-progress.json'
+    marker = json.loads(marker_path.read_text())
+    marker['prepared_manifest_sha256'] = 'd' * 64
+    marker['memoryd'].update(backup_sha256='f' * 64, record_count=8, active_record_count=7,
+                             archived_record_count=1, profile='personal', workspace='dakota-codex-only')
+    host.write(marker_path, marker)
+    host.write(recovery['store'] / f'memoryd-restore-{ACTIVATION}.json', {
+        'schema_version': 1, 'status': 'verified', 'activation_id': ACTIVATION,
+        'prepared_manifest_sha256': 'd' * 64, 'backup_sha256': 'f' * 64,
+        'source_instance_id': INSTANCE, 'record_count': 8, 'active_record_count': 7,
+        'archived_record_count': 1, 'volume': 'codex-memoryd-data', 'owner_nonce': 'e' * 32,
+    })
+    monkeypatch.setattr(host, '_verified_memoryd_restore', validator)
+    assert host.memoryd_network_allow({'transfer_manifest_sha256': TRANSFER})['status'] == 'PASS'
+    recovery['vm'].volume['Labels']['mcp-control-plane.restore-nonce'] = 'f' * 32
+    with pytest.raises(ValueError, match='volume ownership'):
+        host.memoryd_network_allow({'transfer_manifest_sha256': TRANSFER})
+    assert recovery['vm'].allow_calls == 1 and recovery['vm'].probes == 2
 
 
 def test_new_bridge_archives_captured_receipt_and_allows_only_private_traffic(recovery):
