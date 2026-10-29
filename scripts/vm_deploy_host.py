@@ -208,6 +208,17 @@ def memoryd_resource_gate(raw_meminfo):
     }
 
 
+def memoryd_listener_addresses(raw_ss):
+    addresses=set()
+    for line in raw_ss.splitlines():
+        columns=line.split()
+        if len(columns)>=5 and columns[0].startswith('tcp') and columns[1]=='LISTEN':
+            local=columns[4]
+            if local.endswith(':8787') or local.endswith(':8090'):
+                addresses.add(local)
+    return addresses
+
+
 def memoryd_preflight():
     existing = status()
     memory = memoryd_resource_gate(Path('/proc/meminfo').read_text())
@@ -215,11 +226,7 @@ def memoryd_preflight():
     rows = json.loads(run(['docker', 'inspect', *containers])) if containers else []
     owned = [row for row in rows if (row.get('Config', {}).get('Labels') or {}).get('service') in MEMORYD_SERVICES]
     volumes = set(run(['docker', 'volume', 'ls', '--format', '{{.Name}}']).decode().split())
-    listeners = []
-    for line in run(['ss', '-Hln']).decode().splitlines():
-        columns = line.split()
-        if len(columns) >= 4 and (columns[3].endswith(':8787') or columns[3].endswith(':8090')):
-            listeners.append(columns[3])
+    listeners=sorted(memoryd_listener_addresses(run(['ss','-Hln']).decode()))
     blockers = []
     if existing.get('authority') != 'kamal' or not existing.get('healthy'):
         blockers.append('existing_control_plane_unhealthy_or_unowned')
@@ -321,11 +328,7 @@ def memoryd_health():
     adapter_receipt=json.loads(private(adapter_path.parent/'artifact.json'))
     if adapter_receipt.get('adapter_sha256')!=adapter_path.parent.name:
         raise ValueError('Staged MemoryD bridge receipt does not match its content address')
-    listeners = set()
-    for line in run(['ss', '-Hln']).decode().splitlines():
-        columns = line.split()
-        if len(columns) >= 4 and (columns[3].endswith(':8787') or columns[3].endswith(':8090')):
-            listeners.add(columns[3])
+    listeners=memoryd_listener_addresses(run(['ss','-Hln']).decode())
     if listeners != {'127.0.0.1:8787', f'{gateway}:8090'}:
         raise ValueError('MemoryD listeners do not match the private bind contract')
     return {
@@ -339,6 +342,19 @@ def memoryd_health():
         'existing_tunnel_count': baseline['tunnel_count'],
         'existing_control_plane_healthy': baseline['healthy'],
     }
+
+
+def memoryd_executor_origin_check():
+    owner,groups,_=inspect()
+    row=groups.get('kamal',{}).get('executor')
+    if owner!='kamal' or not row:
+        raise ValueError('Managed Executor is unavailable')
+    environment=dict(item.split('=',1) for item in row.get('Config',{}).get('Env',[]) if '=' in item)
+    try:
+        origins=json.loads(environment.get('EXECUTOR_URL_ALLOW_HTTP_ORIGINS','[]'))
+    except json.JSONDecodeError:
+        raise ValueError('Executor HTTP origin policy is invalid') from None
+    return {'memoryd_origin_allowed':f"http://{NETWORK['gateway']}:8090" in origins}
 
 
 def memoryd_wait(timeout=180):
@@ -446,6 +462,7 @@ def memoryd_status():
                                  'health': state.get('Health', {}).get('Status')}
     volumes = set(run(['docker', 'volume', 'ls', '--format', '{{.Name}}']).decode().split())
     marker = STATE / 'bootstrap/memoryd-integration.json'
+    adapter_sha256=None
     if not services:
         state = 'VOLUME_ONLY' if MEMORYD_VOLUME in volumes else 'ABSENT'
     elif set(services) != MEMORYD_SERVICES:
@@ -453,13 +470,17 @@ def memoryd_status():
     elif all(item['state'] in ('exited', 'created') for item in services.values()):
         state = 'STOPPED'
     elif all(item['state'] == 'running' and item['health'] == 'healthy' for item in services.values()):
-        memoryd_health()
+        health=memoryd_health()
+        adapter_sha256=health.get('adapter_sha256')
         state = 'HEALTHY'
     else:
         state = 'UNHEALTHY'
-    return {'status': state, 'services': services,
+    result={'status': state, 'services': services,
             'volume_exists': MEMORYD_VOLUME in volumes,
             'app_registered': marker.exists() and not marker.is_symlink()}
+    if adapter_sha256:
+        result['adapter_sha256']=adapter_sha256
+    return result
 
 
 def memoryd_transfer_preflight():
@@ -753,8 +774,10 @@ def register_memoryd_app():
     write(marker, registered)
     c.search_memoryd(session)
     reads = c.probe_memoryd_reads(session)
+    denials = c.probe_memoryd_denials(url)
     return {'registered': True, 'app_id': registered['id'], 'tool_count': 3,
-            'executor_discovery': 'PASS', 'read_smoke': reads}
+            'executor_discovery': 'PASS', 'read_smoke': reads,
+            'negative_checks': denials}
 
 
 def lifecycle_check():
@@ -1471,7 +1494,7 @@ def main():
     if action=='lock':_ensure_private_state_store()
     elif action!='activation-plan' and action.startswith('activation-'):
         _verify_private_directory(STATE);_verify_private_directory(STORE)
-    elif action not in ('activation-plan','memoryd-preflight','memoryd-health','memoryd-wait','memoryd-status','memoryd-transfer-preflight',
+    elif action not in ('activation-plan','memoryd-preflight','memoryd-health','memoryd-wait','memoryd-status','memoryd-transfer-preflight','memoryd-executor-origin-check',
                         'devsy-plan','devsy-check','devsy-rollback-plan',
                         'devsy-tap-reconcile-plan','devsy-tap-reconcile',
                         'devsy-tap-rollback-plan','devsy-tap-rollback'):
@@ -1513,6 +1536,7 @@ def main():
     elif action=='status':result=status()
     elif action=='memoryd-preflight':result=memoryd_preflight()
     elif action=='memoryd-health':result=memoryd_health()
+    elif action=='memoryd-executor-origin-check':result=memoryd_executor_origin_check()
     elif action=='memoryd-wait':result=memoryd_wait()
     elif action=='memoryd-status':result=memoryd_status()
     elif action=='memoryd-adapter-prepare':result=memoryd_adapter_prepare(data)

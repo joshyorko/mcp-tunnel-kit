@@ -137,6 +137,17 @@ def test_memoryd_gate_accepts_only_when_available_memory_preserves_reserve():
     assert result["minimum_vm_ram_gib"] is None
 
 
+def test_memoryd_listener_parser_uses_listening_local_addresses_not_queue_depths():
+    addresses = vm_deploy_host.memoryd_listener_addresses(
+        "tcp LISTEN 0 128 127.0.0.1:8787 0.0.0.0:*\n"
+        "tcp LISTEN 0 5 172.30.86.1:8090 0.0.0.0:*\n"
+        "udp UNCONN 0 0 0.0.0.0:8090 0.0.0.0:*\n"
+        "tcp LISTEN 0 4096 127.0.0.1:4312 0.0.0.0:*\n"
+    )
+
+    assert addresses == {"127.0.0.1:8787", "172.30.86.1:8090"}
+
+
 def test_memoryd_preflight_is_read_only_and_stops_on_low_available_memory(monkeypatch):
     commands = []
     monkeypatch.setattr(vm_deploy_host, 'status', lambda: {
@@ -388,7 +399,8 @@ def test_memoryd_deploy_returns_blocked_without_sync_or_kamal_when_capacity_is_l
         if action == "snapshot":
             return {"authority": "kamal", "identity": "existing-executor", "inventory": {"executor": {}}, "tunnel_count": 1}
         if action == "memoryd-preflight":
-            return {"ready": False, "reason": "insufficient_available_memory", "mem_available_kb": 1_226_960}
+            return {"ready": False, "reason": "insufficient_available_memory", "mem_available_kb": 1_226_960,
+                    "target_container_count": 0, "target_volume_exists": False, "target_listeners": []}
         raise AssertionError(f"unexpected mutating or unplanned operation: {action}")
 
     monkeypatch.setattr(deploy_control_plane, "remote", remote)

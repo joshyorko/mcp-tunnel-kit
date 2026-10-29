@@ -926,9 +926,30 @@ def deploy_memoryd(source_sha, directory):
         return {'operation':'memoryd','status':'BLOCKED','reason':'existing_control_plane_identity_unverified',
                 'mutated':False}
     preflight = remote('memoryd-preflight')
+    existing_memoryd=False
     if preflight.get('ready') is not True:
-        return {'operation':'memoryd','status':'BLOCKED','reason':preflight.get('reason','memoryd_preflight_failed'),
-                'preflight':preflight,'mutated':False}
+        if (preflight.get('target_container_count')==0
+                and preflight.get('target_volume_exists') is False
+                and not preflight.get('target_listeners')):
+            return {'operation':'memoryd','status':'BLOCKED','reason':preflight.get('reason','memoryd_preflight_failed'),
+                    'preflight':preflight,'mutated':False}
+        expected_existing_blockers={'memoryd_container_state_already_exists',
+                                    'memoryd_volume_already_exists',
+                                    'memoryd_listener_port_already_in_use'}
+        memoryd_state=remote('memoryd-status')
+        adapter_sha=_sha256_file(ROOT/'scripts/codex_memoryd_mcp.py')
+        if (set(preflight.get('blockers',[]))-expected_existing_blockers
+                or preflight.get('existing_services_healthy') is not True
+                or preflight.get('tunnel_count')!=1
+                or preflight.get('target_container_count')!=2
+                or preflight.get('target_volume_exists') is not True
+                or set(preflight.get('target_listeners',[]))!={'127.0.0.1:8787',f"{INSTANCE['vm']['network']['gateway']}:8090"}
+                or memoryd_state.get('status')!='HEALTHY'
+                or memoryd_state.get('app_registered') is not False
+                or memoryd_state.get('adapter_sha256')!=adapter_sha):
+            return {'operation':'memoryd','status':'BLOCKED','reason':preflight.get('reason','memoryd_preflight_failed'),
+                    'preflight':preflight,'memoryd_status':memoryd_state,'mutated':False}
+        existing_memoryd=True
     current = remote('current')
     if (not current or current.get('authority') != 'kamal'
             or current.get('identity') != before['identity']
@@ -943,34 +964,40 @@ def deploy_memoryd(source_sha, directory):
     if adapter_path.is_symlink() or not adapter_path.is_file() or adapter_stat.st_uid!=os.getuid():
         raise ValueError('MemoryD adapter source is not an owned regular file')
     adapter_sha=_sha256_file(adapter_path)
-    adapter_data={'adapter_sha256':adapter_sha,'size_bytes':adapter_stat.st_size,
-                  'controller_sha':source_sha}
-    staged=remote('memoryd-adapter-prepare',adapter_data)
-    adapter_directory=profile_value['state_dir']+'/memoryd-adapter/'+adapter_sha
-    if staged.get('directory')!=adapter_directory or staged.get('adapter_sha256')!=adapter_sha:
-        raise ValueError('VM returned an unexpected MemoryD adapter staging path')
-    if staged.get('needs_upload') is True:
-        source_args=['scp','-p','-F',str(SSH),'-o','BatchMode=yes',
-                     '-o','StrictHostKeyChecking=yes','-o','ForwardAgent=no',
-                     str(adapter_path),f'{HOST}:{adapter_directory}/codex_memoryd_mcp.py']
-        result=subprocess.run(source_args,capture_output=True,text=True,timeout=120)
-        if result.returncode:
-            raise RuntimeError('Pinned SSH MemoryD adapter staging failed; source output withheld') from None
-    remote('memoryd-adapter-finalize',adapter_data)
+    if not existing_memoryd:
+        adapter_data={'adapter_sha256':adapter_sha,'size_bytes':adapter_stat.st_size,
+                      'controller_sha':source_sha}
+        staged=remote('memoryd-adapter-prepare',adapter_data)
+        adapter_directory=profile_value['state_dir']+'/memoryd-adapter/'+adapter_sha
+        if staged.get('directory')!=adapter_directory or staged.get('adapter_sha256')!=adapter_sha:
+            raise ValueError('VM returned an unexpected MemoryD adapter staging path')
+        if staged.get('needs_upload') is True:
+            source_args=['scp','-p','-F',str(SSH),'-o','BatchMode=yes',
+                         '-o','StrictHostKeyChecking=yes','-o','ForwardAgent=no',
+                         str(adapter_path),f'{HOST}:{adapter_directory}/codex_memoryd_mcp.py']
+            result=subprocess.run(source_args,capture_output=True,text=True,timeout=120)
+            if result.returncode:
+                raise RuntimeError('Pinned SSH MemoryD adapter staging failed; source output withheld') from None
+        remote('memoryd-adapter-finalize',adapter_data)
     config = configuration(directory,current['manifest'])
     phase = 'memoryd-boot'
     executor_reconfigured=False
+    executor_origin_updated=False
     try:
-        kamal(config,'boot','memoryd')
-        phase = 'memoryd-mcp-boot'
-        kamal(config,'boot','memoryd-mcp')
-        phase = 'health'
-        remote('memoryd-wait')
-        phase = 'executor-origin-update'
-        executor_reconfigured=True
-        kamal(config,'reboot','executor')
-        remote('wait',{'owner':'kamal','service':'executor'})
-        remote('identity-check')
+        if not existing_memoryd:
+            kamal(config,'boot','memoryd')
+            phase = 'memoryd-mcp-boot'
+            kamal(config,'boot','memoryd-mcp')
+            phase = 'health'
+            remote('memoryd-wait')
+        origin=remote('memoryd-executor-origin-check')
+        if origin.get('memoryd_origin_allowed') is not True:
+            phase = 'executor-origin-update'
+            executor_reconfigured=True
+            kamal(config,'reboot','executor')
+            remote('wait',{'owner':'kamal','service':'executor'})
+            remote('identity-check')
+            executor_origin_updated=True
         phase = 'existing-executor-smoke'
         smoke_result=smoke(None)
         after_status = remote('status')
@@ -986,7 +1013,8 @@ def deploy_memoryd(source_sha, directory):
                 or health.get('adapter_sha256') != adapter_sha):
             raise RuntimeError('post-deploy acceptance mismatch')
         return {'operation':'memoryd','status':'PASS','services':health,
-                'executor_app_registered':False,'executor_origin_updated':True,
+                'executor_app_registered':False,'executor_origin_updated':executor_origin_updated,
+                'memoryd_already_running':existing_memoryd,
                 'existing_identity_preserved':True,
                 'existing_inventory_preserved':True,'tunnel_count':after_status['tunnel_count'],
                 'controller_sha':source_sha,'adapter_sha256':adapter_sha,'preflight':preflight}

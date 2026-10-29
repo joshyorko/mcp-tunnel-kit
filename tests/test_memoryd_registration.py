@@ -22,7 +22,11 @@ EXPECTED = {"memory_status", "memory_recall", "memory_search"}
 
 
 class FakeMemorydBackend:
+    def __init__(self):
+        self.calls = []
+
     def request(self, method, path, payload=None):
+        self.calls.append((method,path,payload))
         if path == "/healthz":
             return {"ok": True}
         return {"ok": True, "data": {"authority": "recall_not_authority"}}
@@ -118,3 +122,18 @@ class MemorydRegistrationTests(unittest.TestCase):
         self.assertEqual(result["status"], "PASS")
         self.assertEqual(result["tools_called"], 3)
         self.assertNotIn("content", result)
+
+    def test_live_mcp_negative_write_and_scope_override_calls_fail_before_backend(self):
+        backend=FakeMemorydBackend()
+        server=bridge.McpServer(('127.0.0.1',0),backend)
+        thread=threading.Thread(target=server.serve_forever,daemon=True)
+        thread.start()
+        try:
+            url=f'http://127.0.0.1:{server.server_port}/mcp'
+            result=control.probe_memoryd_denials(url)
+            self.assertEqual(result,{'write_blocked':True,'scope_override_blocked':True})
+            self.assertEqual(backend.calls,[])
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)

@@ -752,6 +752,16 @@ def ensure_memoryd_app(http, url, receipt=None):
     return ensure_mcp_app(http, url, "MemoryD", receipt)
 
 
+def probe_memoryd_denials(url):
+    upstream=Mcp(Http(url.removesuffix("/mcp")),"/mcp")
+    verify_memoryd_catalog(upstream.tools())
+    write=upstream.call('tools/call',{'name':'memory_conclude','arguments':{'content':'denial fixture'}})
+    scope=upstream.call('tools/call',{'name':'memory_search','arguments':{'query':'scope fixture','workspace':'other-workspace'}})
+    if write.get('isError') is not True or scope.get('isError') is not True:
+        raise ControlError('MemoryD write or scope-override negative test did not fail closed.')
+    return {'write_blocked':True,'scope_override_blocked':True}
+
+
 def search_memoryd(session):
     data = execution(session.call("tools/call", {"name": "execute", "arguments": {"code":
         "const result = await tools.search(" + json.dumps({"namespace": "memoryd", "query": "memory", "limit": 100}) + "); return {items: result.items.map(item => ({path: item.path}))};"}}))
