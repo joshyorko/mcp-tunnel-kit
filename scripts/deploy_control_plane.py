@@ -1046,6 +1046,9 @@ def transfer_memoryd(directory):
     if before.get('identity') is None or before.get('tunnel_count')!=1:
         return {'operation':'memoryd-transfer','status':'BLOCKED',
                 'reason':'existing_control_plane_identity_unverified','mutated':False}
+    before_base=remote('memoryd-base-identity').get('identity')
+    if not before_base:
+        raise ValueError('Existing control-plane base identity is unavailable')
     memoryd=remote('memoryd-status')
     if memoryd.get('status')!='HEALTHY':
         return {'operation':'memoryd-transfer','status':'BLOCKED',
@@ -1088,14 +1091,20 @@ def transfer_memoryd(directory):
       registration=remote('memoryd-app-register',{
           'transfer_manifest_sha256':transfer['manifest_sha256'],
       })
+      phase='identity-reconciliation'
+      identity_receipt=remote('memoryd-identity-reconcile',{
+          'transfer_manifest_sha256':transfer['manifest_sha256'],
+      })
       phase='executor-discovery'
       smoke_result=smoke(None)
       after_status=remote('status')
       after=remote('snapshot')
+      after_base=remote('memoryd-base-identity').get('identity')
+      current=remote('current')
       health=remote('memoryd-health')
       if (after_status.get('authority')!='kamal' or after_status.get('healthy') is not True
               or after_status.get('tunnel_count')!=1
-              or after.get('identity')!=before['identity']
+              or after_base!=before_base or current.get('identity')!=after.get('identity')
               or after.get('inventory')!=before.get('inventory')
               or health.get('status')!='PASS'
               or receipt.get('status')!='complete'
@@ -1106,7 +1115,8 @@ def transfer_memoryd(directory):
               'source_db_sha256':transfer['manifest']['source_database_sha256'],
               'source_instance_id':transfer['manifest']['source_instance_id'],
               'transfer_manifest_sha256':transfer['manifest_sha256'],
-              'bundle_receipt':receipt,'private_network':network,'registration':registration,'services':health,
+              'bundle_receipt':receipt,'private_network':network,'registration':registration,
+              'identity_receipt':identity_receipt,'services':health,
               'executor_discovery':'PASS','existing_identity_preserved':True,
               'existing_inventory_preserved':True,'tunnel_count':after_status['tunnel_count'],
               'preflight':gate}
@@ -1127,21 +1137,28 @@ def finish_memoryd(operation):
     if (before_status.get('authority')!='kamal' or before_status.get('healthy') is not True
             or before_status.get('tunnel_count')!=1 or not before.get('identity')):
         raise ValueError('Existing control-plane health or identity is not acceptable')
+    before_base=remote('memoryd-base-identity').get('identity')
+    if not before_base:
+        raise ValueError('Existing control-plane base identity is unavailable')
     transfer=memoryd_transfer_payload()
     request={'transfer_manifest_sha256':transfer['manifest_sha256']}
     action='memoryd-network-allow' if operation=='memoryd-network' else 'memoryd-app-register'
     result=remote(action,request)
+    identity_receipt=remote('memoryd-identity-reconcile',request) if operation=='memoryd-register' else None
     discovery=smoke(None) if operation=='memoryd-register' else None
     after_status=remote('status')
     after=remote('snapshot')
+    after_base=remote('memoryd-base-identity').get('identity')
+    current=remote('current') if operation=='memoryd-register' else None
     health=remote('memoryd-health')
     if (after_status.get('authority')!='kamal' or after_status.get('healthy') is not True
-            or after_status.get('tunnel_count')!=1 or after.get('identity')!=before['identity']
+            or after_status.get('tunnel_count')!=1 or after_base!=before_base
             or after.get('inventory')!=before.get('inventory') or health.get('status')!='PASS'
             or (operation=='memoryd-register' and (result.get('registered') is not True
+                or current.get('identity')!=after.get('identity')
                 or discovery.get('memoryd_discovery')!='PASS'))):
         raise RuntimeError('MemoryD post-operation acceptance mismatch')
-    return {'operation':operation,'status':'PASS','result':result,
+    return {'operation':operation,'status':'PASS','result':result,'identity_receipt':identity_receipt,
             'existing_identity_preserved':True,'existing_inventory_preserved':True,
             'tunnel_count':after_status['tunnel_count'],'services':health}
 

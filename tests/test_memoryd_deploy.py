@@ -237,6 +237,107 @@ def test_memoryd_firewall_allow_is_idempotent_and_requires_owned_bridge(tmp_path
     assert sum(args[:4]==['sudo','-n','ufw','allow'] for args in calls)==1
 
 
+def test_memoryd_identity_transition_preserves_receipts_and_is_idempotent(tmp_path,monkeypatch):
+    tmp_path.chmod(0o700)
+    store=tmp_path/'deployment';store.mkdir(mode=0o700)
+    current={'authority':'kamal','identity':'old-identity','source_sha':'current'}
+    previous={'authority':'kamal','identity':'old-identity','source_sha':'previous'}
+    vm_deploy_host.write(store/'current.json',current)
+    vm_deploy_host.write(store/'previous.json',previous)
+    monkeypatch.setattr(vm_deploy_host,'STATE',tmp_path)
+    monkeypatch.setattr(vm_deploy_host,'STORE',store)
+    monkeypatch.setattr(vm_deploy_host,'_require_completed_memoryd_transfer',
+        lambda _data:{'transfer_manifest_sha256':'a'*64})
+    monkeypatch.setattr(vm_deploy_host,'memoryd_health',lambda:{'status':'PASS'})
+    monkeypatch.setattr(vm_deploy_host,'_verify_registered_memoryd_app',lambda:{'id':'app_memoryd'})
+    monkeypatch.setattr(vm_deploy_host,'identity',
+        lambda _name,exclude_memoryd=False:'old-identity' if exclude_memoryd else 'new-identity')
+
+    first=vm_deploy_host.memoryd_reconcile_identity({'transfer_manifest_sha256':'a'*64})
+    second=vm_deploy_host.memoryd_reconcile_identity({'transfer_manifest_sha256':'a'*64})
+
+    assert first['identity_updated'] is True and second['identity_updated'] is False
+    assert json.loads(vm_deploy_host.private(store/'current.json'))['identity']=='new-identity'
+    assert json.loads(vm_deploy_host.private(store/'previous.json'))['identity']=='new-identity'
+    assert json.loads(vm_deploy_host.private(store/('pre-memoryd-current-'+'a'*64+'.json')))==current
+    assert json.loads(vm_deploy_host.private(store/('pre-memoryd-previous-'+'a'*64+'.json')))==previous
+
+
+def test_memoryd_base_identity_excludes_only_the_receipted_unique_app():
+    apps=[{'id':'existing','slug':'codex','name':'Codex'},
+          {'id':'memory','slug':'memoryd','name':'MemoryD'}]
+    marker={'id':'memory','organization':'org','url':'http://172.30.86.1:8090/mcp'}
+    assert vm_deploy_host._memoryd_base_apps(apps,'org',marker,'172.30.86.1')==apps[:1]
+    with pytest.raises(ValueError,match='app identity'):
+        vm_deploy_host._memoryd_base_apps(apps,'org',{**marker,'id':'different'},'172.30.86.1')
+    with pytest.raises(ValueError,match='app identity'):
+        vm_deploy_host._memoryd_base_apps(apps+[apps[1]],'org',marker,'172.30.86.1')
+
+
+def test_memoryd_identity_transition_refuses_existing_identity_drift(tmp_path,monkeypatch):
+    tmp_path.chmod(0o700)
+    store=tmp_path/'deployment';store.mkdir(mode=0o700)
+    current={'authority':'kamal','identity':'unexpected'}
+    vm_deploy_host.write(store/'current.json',current)
+    monkeypatch.setattr(vm_deploy_host,'STATE',tmp_path)
+    monkeypatch.setattr(vm_deploy_host,'STORE',store)
+    monkeypatch.setattr(vm_deploy_host,'_require_completed_memoryd_transfer',
+        lambda _data:{'transfer_manifest_sha256':'a'*64})
+    monkeypatch.setattr(vm_deploy_host,'memoryd_health',lambda:{'status':'PASS'})
+    monkeypatch.setattr(vm_deploy_host,'_verify_registered_memoryd_app',lambda:{'id':'app_memoryd'})
+    monkeypatch.setattr(vm_deploy_host,'identity',
+        lambda _name,exclude_memoryd=False:'old-identity' if exclude_memoryd else 'new-identity')
+    with pytest.raises(ValueError,match='identity drift'):
+        vm_deploy_host.memoryd_reconcile_identity({'transfer_manifest_sha256':'a'*64})
+    assert json.loads(vm_deploy_host.private(store/'current.json'))==current
+
+
+def test_memoryd_identity_transition_resumes_after_one_receipt_was_updated(tmp_path,monkeypatch):
+    tmp_path.chmod(0o700)
+    store=tmp_path/'deployment';store.mkdir(mode=0o700)
+    transfer_id='a'*64
+    original={'authority':'kamal','identity':'old-identity'}
+    vm_deploy_host.write(store/'current.json',{**original,'identity':'new-identity'})
+    vm_deploy_host.write(store/'previous.json',original)
+    for name in ('current','previous'):
+        vm_deploy_host.write(store/f'pre-memoryd-{name}-{transfer_id}.json',original)
+    vm_deploy_host.write(store/f'memoryd-identity-{transfer_id}.json',{
+        'transfer_manifest_sha256':transfer_id,'previous_identity':'old-identity',
+        'updated_identity':'new-identity','memoryd_app_id':'app_memoryd',
+        'has_previous':True,'status':'pending'})
+    monkeypatch.setattr(vm_deploy_host,'STATE',tmp_path)
+    monkeypatch.setattr(vm_deploy_host,'STORE',store)
+    monkeypatch.setattr(vm_deploy_host,'_require_completed_memoryd_transfer',
+        lambda _data:{'transfer_manifest_sha256':transfer_id})
+    monkeypatch.setattr(vm_deploy_host,'memoryd_health',lambda:{'status':'PASS'})
+    monkeypatch.setattr(vm_deploy_host,'_verify_registered_memoryd_app',lambda:{'id':'app_memoryd'})
+    monkeypatch.setattr(vm_deploy_host,'identity',
+        lambda _name,exclude_memoryd=False:'old-identity' if exclude_memoryd else 'new-identity')
+    result=vm_deploy_host.memoryd_reconcile_identity({'transfer_manifest_sha256':transfer_id})
+    assert result['identity_updated'] is True
+    assert json.loads(vm_deploy_host.private(store/'previous.json'))['identity']=='new-identity'
+    assert json.loads(vm_deploy_host.private(store/f'memoryd-identity-{transfer_id}.json'))['status']=='complete'
+
+
+def test_memoryd_registration_accepts_only_the_receipted_app_inventory_change(monkeypatch):
+    snapshots=iter([{'identity':'before','inventory':{'executor':{}},'tunnel_count':1},
+                    {'identity':'after','inventory':{'executor':{}},'tunnel_count':1}])
+    def remote(action,_data=None):
+        if action=='status':return {'authority':'kamal','healthy':True,'tunnel_count':1}
+        if action=='snapshot':return next(snapshots)
+        if action=='memoryd-base-identity':return {'identity':'unchanged-existing-apps-and-keys'}
+        if action=='memoryd-app-register':return {'registered':True}
+        if action=='memoryd-identity-reconcile':return {'prior_identity_preserved':True}
+        if action=='current':return {'identity':'after'}
+        if action=='memoryd-health':return {'status':'PASS'}
+        raise AssertionError(action)
+    monkeypatch.setattr(deploy_control_plane,'remote',remote)
+    monkeypatch.setattr(deploy_control_plane,'memoryd_transfer_payload',lambda:{'manifest_sha256':'a'*64})
+    monkeypatch.setattr(deploy_control_plane,'smoke',lambda _native:{'memoryd_discovery':'PASS'})
+    result=deploy_control_plane.finish_memoryd('memoryd-register')
+    assert result['status']=='PASS' and result['existing_identity_preserved'] is True
+
+
 def test_memoryd_preflight_is_read_only_and_stops_on_low_available_memory(monkeypatch):
     commands = []
     monkeypatch.setattr(vm_deploy_host, 'status', lambda: {
@@ -598,6 +699,10 @@ def test_memoryd_transfer_imports_before_executor_registration_and_preserves_exi
             return {'authority':'kamal','healthy':True,'tunnel_count':1}
         if action=='snapshot':
             return before_snapshot
+        if action=='memoryd-base-identity':
+            return {'identity':'executor-identity'}
+        if action=='current':
+            return {'identity':'executor-identity'}
         if action=='memoryd-status':
             return {'status':'HEALTHY'}
         if action=='memoryd-transfer-preflight':
@@ -610,6 +715,8 @@ def test_memoryd_transfer_imports_before_executor_registration_and_preserves_exi
             return {'status':'PASS','bridge_reachable':True}
         if action=='memoryd-app-register':
             return {'registered':True,'tool_count':3}
+        if action=='memoryd-identity-reconcile':
+            return {'prior_identity_preserved':True}
         if action=='memoryd-health':
             return {'status':'PASS'}
         raise AssertionError(f'unexpected remote action: {action}')

@@ -99,6 +99,12 @@ before network setup or registration failed, resume with
 `bin/kamal accessory network memoryd` and then
 `bin/kamal accessory register memoryd`.
 
+Registering an app changes the Executor inventory digest. The managed
+registration verifies that every pre-existing app, key, and credential still
+matches the recorded identity, saves private copies of the current and previous
+deployment receipts, and records the new digest in both receipts. It refuses
+unexplained identity drift and can resume an interrupted receipt update.
+
 For rollback, disable the MemoryD app in Executor and run
 `bin/kamal accessory stop memoryd`. If the private firewall receipt says this
 deployment created the rule, remove only that exact UFW allow using the recorded

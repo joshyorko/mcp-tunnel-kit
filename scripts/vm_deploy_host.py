@@ -151,12 +151,28 @@ def inspect():
     return owner,groups,matching
 
 
-def identity(executor):
+def _memoryd_base_apps(apps,org,marker,gateway):
+    matches=[app for app in apps if app.get('slug')=='memoryd' or app.get('name')=='MemoryD']
+    if matches or marker:
+        if (len(matches)!=1 or not marker or matches[0].get('slug')!='memoryd'
+                or matches[0].get('name')!='MemoryD' or matches[0].get('id')!=marker.get('id')
+                or marker.get('organization')!=org
+                or marker.get('url')!=f"http://{gateway}:8090/mcp"):
+            raise ValueError('MemoryD app identity does not match its private receipt')
+        return [app for app in apps if app.get('id')!=marker['id']]
+    return apps
+
+
+def identity(executor, *, exclude_memoryd=False):
     from urllib.request import Request,urlopen
     pat = private(STATE/'secrets/executor-pat').decode().strip()
     def get(path):
         with urlopen(Request('http://127.0.0.1:4312'+path,headers={'Authorization':'Bearer '+pat}),timeout=15) as r: return json.load(r)
     context=get('/api/context');org=context['organization'];apps=get('/api/organizations/'+org+'/inventory')['apps']
+    if exclude_memoryd:
+        marker_path=STATE/'bootstrap/memoryd-integration.json'
+        marker=json.loads(private(marker_path)) if marker_path.exists() or marker_path.is_symlink() else None
+        apps=_memoryd_base_apps(apps,org,marker,NETWORK['gateway'])
     proof={'organization':org,'apps':sorted((x['id'],x['slug']) for x in apps),'keys':{},'secrets':{}}
     for name in ('auth-secret.key','encryption.key','install-id'):
         raw=run(['docker','cp',executor+':/app/data/'+name,'-'])
@@ -928,6 +944,74 @@ def register_memoryd_app(data):
             'negative_checks': denials}
 
 
+def _verify_registered_memoryd_app():
+    marker=json.loads(private(STATE/'bootstrap/memoryd-integration.json'))
+    import compose_control as c
+    os.environ.update(EXECUTOR_URL='http://127.0.0.1:4312',
+                      EXECUTOR_PAT_FILE=str(STATE/'secrets/executor-pat'))
+    http,session=c.executor_session()
+    c.verify_compact(session)
+    url=f"http://{NETWORK['gateway']}:8090/mcp"
+    registered=c.ensure_memoryd_app(http,url,marker)
+    if registered!=marker:
+        raise ValueError('MemoryD app receipt does not match the registered app')
+    c.search_memoryd(session)
+    c.probe_memoryd_reads(session)
+    c.probe_memoryd_denials(url)
+    return registered
+
+
+def memoryd_reconcile_identity(data):
+    transfer=_require_completed_memoryd_transfer(data)
+    memoryd_health()
+    app=_verify_registered_memoryd_app()
+    base=identity(NAMES['kamal']['executor'],exclude_memoryd=True)
+    updated=identity(NAMES['kamal']['executor'])
+    if base==updated:
+        raise ValueError('MemoryD identity transition is missing its app')
+    transfer_id=transfer['transfer_manifest_sha256']
+    paths={name:STORE/(name+'.json') for name in ('current','previous')}
+    documents={name:json.loads(private(path)) for name,path in paths.items()
+               if path.exists() or path.is_symlink()}
+    if 'current' not in documents or documents['current'].get('authority')!='kamal':
+        raise ValueError('MemoryD identity transition requires a Kamal deployment receipt')
+    transition_path=STORE/f'memoryd-identity-{transfer_id}.json'
+    transition=json.loads(private(transition_path)) if transition_path.exists() or transition_path.is_symlink() else None
+    expected={'transfer_manifest_sha256':transfer_id,'previous_identity':base,
+              'updated_identity':updated,'memoryd_app_id':app['id'],
+              'has_previous':'previous' in documents}
+    if transition and (any(transition.get(key)!=value for key,value in expected.items())
+                       or transition.get('status') not in ('pending','complete')):
+        raise ValueError('MemoryD identity transition receipt changed')
+    if any(document.get('identity') not in (base,updated) for document in documents.values()):
+        raise ValueError('Executor identity drift prevents MemoryD reconciliation')
+    if transition is None and any(document.get('identity')!=base for document in documents.values()):
+        raise ValueError('Executor identity drift prevents MemoryD reconciliation')
+    for name,document in documents.items():
+        backup=STORE/f'pre-memoryd-{name}-{transfer_id}.json'
+        if backup.exists() or backup.is_symlink():
+            original=json.loads(private(backup))
+            if original.get('identity')!=base or {**original,'identity':document['identity']}!=document:
+                raise ValueError('MemoryD deployment receipt backup changed')
+        else:
+            if document.get('identity')!=base:
+                raise ValueError('MemoryD deployment receipt backup is missing')
+            write(backup,document)
+    if transition is None:
+        transition={**expected,'status':'pending'}
+        write(transition_path,transition)
+    changed=False
+    for name,document in documents.items():
+        if document['identity']==base:
+            document['identity']=updated
+            write(paths[name],document)
+            changed=True
+    if transition['status']!='complete':
+        transition['status']='complete';write(transition_path,transition)
+    return {'identity_updated':changed,'prior_identity_preserved':True,
+            'current_identity_matches':True,'previous_receipt_preserved':'previous' in documents}
+
+
 def lifecycle_check():
     current=json.loads(private(STORE/'current.json'))
     if current['authority']!='kamal':raise ValueError('Local lifecycle requires accepted Kamal ownership')
@@ -1647,7 +1731,7 @@ def main():
                         'devsy-tap-reconcile-plan','devsy-tap-reconcile',
                         'devsy-tap-rollback-plan','devsy-tap-rollback'):
         STORE.mkdir(mode=0o700,exist_ok=True)
-    data=json.load(sys.stdin) if action in ('images','image-check','network','network-check','wait','commit','baseline','set-current','rollback-commit','restart-local','activation-plan','activation-preflight','activation-begin','activation-pull-images','activation-install','activation-track','activation-seed','activation-network','activation-identity','activation-cleanup','activation-record','smoke','memoryd-adapter-prepare','memoryd-adapter-finalize','memoryd-transfer-prepare','memoryd-import-bundles','memoryd-network-allow','memoryd-app-register','devsy-plan','devsy-check','devsy-rollback-plan','devsy-apply','devsy-rollback','devsy-scope-rebind-check','devsy-scope-rebind','devsy-bridge-path-check','devsy-bridge-path-apply','devsy-tap-reconcile-plan','devsy-tap-reconcile','devsy-tap-rollback-plan','devsy-tap-rollback') else {}
+    data=json.load(sys.stdin) if action in ('images','image-check','network','network-check','wait','commit','baseline','set-current','rollback-commit','restart-local','activation-plan','activation-preflight','activation-begin','activation-pull-images','activation-install','activation-track','activation-seed','activation-network','activation-identity','activation-cleanup','activation-record','smoke','memoryd-adapter-prepare','memoryd-adapter-finalize','memoryd-transfer-prepare','memoryd-import-bundles','memoryd-network-allow','memoryd-app-register','memoryd-identity-reconcile','devsy-plan','devsy-check','devsy-rollback-plan','devsy-apply','devsy-rollback','devsy-scope-rebind-check','devsy-scope-rebind','devsy-bridge-path-check','devsy-bridge-path-apply','devsy-tap-reconcile-plan','devsy-tap-reconcile','devsy-tap-rollback-plan','devsy-tap-rollback') else {}
     if action=='activation-plan':result=activation_plan(data['generation_dir'])
     elif action=='activation-preflight':
         info=_ensure_empty_activation_target(data['generation_dir'],allow_lock=True)
@@ -1694,6 +1778,8 @@ def main():
     elif action=='memoryd-import-bundles':result=memoryd_import_bundles(data)
     elif action=='memoryd-network-allow':result=memoryd_network_allow(data)
     elif action=='memoryd-app-register':result=register_memoryd_app(data)
+    elif action=='memoryd-base-identity':result={'identity':identity(NAMES['kamal']['executor'],exclude_memoryd=True)}
+    elif action=='memoryd-identity-reconcile':result=memoryd_reconcile_identity(data)
     elif action=='lifecycle-check':result=lifecycle_check()
     elif action=='identity-check':
         if identity(NAMES['kamal']['executor'])!=json.loads(private(STORE/'current.json'))['identity']:
