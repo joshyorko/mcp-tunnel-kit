@@ -1165,6 +1165,132 @@ def memoryd_network_allow(data):
             'rule_owned':previous['created'],'bridge_reachable':True}
 
 
+def _activation_memoryd_firewall_receipt(activation_id, identity):
+    """Retain the captured receipt before replacing bridge-specific state."""
+    directory=STATE/'bootstrap'
+    _verify_private_directory(directory)
+    path=directory/'memoryd-firewall.json'
+    archive=directory/f'memoryd-firewall-captured-{activation_id}.json'
+    if not os.path.lexists(path):
+        if os.path.lexists(archive):
+            raise ValueError('MemoryD captured firewall receipt has no current receipt')
+        return path,None,None
+    original=private(path)
+    try:
+        previous=json.loads(original)
+    except (ValueError,UnicodeDecodeError):
+        raise ValueError('MemoryD firewall receipt is invalid') from None
+    if not isinstance(previous,dict):
+        raise ValueError('MemoryD firewall receipt is invalid')
+    if previous.get('activation_id')==activation_id:
+        keys=set(identity)|{'status','created','captured_receipt_sha256'}
+        captured=previous.get('captured_receipt_sha256')
+        if (set(previous)!=keys or any(previous.get(key)!=value for key,value in identity.items())
+                or previous.get('status') not in ('pending','active')
+                or type(previous.get('created')) is not bool
+                or (captured is not None and (not isinstance(captured,str)
+                    or not re.fullmatch(r'[a-f0-9]{64}',captured)))):
+            raise ValueError('MemoryD activation firewall receipt identity changed')
+        if captured is None:
+            if os.path.lexists(archive):
+                raise ValueError('Unexpected captured MemoryD firewall receipt')
+        elif not os.path.lexists(archive) or hashlib.sha256(private(archive)).hexdigest()!=captured:
+            raise ValueError('Captured MemoryD firewall receipt changed')
+        return path,previous,captured
+
+    if os.path.lexists(archive):
+        if private(archive)!=original:
+            raise ValueError('Captured MemoryD firewall receipt already exists')
+    else:
+        # A hard link preserves the exact private bytes and cannot replace another receipt.
+        os.link(path,archive,follow_symlinks=False)
+        directory_fd=os.open(directory,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+        try:os.fsync(directory_fd)
+        finally:os.close(directory_fd)
+        if private(archive)!=original:
+            raise ValueError('Captured MemoryD firewall receipt changed')
+    return path,None,hashlib.sha256(original).hexdigest()
+
+
+def activation_memoryd_network(data):
+    if not isinstance(data,dict) or set(data)!={'activation_id'}:
+        raise ValueError('MemoryD activation network request is invalid')
+    activation_id=data['activation_id']
+    marker=_activation_marker(activation_id)
+    if marker.get('status')!='activating' or marker.get('original_stopped_attested') is not True:
+        raise ValueError('MemoryD activation network requires an active attested recovery')
+    _verified_memoryd_restore(marker)
+    memoryd_health(activation_id=activation_id)
+    registration=json.loads(private(STATE/'bootstrap/memoryd-integration.json'))
+    if (not _valid_memoryd_receipt(registration)
+            or registration['url']!=f"http://{NETWORK['gateway']}:8090/mcp"):
+        raise ValueError('Captured MemoryD registration does not match the private gateway')
+    if not network_check(NETWORK):
+        raise ValueError('MemoryD private network is not owned by Kamal')
+    rows=json.loads(run(['docker','network','inspect',NETWORK['name']]))
+    if len(rows)!=1 or not isinstance(rows[0],dict):
+        raise ValueError('MemoryD private bridge identity is ambiguous')
+    row=rows[0]
+    network_id=row.get('Id')
+    configs=(row.get('IPAM') or {}).get('Config') or []
+    if (not isinstance(network_id,str) or not re.fullmatch(r'[a-f0-9]{64}',network_id)
+            or row.get('Name')!=NETWORK['name'] or row.get('Driver')!='bridge'
+            or (row.get('Labels') or {}).get('mcp-control-plane.owner')!='kamal'
+            or sum(item.get('Subnet')==NETWORK['subnet'] and item.get('Gateway')==NETWORK['gateway']
+                   for item in configs if isinstance(item,dict))!=1):
+        raise ValueError('MemoryD private bridge identity changed')
+    bridge=(row.get('Options') or {}).get('com.docker.network.bridge.name','br-'+network_id[:12])
+    check,allow=_memoryd_firewall_commands(NETWORK,bridge)
+    addresses=json.loads(run(['ip','-j','-4','address','show','dev',bridge]))
+    subnet=ipaddress.ip_network(NETWORK['subnet'])
+    if not any(item.get('local')==NETWORK['gateway'] and item.get('prefixlen')==subnet.prefixlen
+               for address in addresses for item in address.get('addr_info',[])):
+        raise ValueError('MemoryD gateway is not assigned to the owned bridge')
+    proxy_name=NAMES['kamal']['schema-proxy']
+    proxies=json.loads(run(['docker','inspect',proxy_name]))
+    if len(proxies)!=1 or not isinstance(proxies[0],dict):
+        raise ValueError('MemoryD schema proxy identity is ambiguous')
+    proxy=proxies[0]
+    attachment=(proxy.get('NetworkSettings',{}).get('Networks') or {}).get(NETWORK['name']) or {}
+    try:proxy_address=ipaddress.ip_address(attachment.get('IPAddress',''))
+    except ValueError:raise ValueError('MemoryD schema proxy is not on the private bridge') from None
+    if (proxy.get('Name','').lstrip('/')!=proxy_name
+            or (proxy.get('Config',{}).get('Labels') or {}).get('service')!=proxy_name
+            or proxy.get('State',{}).get('Running') is not True
+            or attachment.get('NetworkID')!=network_id or proxy_address not in subnet
+            or proxy_address in (subnet.network_address,subnet.broadcast_address,
+                                 ipaddress.ip_address(NETWORK['gateway']))):
+        raise ValueError('MemoryD schema proxy is not on the private bridge')
+    ufw=run(['sudo','-n','ufw','status']).decode()
+    if not re.search(r'(?m)^Status: active\s*$',ufw):
+        raise ValueError('MemoryD private firewall requires active UFW')
+    run(['sudo','-n','iptables','-S','ufw-user-input'])
+
+    def rule_exists():
+        result=subprocess.run(check,capture_output=True,timeout=15)
+        if result.returncode not in (0,1):
+            raise ValueError('MemoryD firewall rule check failed')
+        return result.returncode==0
+
+    exists=rule_exists()
+    identity={'schema_version':1,'activation_id':activation_id,'bridge':bridge,
+              'subnet':NETWORK['subnet'],'gateway':NETWORK['gateway'],'port':8090}
+    path,previous,captured=_activation_memoryd_firewall_receipt(activation_id,identity)
+    owned=previous['created'] if previous else False
+    if not exists:owned=True
+    receipt={**identity,'status':'pending','created':owned,'captured_receipt_sha256':captured}
+    write(path,receipt)
+    if not exists:
+        run(allow,timeout=60)
+        if not rule_exists():
+            raise ValueError('MemoryD private firewall rule was not installed')
+    probe='import socket,sys; s=socket.create_connection((sys.argv[1],8090),timeout=5); s.close()'
+    run(['docker','exec',proxy_name,'python3','-c',probe,NETWORK['gateway']],timeout=15)
+    receipt['status']='active';write(path,receipt)
+    return {**identity,'status':'PASS','rule_created':not exists,
+            'rule_owned':owned,'bridge_reachable':True}
+
+
 def register_memoryd_app(data):
     transfer=_require_completed_memoryd_transfer(data)
     memoryd_health()
@@ -2532,7 +2658,7 @@ def main():
                         'devsy-tap-reconcile-plan','devsy-tap-reconcile',
                         'devsy-tap-rollback-plan','devsy-tap-rollback'):
         STORE.mkdir(mode=0o700,exist_ok=True)
-    data=json.load(sys.stdin) if action in ('images','image-check','network','network-check','wait','commit','baseline','set-current','rollback-commit','restart-local','activation-plan','activation-preflight','activation-begin','activation-pull-images','activation-install','activation-track','activation-seed','activation-network','activation-identity','activation-cleanup','activation-record','activation-memoryd-wait','activation-memoryd-restore','smoke','memoryd-adapter-prepare','memoryd-adapter-finalize','memoryd-transfer-prepare','memoryd-import-bundles','memoryd-network-allow','memoryd-app-register','memoryd-registration-reconcile','memoryd-identity-reconcile','devsy-plan','devsy-check','devsy-rollback-plan','devsy-apply','devsy-rollback','devsy-scope-rebind-check','devsy-scope-rebind','devsy-bridge-path-check','devsy-bridge-path-apply','devsy-tap-reconcile-plan','devsy-tap-reconcile','devsy-tap-rollback-plan','devsy-tap-rollback') else {}
+    data=json.load(sys.stdin) if action in ('images','image-check','network','network-check','wait','commit','baseline','set-current','rollback-commit','restart-local','activation-plan','activation-preflight','activation-begin','activation-pull-images','activation-install','activation-track','activation-seed','activation-network','activation-identity','activation-cleanup','activation-record','activation-memoryd-wait','activation-memoryd-network','activation-memoryd-restore','smoke','memoryd-adapter-prepare','memoryd-adapter-finalize','memoryd-transfer-prepare','memoryd-import-bundles','memoryd-network-allow','memoryd-app-register','memoryd-registration-reconcile','memoryd-identity-reconcile','devsy-plan','devsy-check','devsy-rollback-plan','devsy-apply','devsy-rollback','devsy-scope-rebind-check','devsy-scope-rebind','devsy-bridge-path-check','devsy-bridge-path-apply','devsy-tap-reconcile-plan','devsy-tap-reconcile','devsy-tap-rollback-plan','devsy-tap-rollback') else {}
     if action=='activation-plan':result=activation_plan(data['generation_dir'])
     elif action=='activation-preflight':
         info=_ensure_empty_activation_target(data['generation_dir'],allow_lock=True)
@@ -2548,6 +2674,7 @@ def main():
         if set(data)!={'generation_dir','prepared_manifest_sha256','activation_id'}:raise ValueError('MemoryD recovery request is invalid')
         result=activation_memoryd_restore(data['generation_dir'],data['prepared_manifest_sha256'],data['activation_id'])
     elif action=='activation-network':result=activation_network(data['activation_id'])
+    elif action=='activation-memoryd-network':result=activation_memoryd_network(data)
     elif action=='activation-identity':result=activation_identity(data['expected_identity'],data['activation_id'])
     elif action=='activation-memoryd-wait':result=memoryd_wait(activation_id=data['activation_id'])
     elif action=='activation-cleanup':result=activation_cleanup(data['activation_id'],data['attempted_services'])
