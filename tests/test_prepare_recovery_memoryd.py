@@ -295,15 +295,15 @@ def test_prepared_generation_rejects_changed_image_pin_even_with_updated_invento
     ("subjects", "profile_id", None),
     ("episodes", "workspace_id", "elsewhere"),
     ("episodes", "workspace_id", None),
-    ("sessions", "profile_id", "work"),
-    ("sessions", "profile_id", "PERSONAL"),
-    ("sessions", "workspace_id", None),
+    ("dream_jobs", "profile_id", "work"),
+    ("dream_jobs", "profile_id", "PERSONAL"),
+    ("dream_jobs", "workspace_id", None),
 ])
 def test_all_tables_reject_wrong_or_missing_single_scope_columns(tmp_path, table, column, value):
     restored, _descriptor = captured_fixture(tmp_path)
     backup = restored / "vm-snapshot/memoryd/backup.db"
     with sqlite3.connect(backup) as db:
-        if table == "sessions":
+        if table == "dream_jobs":
             db.execute(f'CREATE TABLE "{table}" (id TEXT, "{column}" TEXT COLLATE NOCASE)')
         else:
             db.execute(f'ALTER TABLE "{table}" ADD COLUMN "{column}" TEXT')
@@ -319,13 +319,13 @@ def test_all_tables_reject_wrong_or_missing_single_scope_columns(tmp_path, table
 @pytest.mark.parametrize("table,column,value", [
     ("subjects", "profile_id", "personal"),
     ("episodes", "workspace_id", "dakota-codex-only"),
-    ("sessions", "workspace_id", "dakota-codex-only"),
+    ("dream_jobs", "workspace_id", "dakota-codex-only"),
 ])
 def test_single_scope_columns_accept_the_matching_scope(tmp_path, table, column, value):
     restored, _descriptor = captured_fixture(tmp_path)
     backup = restored / "vm-snapshot/memoryd/backup.db"
     with sqlite3.connect(backup) as db:
-        if table == "sessions":
+        if table == "dream_jobs":
             db.execute(f'CREATE TABLE "{table}" (id TEXT, "{column}" TEXT)')
         else:
             db.execute(f'ALTER TABLE "{table}" ADD COLUMN "{column}" TEXT')
@@ -368,6 +368,33 @@ def test_workspace_catalog_requires_a_profile_binding(tmp_path):
 
     with pytest.raises(generation.GenerationError):
         generation.prepare_generation(restored, tmp_path / "prepared")
+
+
+@pytest.mark.parametrize("table", ["sessions", "visible_turns"])
+def test_memoryd_backup_rejects_session_history(tmp_path, table):
+    restored, _descriptor = captured_fixture(tmp_path)
+    backup = restored / "vm-snapshot/memoryd/backup.db"
+    with sqlite3.connect(backup) as db:
+        db.execute(f'CREATE TABLE "{table}" (id TEXT)')
+        db.execute(f'INSERT INTO "{table}" VALUES (?)', ("synthetic",))
+    refresh_backup_hashes(restored)
+
+    with pytest.raises(generation.GenerationError, match="session history"):
+        generation.prepare_generation(restored, tmp_path / "prepared")
+    assert not (tmp_path / "prepared").exists()
+
+
+def test_memoryd_backup_accepts_empty_session_history_tables(tmp_path):
+    restored, _descriptor = captured_fixture(tmp_path)
+    backup = restored / "vm-snapshot/memoryd/backup.db"
+    with sqlite3.connect(backup) as db:
+        db.execute("CREATE TABLE sessions (id TEXT)")
+        db.execute("CREATE TABLE visible_turns (id TEXT)")
+    refresh_backup_hashes(restored)
+
+    result = generation.prepare_generation(restored, tmp_path / "prepared")
+
+    assert result["memoryd"]["status"] == "captured"
 
 
 def test_cli_refusal_never_prints_memory_content(tmp_path):

@@ -502,6 +502,10 @@ def _memoryd_scope(database, descriptor):
     if not {"profiles", "workspaces"}.issubset(names):
         raise _fail("MemoryD backup scope catalogs are missing.")
     for (table,) in tables:
+        identifier = '"' + table.replace('"', '""') + '"'
+        if table.lower() in {"sessions", "visible_turns"}:
+            if database.execute(f"SELECT 1 FROM {identifier} LIMIT 1").fetchone() is not None:
+                raise _fail("MemoryD backup contains session history.")
         columns = {row[0].lower(): row[0] for row in database.execute(
             "SELECT name FROM pragma_table_xinfo(?)", (table,)
         )}
@@ -516,7 +520,6 @@ def _memoryd_scope(database, descriptor):
             raise _fail("MemoryD backup scope catalogs are invalid.")
         if table == "workspaces" and "profile_id" not in columns:
             raise _fail("MemoryD backup workspace catalog has no profile binding.")
-        identifier = '"' + table.replace('"', '""') + '"'
         for column, expected in checks.items():
             if column not in columns:
                 continue
