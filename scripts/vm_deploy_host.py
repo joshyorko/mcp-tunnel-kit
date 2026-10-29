@@ -1253,6 +1253,8 @@ def memoryd_reconcile_pending_registration(data):
 
 def _verify_registered_memoryd_app():
     marker=json.loads(private(STATE/'bootstrap/memoryd-integration.json'))
+    if not _valid_memoryd_receipt(marker):
+        raise ValueError('MemoryD app receipt is invalid')
     import compose_control as c
     os.environ.update(EXECUTOR_URL='http://127.0.0.1:4312',
                       EXECUTOR_PAT_FILE=str(STATE/'secrets/executor-pat'))
