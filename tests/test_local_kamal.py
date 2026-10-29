@@ -37,6 +37,24 @@ def test_memoryd_deploy_routes_to_its_capacity_gated_controller():
     assert cli.parse_command(['accessory', 'reconcile-registration', 'memoryd']) == ('reconcile-registration', 'memoryd')
 
 
+@pytest.mark.parametrize('command,operation', [
+    ('reconcile-update', 'memoryd-rollout-reconcile'),
+    ('abort-update', 'memoryd-rollout-abort'),
+    ('complete-update', 'memoryd-rollout-complete'),
+    ('release-update', 'memoryd-rollout-release'),
+])
+def test_rollout_recovery_requires_exact_id_and_routes_to_its_controller(command, operation, monkeypatch):
+    calls=[]
+    monkeypatch.setattr(cli, 'bundle_environment', lambda: None)
+    monkeypatch.setattr(cli.deploy, 'configure_local', lambda _path: None)
+    monkeypatch.setattr(cli.deploy, 'trusted_context', lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli.deploy, 'execute', lambda args: calls.append(args) or {'status': 'fixture'})
+    assert cli.main(['accessory', command, 'memoryd']) == 1
+    assert cli.main(['accessory', command, 'memoryd', '--rollout-id', 'not-valid']) == 1
+    assert cli.main(['accessory', command, 'memoryd', '--rollout-id', 'd' * 32]) == 0
+    assert calls[0].operation == operation and calls[0].rollout_id == 'd' * 32
+
+
 def test_registration_reconciliation_flag_is_forwarded_only_for_that_command(monkeypatch, capsys):
     calls = []
     monkeypatch.setattr(cli, 'bundle_environment', lambda: None)

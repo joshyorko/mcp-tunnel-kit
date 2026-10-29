@@ -21,6 +21,7 @@ import tempfile
 import time
 import zipfile
 import zlib
+import uuid
 
 from kamal_model import render,validate_manifest
 from image_provenance import verify as verify_provenance
@@ -217,6 +218,66 @@ def kamal(config,operation,name):
     env={**os.environ,'BUNDLE_GEMFILE':str(ROOT/'Gemfile.deploy'),'KAMAL_PUBLIC_DOCKER_CONFIG':docker_config}
     r=subprocess.run(['bundle','exec','ruby',str(ROOT/'scripts/kamal_anonymous.rb'),'accessory',operation,name,'--config-file',str(config)],env=env,capture_output=True,text=True,timeout=300)
     if r.returncode:raise RuntimeError('Kamal accessory '+operation+' '+name+' failed; raw output withheld')
+
+
+def _rollout_kamal_environment(docker_config, *, locked):
+    expected=profile()['state_dir']+'/deployment/anonymous-docker-config'
+    if docker_config!=expected:raise ValueError('Unexpected anonymous Docker config for MemoryD rollout')
+    env={**os.environ,'BUNDLE_GEMFILE':str(ROOT/'Gemfile.deploy'),
+         'KAMAL_PUBLIC_DOCKER_CONFIG':docker_config}
+    env.pop('KAMAL_LOCK',None)
+    if locked:env['KAMAL_LOCK']='true'
+    return env
+
+
+def kamal_rollout_reboot(config, rollout_id, docker_config):
+    """Run one adapter-only reboot under our verified persistent Kamal lock."""
+    if not re.fullmatch(r'[a-f0-9]{32}',str(rollout_id)):
+        raise ValueError('MemoryD rollout identity is invalid')
+    env=_rollout_kamal_environment(docker_config,locked=True)
+    remote('memoryd-rollout-lock-check',{'rollout_id':rollout_id})
+    argv=['bundle','exec','ruby',str(ROOT/'scripts/kamal_anonymous.rb'),
+          'accessory','reboot','memoryd-mcp','--config-file',str(config)]
+    try:result=subprocess.run(argv,env=env,capture_output=True,text=True,timeout=300)
+    except (subprocess.TimeoutExpired,OSError):
+        raise RuntimeError('MemoryD adapter reboot outcome unknown; retain fences and reconcile before retry') from None
+    if result.returncode:
+        raise RuntimeError('MemoryD adapter reboot outcome unknown; retain fences and reconcile before retry')
+
+
+def kamal_rollout_lock(config, operation, rollout_id, docker_config):
+    if operation not in ('acquire','release') or not re.fullmatch(r'[a-f0-9]{32}',str(rollout_id)):
+        raise ValueError('MemoryD rollout Kamal lock request is invalid')
+    env=_rollout_kamal_environment(docker_config,locked=False)
+    if operation=='release':remote('memoryd-rollout-lock-check',{'rollout_id':rollout_id})
+    argv=['bundle','exec','ruby',str(ROOT/'scripts/kamal_anonymous.rb'),'lock',operation]
+    if operation=='acquire':argv+=['--message','memoryd-adapter-rollout:'+rollout_id]
+    argv+=['--config-file',str(config)]
+    try:result=subprocess.run(argv,env=env,capture_output=True,text=True,timeout=90)
+    except (subprocess.TimeoutExpired,OSError):
+        raise RuntimeError('MemoryD rollout Kamal lock outcome unknown; inspect before retry') from None
+    if result.returncode:
+        raise RuntimeError('MemoryD rollout Kamal lock outcome unknown; inspect before retry')
+
+
+@contextlib.contextmanager
+def memoryd_rollout_recovery_lock(rollout_id):
+    if not re.fullmatch(r'[a-f0-9]{32}',str(rollout_id)):
+        raise ValueError('MemoryD rollout identity is invalid')
+    source=remote_source()
+    argv=ssh_args(shlex.join(['python3','-c',REMOTE_STDIN_BOOTSTRAP,'memoryd-rollout-lock',
+                              encode_instance_profile(INSTANCE)]))
+    process=subprocess.Popen(argv,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+    try:
+        process.stdin.write(source+'\n'+json.dumps({'rollout_id':rollout_id})+'\n');process.stdin.flush()
+        if not select.select([process.stdout],[],[],15)[0] or process.stdout.readline().strip()!='LOCKED':
+            raise RuntimeError('MemoryD rollout recovery lock unavailable')
+        yield
+        if process.poll() is not None:raise RuntimeError('MemoryD rollout recovery lock was lost')
+    finally:
+        process.stdin.close()
+        try:process.wait(timeout=10)
+        except subprocess.TimeoutExpired:process.terminate();process.wait(timeout=5)
 
 
 def configuration(directory,manifest,*,allow_memoryd_mcp=True,memoryd_recovery=None):
@@ -1084,6 +1145,115 @@ def memoryd_legacy_reconciliation_payload(home=None):
             'source_proof':proof}
 
 
+def upgrade_memoryd_adapter(source_sha,directory):
+    """Roll the reviewed adapter only; retain admission gates on any failure."""
+    status=remote('status');before=remote('snapshot');current=remote('current')
+    health=remote('memoryd-health')
+    if (status.get('authority')!='kamal' or status.get('healthy') is not True
+            or status.get('tunnel_count')!=1 or before.get('tunnel_count')!=1
+            or not current or current.get('identity')!=before.get('identity')
+            or current.get('authority')!='kamal' or health.get('status')!='PASS'
+            or remote('memoryd-registration-check').get('registration_verified') is not True):
+        raise ValueError('MemoryD adapter rollout baseline is not healthy and registered')
+    adapter=ROOT/'scripts/codex_memoryd_mcp.py';info=adapter.lstat()
+    if (adapter.is_symlink() or not adapter.is_file() or info.st_uid!=os.getuid()
+            or not 0<info.st_size<=1024*1024 or not re.fullmatch(r'[a-f0-9]{40}',source_sha)):
+        raise ValueError('MemoryD adapter rollout source is invalid')
+    desired=_sha256_file(adapter)
+    if desired==health.get('adapter_sha256'):
+        return {'operation':'memoryd-upgrade','status':'already-current','adapter_sha256':desired,'mutated':False}
+    data={'adapter_sha256':desired,'size_bytes':info.st_size,'controller_sha':source_sha}
+    staged=remote('memoryd-adapter-prepare',data)
+    expected=profile()['state_dir']+'/memoryd-adapter/'+desired
+    if staged.get('directory')!=expected or staged.get('adapter_sha256')!=desired:
+        raise ValueError('MemoryD rollout staging path is unexpected')
+    if staged.get('needs_upload') is True:
+        argv=['scp','-p','-F',str(SSH),'-o','BatchMode=yes','-o','StrictHostKeyChecking=yes',
+              '-o','ForwardAgent=no',str(adapter),f'{HOST}:{expected}/codex_memoryd_mcp.py']
+        result=subprocess.run(argv,capture_output=True,text=True,timeout=120)
+        if result.returncode:raise RuntimeError('MemoryD rollout staging failed; inspect before retry')
+    remote('memoryd-adapter-finalize',data)
+    docker_config=remote('anonymous-docker-config')['path']
+    recovery={'status':'captured','backend_image':health['memoryd_image'],
+              'adapter_image':health['adapter_image'],'adapter_sha256':desired}
+    config=configuration(directory,current['manifest'],memoryd_recovery=recovery)
+    rollout_id=uuid.uuid4().hex
+    phase='acquiring-kamal-lock'
+    try:
+        kamal_rollout_lock(config,'acquire',rollout_id,docker_config)
+        phase='fencing'
+        remote('memoryd-rollout-begin',{**data,'rollout_id':rollout_id})
+        phase='adapter-reboot'
+        kamal_rollout_reboot(config,rollout_id,docker_config)
+        phase='adapter-readiness'
+        remote('memoryd-rollout-wait',{'rollout_id':rollout_id})
+        phase='select-pin'
+        remote('memoryd-rollout-select',{'rollout_id':rollout_id})
+        phase='acceptance'
+        accepted=remote('memoryd-rollout-accept',{'rollout_id':rollout_id})
+        if accepted.get('status')!='accepted':raise ValueError('MemoryD rollout acceptance was not recorded')
+        phase='finish'
+        finished=remote('memoryd-rollout-finish',{'rollout_id':rollout_id})
+        if finished.get('status')!='complete':raise ValueError('MemoryD rollout completion was not recorded')
+        phase='release-kamal-lock'
+        if remote('memoryd-rollout-release-check',{'rollout_id':rollout_id}).get('safe_to_release') is not True:
+            raise ValueError('MemoryD rollout lock release is not verified')
+        kamal_rollout_lock(config,'release',rollout_id,docker_config)
+        phase='final-verification'
+        final=remote('memoryd-health');after=remote('snapshot');smoke_result=smoke(None)
+        if (final.get('status')!='PASS' or final.get('adapter_sha256')!=desired
+                or final.get('adapter_image')!=health['adapter_image']
+                or after.get('identity')!=before.get('identity') or after.get('inventory')!=before.get('inventory')
+                or after.get('tunnel_count')!=1 or smoke_result.get('memoryd_discovery')!='PASS'):
+            raise ValueError('MemoryD rollout final verification failed')
+        return {'operation':'memoryd-upgrade','status':'PASS','rollout_id':rollout_id,
+                'old_adapter_sha256':health['adapter_sha256'],'adapter_sha256':desired,
+                'adapter_image':health['adapter_image'],'identity_preserved':True,
+                'tunnel_count':1,'executor':accepted.get('executor')}
+    except Exception:
+        raise RuntimeError('MemoryD adapter rollout stopped at '+phase+'; rollout '+rollout_id+
+                           '; do not retry a reboot until lock and live state are reconciled') from None
+
+
+def release_memoryd_rollout(rollout_id,directory):
+    check=remote('memoryd-rollout-release-check',{'rollout_id':rollout_id})
+    if check.get('safe_to_release') is not True:
+        raise ValueError('MemoryD rollout lock release is not verified')
+    current=remote('current')
+    if not current or current.get('authority')!='kamal' or current.get('manifest') is None:
+        raise ValueError('MemoryD rollout lock release lacks an accepted generation')
+    config=configuration(directory,current['manifest'])
+    docker_config=remote('anonymous-docker-config')['path']
+    kamal_rollout_lock(config,'release',rollout_id,docker_config)
+    return {'operation':'memoryd-rollout-release','status':check['status'],'rollout_id':rollout_id,
+            'released':True,'automatic_reboot':False}
+
+
+def recover_memoryd_rollout(operation,rollout_id,directory):
+    if operation not in ('memoryd-rollout-reconcile','memoryd-rollout-abort','memoryd-rollout-complete'):
+        raise ValueError('MemoryD rollout recovery operation is invalid')
+    request={'rollout_id':rollout_id}
+    reconciled=remote('memoryd-rollout-reconcile',request)
+    if reconciled.get('status')!='fenced':raise ValueError('MemoryD rollout did not reconcile to a fence')
+    if operation=='memoryd-rollout-reconcile':
+        return {'operation':operation,**reconciled}
+    if operation=='memoryd-rollout-abort':
+        if reconciled.get('pin')!='old':raise ValueError('MemoryD rollout old-pin abort is not available')
+        result=remote('memoryd-rollout-abort',request)
+        if result.get('status')!='aborted':raise ValueError('MemoryD rollout abort was not recorded')
+    else:
+        # This only observes a healthy new container; it never starts or reboots one.
+        remote('memoryd-rollout-wait',request)
+        remote('memoryd-rollout-select',request)
+        result=remote('memoryd-rollout-accept',request)
+        if result.get('status')!='accepted':raise ValueError('MemoryD rollout acceptance was not recorded')
+        result=remote('memoryd-rollout-finish',request)
+        if result.get('status')!='complete':raise ValueError('MemoryD rollout completion was not recorded')
+    release=release_memoryd_rollout(rollout_id,directory)
+    return {'operation':operation,'status':result['status'],'rollout_id':rollout_id,
+            'released':release['released'],'automatic_reboot':False}
+
+
 def deploy_memoryd(source_sha, directory):
     """Add only the private MemoryD accessories after a read-only capacity gate."""
     before_status = remote('status')
@@ -1377,7 +1547,17 @@ def execute(args):
     trusted_context(os.environ,args.local)
     if args.operation in ('adopt','deploy','rollback') and not args.approve_full_stack:raise ValueError('Explicit full-stack approval input required')
     sha=os.environ.get('GITHUB_SHA') or subprocess.check_output(['git','rev-parse','HEAD'],cwd=ROOT,text=True).strip()
+    rollout_recovery=('memoryd-rollout-reconcile','memoryd-rollout-abort','memoryd-rollout-complete')
+    if args.operation in (*rollout_recovery,'memoryd-rollout-release'):
+        rollout_id=getattr(args,'rollout_id',None)
+        if not (args.local and LOCAL_CONFIGURED) or not re.fullmatch(r'[a-f0-9]{32}',str(rollout_id or '')):
+            raise ValueError('MemoryD rollout recovery requires the private local profile and exact rollout ID')
+        if args.operation in rollout_recovery:
+            with memoryd_rollout_recovery_lock(rollout_id), tempfile.TemporaryDirectory(prefix='mcp-kamal-rollout-recovery-') as directory:
+                return recover_memoryd_rollout(args.operation,rollout_id,directory)
     with lock(), tempfile.TemporaryDirectory(prefix='mcp-kamal-') as directory:
+        if args.operation=='memoryd-rollout-release':
+            return release_memoryd_rollout(rollout_id,directory)
         if args.operation in ('devsy-bridge-path-check', 'devsy-bridge-path-apply'):
             if native_tuple is None or args.local or LOCAL_CONFIGURED:
                 raise ValueError('Bridge PATH repair requires the protected Pi and exact native tuple')
@@ -1403,6 +1583,10 @@ def execute(args):
             if not (args.local and LOCAL_CONFIGURED):
                 raise ValueError('MemoryD accessory deployment requires the private pinned local Kamal profile')
             return deploy_memoryd(sha,directory)
+        if args.operation=='memoryd-upgrade':
+            if not (args.local and LOCAL_CONFIGURED):
+                raise ValueError('MemoryD adapter update requires the private pinned local Kamal profile')
+            return upgrade_memoryd_adapter(sha,directory)
         if args.operation=='memoryd-transfer':
             if not (args.local and LOCAL_CONFIGURED):
                 raise ValueError('MemoryD bundle transfer requires the private pinned local Kamal profile')
