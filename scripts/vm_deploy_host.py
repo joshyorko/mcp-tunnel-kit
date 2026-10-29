@@ -910,7 +910,7 @@ def _memoryd_capture_cli(stage, args):
     command = ['docker', 'run', '--rm', '--pull=never', '--network=none', '--read-only',
                '--tmpfs', '/tmp:rw,nosuid,nodev,size=16m,mode=1777',
                '--user', '10001:10001', '--memory', '256m', '--memory-swap', '256m',
-               '--cpus', '0.5', '--mount', 'type=volume,source=codex-memoryd-data,target=/data',
+               '--cpus', '0.5', '--mount', 'type=volume,source=' + MEMORYD_VOLUME + ',target=/data',
                '--env', 'CODEX_MEMORYD_HOME=' + stage, '--entrypoint', '/bin/sh', MEMORYD_IMAGE,
                '-c', 'source=$1; shift; umask 077; exec /usr/local/bin/codex-memoryd --local --db "$source" "$@"',
                'memoryd-capture', stage + '/source.db', *args]
@@ -931,7 +931,7 @@ def _memoryd_capture_readonly_snapshot(image, spool):
     command = ['docker', 'run', '--rm', '--pull=never', '--network=none', '--read-only',
                '--user', '10001:10001', '--memory', '256m', '--memory-swap', '256m',
                '--cpus', '0.5', '--tmpfs', '/tmp:rw,nosuid,nodev,size=64m,mode=1777',
-               '--mount', 'type=volume,source=codex-memoryd-data,target=/data,readonly',
+               '--mount', 'type=volume,source=' + MEMORYD_VOLUME + ',target=/data,readonly',
                '--entrypoint', 'python3', image, '-c', MEMORYD_READONLY_SNAPSHOT_CODE,
                '/data/memory.db', str(MEMORYD_CAPTURE_MAX_BYTES)]
     result = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=spool,
