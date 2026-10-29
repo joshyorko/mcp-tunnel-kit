@@ -411,6 +411,51 @@ def test_recovery_cleanup_stops_only_owned_memoryd_and_retains_volume(tmp_path,m
     assert result['recovered_state_preserved'] is True
 
 
+def test_recovery_cleanup_rejects_forged_helper_before_removing_services(tmp_path,monkeypatch):
+    tmp_path.chmod(0o700);monkeypatch.setattr(host,'STORE',tmp_path)
+    activation_id='c'*32;nonce='d'*32
+    marker={'started_services':['memoryd'],'status':'activating','memoryd':{'status':'captured'}}
+    monkeypatch.setattr(host,'_activation_marker',lambda _id,**kwargs:marker)
+    receipt={'helper_name':'foreign-helper','owner_nonce':nonce}
+    (tmp_path/f'memoryd-restore-{activation_id}.json').write_text(json.dumps(receipt))
+    (tmp_path/f'memoryd-restore-{activation_id}.json').chmod(0o600)
+    service={'Id':'fixture-container','Name':'/mcp-control-plane-memoryd',
+             'Config':{'Image':'fixture','Labels':{'service':'mcp-control-plane-memoryd'}},
+             'State':{'Running':True}}
+    helper={'Id':'foreign','Name':'/foreign-helper',
+            'Config':{'Image':host.MEMORYD_IMAGE,'Labels':{
+                'mcp-control-plane.recovery-activation':activation_id,
+                'mcp-control-plane.restore-nonce':nonce}},'State':{'Running':True}}
+    monkeypatch.setattr(host,'_activation_container_rows',lambda:[service,helper])
+    with patch.object(host,'run') as run:
+        with pytest.raises(ValueError,match='helper'):
+            host.activation_cleanup(activation_id,['memoryd'])
+    run.assert_not_called()
+
+
+def test_recovery_cleanup_retains_verified_helper(tmp_path,monkeypatch):
+    tmp_path.chmod(0o700);monkeypatch.setattr(host,'STORE',tmp_path)
+    activation_id='c'*32;nonce='d'*32
+    name='mcp-recovery-memoryd-'+activation_id[:12]+'-'+nonce[:12]
+    marker={'started_services':[],'status':'activating','memoryd':{'status':'captured'}}
+    monkeypatch.setattr(host,'_activation_marker',lambda _id,**kwargs:marker)
+    receipt={'helper_name':name,'owner_nonce':nonce}
+    (tmp_path/f'memoryd-restore-{activation_id}.json').write_text(json.dumps(receipt))
+    (tmp_path/f'memoryd-restore-{activation_id}.json').chmod(0o600)
+    helper={'Id':'helper-id','Name':'/'+name,
+            'Config':{'Labels':{'mcp-control-plane.recovery-activation':activation_id,
+                                'mcp-control-plane.restore-nonce':nonce}},
+            'State':{'Running':True}}
+    monkeypatch.setattr(host,'_activation_container_rows',lambda:[helper])
+    monkeypatch.setattr(host,'_memoryd_restore_image',lambda _descriptor:'image-id')
+    checks=[]
+    monkeypatch.setattr(host,'_memoryd_restore_helper',lambda *args,**kwargs:checks.append((args,kwargs)))
+    monkeypatch.setattr(host,'_memoryd_restore_volume',lambda *args:checks.append(args))
+    result=host.activation_cleanup(activation_id,[])
+    assert result['memoryd_helper_retained'] is True
+    assert checks==[(('helper-id',name,activation_id,nonce,'image-id'),{'running':True}),(activation_id,nonce)]
+
+
 def test_recovery_pulls_captured_memoryd_images_before_restore(monkeypatch):
     captured={'status':'captured','backend_image':host.MEMORYD_IMAGE,
               'adapter_image':'ghcr.io/joshyorko/codex-action-server@sha256:'+'e'*64}

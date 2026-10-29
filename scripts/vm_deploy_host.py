@@ -2709,12 +2709,23 @@ def activation_cleanup(activation_id,attempted_services):
     selected=[];helper_retained=False
     restore_path=STORE/f'memoryd-restore-{activation_id}.json'
     restore=json.loads(private(restore_path)) if restore_path.exists() or restore_path.is_symlink() else None
+    if restore is not None:
+        nonce=restore.get('owner_nonce') if isinstance(restore,dict) else None
+        if (not isinstance(nonce,str) or not re.fullmatch(r'[a-f0-9]{32}',nonce)
+                or restore.get('helper_name')!='mcp-recovery-memoryd-'+activation_id[:12]+'-'+nonce[:12]):
+            raise ValueError('MemoryD recovery helper receipt is invalid')
     for row in rows:
         name=row.get('Name','').lstrip('/')
         labels=row.get('Config',{}).get('Labels',{}) or {}
         if (restore and name==restore.get('helper_name')
                 and labels.get('mcp-control-plane.recovery-activation')==activation_id
                 and labels.get('mcp-control-plane.restore-nonce')==restore.get('owner_nonce')):
+            running=row.get('State',{}).get('Running')
+            if type(running) is not bool:
+                raise ValueError('MemoryD recovery helper state is invalid')
+            image_id=_memoryd_restore_image(marker.get('memoryd'))
+            _memoryd_restore_helper(row['Id'],name,activation_id,nonce,image_id,running=running)
+            _memoryd_restore_volume(activation_id,nonce)
             helper_retained=True
             continue
         service=next((key for key,value in names.items() if value==name),None)
