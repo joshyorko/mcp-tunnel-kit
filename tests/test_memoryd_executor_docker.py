@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import secrets
 import subprocess
+import sys
 import time
 import urllib.parse
 import uuid
@@ -452,10 +453,15 @@ def test_restored_memoryd_through_isolated_executor(tmp_path, monkeypatch):
         stage = 'isolated Executor startup'
         sidecars = Sidecars(fixture, daemon_id)
         sidecars.start()
-        control = live.load_script('compose_control')
-        control.Http = netns_http(sidecars, control)
-        stage = 'Executor MemoryD discovery and reads'
-        executor_proof(control, EXECUTOR_ORIGIN, sidecars.restart_executor, sidecars)
+        previous_control = sys.modules.get('compose_control')
+        with monkeypatch.context() as isolated:
+            isolated.setitem(sys.modules, 'compose_control', previous_control)
+            control = live.load_script('compose_control')
+            control.Http = netns_http(sidecars, control)
+            stage = 'Executor MemoryD discovery and reads'
+            executor_proof(control, EXECUTOR_ORIGIN, sidecars.restart_executor, sidecars)
+        live.require(sys.modules.get('compose_control') is previous_control,
+                     'Fixture did not restore the control module')
     except Exception as error:
         diagnostic = ''
         if sidecars is not None and sidecars.last_request is not None:
