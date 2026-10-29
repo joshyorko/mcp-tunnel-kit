@@ -270,6 +270,22 @@ def memoryd_preflight():
     }
 
 
+def _memoryd_adapter_image(current, receipt):
+    if receipt is None:
+        cas=current['manifest']['images']['cas']
+        image=cas['repository']+'@'+cas['digest']
+    else:
+        if (not isinstance(receipt,dict) or set(receipt)!={'schema_version','image','adapter_sha256'}
+                or receipt.get('schema_version')!=1
+                or not isinstance(receipt.get('adapter_sha256'),str)
+                or not re.fullmatch(r'[a-f0-9]{64}',receipt['adapter_sha256'])):
+            raise ValueError('MemoryD adapter image receipt is invalid')
+        image=receipt.get('image')
+    if not isinstance(image,str) or not re.fullmatch(r'ghcr\.io/joshyorko/codex-action-server@sha256:[a-f0-9]{64}',image):
+        raise ValueError('MemoryD adapter image receipt is invalid')
+    return image
+
+
 def memoryd_health():
     baseline = status()
     if baseline.get('authority') != 'kamal' or not baseline.get('healthy') or baseline.get('tunnel_count') != 1:
@@ -287,8 +303,9 @@ def memoryd_health():
         raise ValueError('MemoryD accessories are incomplete')
 
     current = json.loads(private(STORE / 'current.json'))
-    cas = current['manifest']['images']['cas']
-    expected_bridge_image = cas['repository'] + '@' + cas['digest']
+    image_path=STATE/'bootstrap/memoryd-adapter-image.json'
+    image_receipt=json.loads(private(image_path)) if image_path.exists() or image_path.is_symlink() else None
+    expected_bridge_image=_memoryd_adapter_image(current,image_receipt)
     gateway = NETWORK['gateway']
     memoryd = services['mcp-control-plane-memoryd']
     bridge = services['mcp-control-plane-memoryd-mcp']
@@ -344,6 +361,8 @@ def memoryd_health():
     adapter_receipt=json.loads(private(adapter_path.parent/'artifact.json'))
     if adapter_receipt.get('adapter_sha256')!=adapter_path.parent.name:
         raise ValueError('Staged MemoryD bridge receipt does not match its content address')
+    if image_receipt and image_receipt['adapter_sha256']!=adapter_path.parent.name:
+        raise ValueError('MemoryD adapter image receipt does not match its artifact')
     listeners=memoryd_listener_addresses(run(['ss','-Hln']).decode())
     if listeners != {'127.0.0.1:8787', f'{gateway}:8090'}:
         raise ValueError('MemoryD listeners do not match the private bind contract')
@@ -358,6 +377,19 @@ def memoryd_health():
         'existing_tunnel_count': baseline['tunnel_count'],
         'existing_control_plane_healthy': baseline['healthy'],
     }
+
+
+def memoryd_pin_adapter_image():
+    health=memoryd_health()
+    path=STATE/'bootstrap/memoryd-adapter-image.json'
+    expected={'schema_version':1,'image':health['adapter_image'],
+              'adapter_sha256':health['adapter_sha256']}
+    if path.exists() or path.is_symlink():
+        if json.loads(private(path))!=expected:
+            raise ValueError('MemoryD adapter image receipt changed')
+        return {'adapter_image_pinned':True,'created':False}
+    write(path,expected)
+    return {'adapter_image_pinned':True,'created':True}
 
 
 def memoryd_executor_origin_check():
@@ -562,7 +594,7 @@ def _validate_memoryd_transfer_manifest(data):
                 or not re.fullmatch(r'sha256:[a-f0-9]{64}',bundle['manifest_digest'])):
             raise ValueError('MemoryD bundle digest is invalid')
         size=bundle['size_bytes'];root_count=bundle['root_count']
-        if type(size) is not int or not 0<size<=64*1024*1024 or type(root_count) is not int or not 0<root_count<=5000:
+        if type(size) is not int or not 0<size<=24*1024*1024 or type(root_count) is not int or not 0<root_count<=5000:
             raise ValueError('MemoryD bundle exceeds the released size or root limit')
         if not isinstance(bundle['bundle_id'],str) or not bundle['bundle_id'].startswith('sha256:'):
             raise ValueError('MemoryD bundle identity is invalid')
@@ -677,6 +709,15 @@ def _memoryd_record_count():
     return int(match.group(1))
 
 
+def _memoryd_tmp_available():
+    output=run(['docker','exec','mcp-control-plane-memoryd','df','-Pk','/tmp'],timeout=15).decode()
+    lines=output.splitlines()
+    fields=lines[-1].split() if lines else []
+    if len(fields)<6 or fields[-1]!='/tmp' or not fields[-3].isdigit():
+        raise ValueError('MemoryD temporary storage capacity is unavailable')
+    return int(fields[-3])*1024
+
+
 def _validate_memoryd_bundle_report(report, manifest, bundle):
     if (not isinstance(report,dict) or report.get('integrity_status')!='verified'
             or report.get('bundle_id')!=bundle['bundle_id']
@@ -780,13 +821,24 @@ def memoryd_import_bundles(data):
         return {'counts':counts,'receipt_id':applied_receipt.get('receipt_id'),
                 'destination_instance_id':destination}
 
+    def stage_apply(bundle,index,*,idempotency=False):
+        if _memoryd_tmp_available()<bundle['size_bytes']+4*1024*1024:
+            raise ValueError('MemoryD temporary storage is insufficient for the next bundle')
+        suffix='replay' if idempotency else 'apply'
+        container_path=f"/tmp/memoryd-transfer-{transfer_id[:12]}-{staging_id}-{index:02d}-{suffix}.bundle"
+        target_tmp.append(container_path)
+        try:
+            _memoryd_stage_bundle(directory/bundle['path'],container_path,bundle)
+            return preview_apply(bundle,container_path,idempotency=idempotency)
+        finally:
+            _memoryd_run_step('bundle cleanup',
+                ['docker','exec','--user','10001:10001','mcp-control-plane-memoryd','rm','-f',container_path],timeout=60)
+            target_tmp.remove(container_path)
+
     try:
         for index,bundle in enumerate(manifest['bundles'],1):
-            name=bundle['path'];host_path=directory/name
-            container_path=f"/tmp/memoryd-transfer-{transfer_id[:12]}-{staging_id}-{index:02d}.bundle"
-            target_tmp.append(container_path)
-            _memoryd_stage_bundle(host_path,container_path,bundle)
-            applied=preview_apply(bundle,container_path)
+            name=bundle['path']
+            applied=stage_apply(bundle,index)
             receipt['bundles'][name]={'sha256':bundle['sha256'],'manifest_digest':bundle['manifest_digest'],
                                       'counts':applied['counts'],'receipt_id':applied['receipt_id']}
             write(receipt_path,receipt)
@@ -798,8 +850,8 @@ def memoryd_import_bundles(data):
                 or status_data.get('active_workspaces')!=['dakota-codex-only']):
             raise ValueError('MemoryD target profile/workspace boundary does not match source')
         idempotency=[]
-        for bundle,container_path in zip(manifest['bundles'],target_tmp):
-            replay=preview_apply(bundle,container_path,idempotency=True)
+        for index,bundle in enumerate(manifest['bundles'],1):
+            replay=stage_apply(bundle,index,idempotency=True)
             idempotency.append({'path':bundle['path'],'creates':replay['counts'].get('create',0),
                                 'identity_reuses':replay['counts'].get('reuse_identity_exact',0),
                                 'content_reuses':replay['counts'].get('reuse_content_exact',0)})
@@ -1768,6 +1820,7 @@ def main():
     elif action=='status':result=status()
     elif action=='memoryd-preflight':result=memoryd_preflight()
     elif action=='memoryd-health':result=memoryd_health()
+    elif action=='memoryd-pin-adapter-image':result=memoryd_pin_adapter_image()
     elif action=='memoryd-executor-origin-check':result=memoryd_executor_origin_check()
     elif action=='memoryd-wait':result=memoryd_wait()
     elif action=='memoryd-status':result=memoryd_status()
@@ -1778,6 +1831,8 @@ def main():
     elif action=='memoryd-import-bundles':result=memoryd_import_bundles(data)
     elif action=='memoryd-network-allow':result=memoryd_network_allow(data)
     elif action=='memoryd-app-register':result=register_memoryd_app(data)
+    elif action=='memoryd-registration-check':
+        _verify_registered_memoryd_app();result={'registration_verified':True}
     elif action=='memoryd-base-identity':result={'identity':identity(NAMES['kamal']['executor'],exclude_memoryd=True)}
     elif action=='memoryd-identity-reconcile':result=memoryd_reconcile_identity(data)
     elif action=='lifecycle-check':result=lifecycle_check()

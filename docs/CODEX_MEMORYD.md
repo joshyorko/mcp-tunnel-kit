@@ -89,8 +89,15 @@ source generations in one transfer.
 The active manifest is `exports/kamal-test-deploy-transfer-manifest-active.json`
 under the isolated MemoryD home. The VM keeps a separate receipt for each
 transfer manifest and retains any earlier incomplete receipt. The managed
-import streams verified bundles into the container's writable temporary
-filesystem; the container root filesystem remains read-only.
+import streams one verified bundle at a time into the container's writable
+temporary filesystem; the container root filesystem remains read-only. Each
+bundle must be at most 24 MiB, and temporary free space is checked before each
+stage. Before upload, the controller re-exports each selection from a verified
+scratch copy of the frozen backup using the pinned x86-64 v0.1.0 release binary
+and compares the content descriptors and policy metadata.
+
+The adapter's immutable image digest is recorded separately from the CAS
+deployment receipt, so a later CAS upgrade does not change the adapter's pin.
 
 After import, the managed transfer permits TCP port 8090 only from the owned
 private bridge subnet to its gateway, on that bridge interface. It requires an

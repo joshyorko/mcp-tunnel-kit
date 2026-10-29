@@ -382,6 +382,30 @@ def test_memoryd_status_reports_absent_without_creating_a_volume_or_marker(tmp_p
     assert list(tmp_path.iterdir()) == []
 
 
+def test_memoryd_adapter_image_remains_pinned_when_cas_is_upgraded():
+    old='ghcr.io/joshyorko/codex-action-server@sha256:'+'a'*64
+    current={'manifest':{'images':{'cas':{'repository':'ghcr.io/joshyorko/codex-action-server',
+                                          'digest':'sha256:'+'b'*64}}}}
+    receipt={'schema_version':1,'image':old,'adapter_sha256':'c'*64}
+    assert vm_deploy_host._memoryd_adapter_image(current,receipt)==old
+    assert vm_deploy_host._memoryd_adapter_image(current,None).endswith('b'*64)
+    with pytest.raises(ValueError,match='adapter image receipt'):
+        vm_deploy_host._memoryd_adapter_image(current,{**receipt,'image':'docker.io/foreign:latest'})
+
+
+def test_memoryd_adapter_image_pin_is_private_and_idempotent(tmp_path,monkeypatch):
+    tmp_path.chmod(0o700)
+    monkeypatch.setattr(vm_deploy_host,'STATE',tmp_path)
+    image='ghcr.io/joshyorko/codex-action-server@sha256:'+'a'*64
+    monkeypatch.setattr(vm_deploy_host,'memoryd_health',lambda:{'adapter_image':image,'adapter_sha256':'b'*64})
+    first=vm_deploy_host.memoryd_pin_adapter_image()
+    second=vm_deploy_host.memoryd_pin_adapter_image()
+    receipt=tmp_path/'bootstrap/memoryd-adapter-image.json'
+    assert first['created'] is True and second['created'] is False
+    assert receipt.stat().st_mode&0o777==0o600
+    assert json.loads(vm_deploy_host.private(receipt))['image']==image
+
+
 def sample_remote_manifest():
     return {
         'schema_version': 1,
@@ -442,6 +466,13 @@ def test_memoryd_transfer_prepare_is_private_idempotent_and_hash_checked(tmp_pat
     (directory / 'chunk-01.bundle').write_bytes(b'changed')
     with pytest.raises(ValueError, match='bundle file hash mismatch'):
         vm_deploy_host.memoryd_transfer_prepare(manifest)
+
+
+def test_memoryd_transfer_rejects_a_bundle_larger_than_temporary_storage():
+    manifest=sample_remote_manifest()
+    manifest['bundles'][0]['size_bytes']=24*1024*1024+1
+    with pytest.raises(ValueError,match='size or root limit'):
+        vm_deploy_host._validate_memoryd_transfer_manifest(manifest)
 
 
 def test_memoryd_adapter_stage_is_content_addressed_and_owner_only(tmp_path, monkeypatch):
@@ -529,8 +560,17 @@ def test_memoryd_import_applies_preview_plans_backs_up_checks_replay_and_preserv
     monkeypatch.setattr(vm_deploy_host,'_memoryd_cli',lambda _args,**_kwargs:json.dumps({
         'facts':[{},{}],'citations':[{},{}],'policy':{'authority':'recall_not_authority'}
     }).encode())
-    monkeypatch.setattr(vm_deploy_host,'_memoryd_run_step',lambda _label,_args,**_kwargs:b'')
-    monkeypatch.setattr(vm_deploy_host,'_memoryd_stage_bundle',lambda *_args:None)
+    staged=[];active=set()
+    def stage(_source,target,_bundle):
+        assert not active
+        active.add(target);staged.append(target)
+    def step(label,args,**_kwargs):
+        if label=='bundle cleanup':
+            for target in args[7:]:active.remove(target)
+        return b''
+    monkeypatch.setattr(vm_deploy_host,'_memoryd_run_step',step)
+    monkeypatch.setattr(vm_deploy_host,'_memoryd_stage_bundle',stage)
+    monkeypatch.setattr(vm_deploy_host,'_memoryd_tmp_available',lambda:32*1024*1024,raising=False)
 
     result=vm_deploy_host.memoryd_import_bundles({'transfer_manifest_sha256':transfer_id})
 
@@ -538,6 +578,7 @@ def test_memoryd_import_applies_preview_plans_backs_up_checks_replay_and_preserv
     assert result['source_record_count']==2
     assert result['idempotency'][0]['creates']==0
     assert result['recall_facts']==2
+    assert len(staged)==2 and not active
     assert json.loads(vm_deploy_host.private(bootstrap/f'memoryd-transfer-{transfer_id}.json'))['status']=='complete'
     assert legacy.read_bytes()==legacy_before
 
@@ -602,6 +643,17 @@ def test_memoryd_transfer_set_rejects_substitution_of_an_archived_root(tmp_path)
         deploy_control_plane.load_memoryd_transfer_set(home)
 
 
+def test_frozen_bundle_comparison_rejects_changed_content_with_same_record_ids():
+    original={'selection':{'record_ids':['mr_same'],'include_archived':False},
+              'descriptors':[{'path':'objects/memory.jsonl','digest':'sha256:old'}],
+              'producer':{'instance_id':FIXTURE_INSTANCE},'intent':{'source_profile':'personal'},
+              'counts':{'root_memories':1},'policy':{'boundary_decision':'allow'},
+              'required_features':[],'format_version':1,'media_type':'fixture'}
+    changed={**original,'descriptors':[{'path':'objects/memory.jsonl','digest':'sha256:new'}]}
+    with pytest.raises(ValueError,match='frozen backup'):
+        deploy_control_plane._verify_frozen_manifest(original,changed)
+
+
 def test_memoryd_deploy_returns_blocked_without_sync_or_kamal_when_capacity_is_low(tmp_path, monkeypatch):
     calls = []
 
@@ -647,6 +699,7 @@ def test_memoryd_deploy_adds_only_its_accessories_then_reboots_executor_without_
         if action=='current':return current
         if action=='memoryd-wait':return {'status':'PASS'}
         if action=='memoryd-health':return {'status':'PASS','adapter_sha256':adapter_hash}
+        if action=='memoryd-pin-adapter-image':return {'adapter_image_pinned':True}
         return {'status':'PASS'}
 
     adapter_hash=hashlib.sha256((Path(deploy_control_plane.ROOT)/'scripts/codex_memoryd_mcp.py').read_bytes()).hexdigest()
@@ -672,6 +725,41 @@ def test_memoryd_deploy_adds_only_its_accessories_then_reboots_executor_without_
     assert result['executor_app_registered'] is False
     assert result['existing_identity_preserved'] is True
     assert result['existing_inventory_preserved'] is True
+
+
+def test_memoryd_deploy_reuses_healthy_registered_accessories_without_restarts(tmp_path,monkeypatch):
+    calls=[]
+    inventory={'executor':{'state':'running'},'schema-proxy':{'state':'running'},
+               'cas':{'state':'running'},'tunnel':{'state':'running'}}
+    snapshot={'authority':'kamal','identity':'existing','inventory':inventory,'tunnel_count':1}
+    adapter_hash=hashlib.sha256((Path(deploy_control_plane.ROOT)/'scripts/codex_memoryd_mcp.py').read_bytes()).hexdigest()
+    def remote(action,data=None):
+        calls.append(action)
+        if action=='status':return {'authority':'kamal','healthy':True,'tunnel_count':1}
+        if action=='snapshot':return snapshot
+        if action=='memoryd-preflight':return {'ready':False,'blockers':[
+            'memoryd_container_state_already_exists','memoryd_volume_already_exists',
+            'memoryd_listener_port_already_in_use'],'existing_services_healthy':True,'tunnel_count':1,
+            'target_container_count':2,'target_volume_exists':True,
+            'target_listeners':['127.0.0.1:8787','172.30.86.1:8090']}
+        if action=='memoryd-status':return {'status':'HEALTHY','app_registered':True,'adapter_sha256':adapter_hash}
+        if action=='current':return {'authority':'kamal','identity':'existing','manifest':{'images':{}}}
+        if action=='memoryd-registration-check':return {'registration_verified':True}
+        if action=='memoryd-executor-origin-check':return {'memoryd_origin_allowed':True}
+        if action=='memoryd-health':return {'status':'PASS','adapter_sha256':adapter_hash}
+        if action=='memoryd-pin-adapter-image':return {'adapter_image_pinned':True}
+        if action in ('profile','network-check'):return {'status':'PASS'}
+        raise AssertionError(action)
+    monkeypatch.setattr(deploy_control_plane,'INSTANCE',{'vm':{'network':{'gateway':'172.30.86.1'}}})
+    monkeypatch.setattr(deploy_control_plane,'remote',remote)
+    monkeypatch.setattr(deploy_control_plane,'profile',lambda:{'network':{'gateway':'172.30.86.1'}})
+    monkeypatch.setattr(deploy_control_plane,'configuration',lambda *_args,**_kwargs:tmp_path/'deploy.yml')
+    monkeypatch.setattr(deploy_control_plane,'kamal',lambda *_args:pytest.fail('existing accessories must not restart'))
+    monkeypatch.setattr(deploy_control_plane,'smoke',lambda _native:{'catalog':'PASS','devsy_reads':'PASS','memoryd_discovery':'PASS'})
+    result=deploy_control_plane.deploy_memoryd('a'*40,tmp_path)
+    assert result['status']=='PASS' and result['executor_app_registered'] is True
+    assert result['memoryd_already_running'] is True
+    assert 'memoryd-registration-check' in calls
 
 
 def test_memoryd_transfer_imports_before_executor_registration_and_preserves_existing_identity(tmp_path, monkeypatch):

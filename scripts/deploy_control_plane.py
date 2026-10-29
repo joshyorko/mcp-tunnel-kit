@@ -11,6 +11,7 @@ from pathlib import Path, PurePosixPath
 import re
 import select
 import shlex
+import shutil
 import socket
 import sqlite3
 import stat
@@ -803,6 +804,9 @@ def load_memoryd_transfer_set(home=None):
             raise ValueError('MemoryD source backup must be owner-only')
     backup_data=json.loads(_read_private_file(backup_manifest,limit=1024*1024))
     backup_digest='sha256:'+_sha256_file(backup)
+    backup_wal=Path(str(backup)+'-wal')
+    if backup_wal.exists() and backup_wal.stat().st_size:
+        raise ValueError('Frozen source backup has uncheckpointed WAL data')
     if (backup_info.get('verified') is not True
             or backup_digest!=backup_info.get('sha256')
             or backup_digest!=backup_data.get('sha256')
@@ -845,7 +849,7 @@ def load_memoryd_transfer_set(home=None):
             raise ValueError('MemoryD bundle must be an owner-only regular file')
         size=path.stat().st_size
         total_bytes+=size
-        if (size!=item.get('size_bytes') or size>64*1024*1024
+        if (size!=item.get('size_bytes') or size>24*1024*1024
                 or _sha256_file(path)!=item.get('sha256')):
             raise ValueError('MemoryD portable bundle hash or size changed')
         if (item.get('integrity_status')!='verified'
@@ -906,11 +910,59 @@ def load_memoryd_transfer_set(home=None):
         'bundles':remote_bundles,
     }
     return {'manifest':manifest,'manifest_sha256':manifest_sha,'remote_manifest':remote_manifest,
-            'bundle_paths':paths}
+            'bundle_paths':paths,'backup_path':backup}
+
+
+def _verify_frozen_manifest(original, regenerated):
+    fields=('descriptors','counts','producer','selection','intent','policy',
+            'required_features','format_version','media_type')
+    if any(field not in original or field not in regenerated or original[field]!=regenerated[field]
+           for field in fields):
+        raise ValueError('Portable bundle contents differ from the frozen backup')
+
+
+def _verify_frozen_bundle_payloads(transfer):
+    binary=Path.home()/'.local/opt/codex-memoryd/v0.1.0/bin/codex-memoryd'
+    if (not binary.is_file() or binary.is_symlink()
+            or _sha256_file(binary)!='6bd47e96dc225b88e5bf4eb0d45ef68eaec4df0e1582a0ad62b1930c459110e6'):
+        raise ValueError('Released codex-memoryd v0.1.0 binary is unavailable')
+    version=subprocess.run([str(binary),'--version'],capture_output=True,text=True,timeout=15)
+    if version.returncode or version.stdout.strip()!='codex-memoryd 0.1.0':
+        raise ValueError('Frozen bundle verification requires released codex-memoryd v0.1.0')
+    expected=transfer['manifest']['source_database_sha256']
+    with tempfile.TemporaryDirectory(prefix='memoryd-frozen-proof-') as directory:
+        scratch=Path(directory);snapshot=scratch/'snapshot.db'
+        fd=os.open(snapshot,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+        with transfer['backup_path'].open('rb') as source,os.fdopen(fd,'wb') as target:
+            shutil.copyfileobj(source,target);target.flush();os.fsync(target.fileno())
+        if _sha256_file(snapshot)!=expected:
+            raise ValueError('Frozen source backup copy failed its hash check')
+        env={key:value for key,value in os.environ.items() if not key.startswith('CODEX_MEMORYD_')}
+        env.update(CODEX_MEMORYD_HOME=str(scratch),CODEX_MEMORYD_DB=str(snapshot))
+        for index,path in enumerate(transfer['bundle_paths'],1):
+            with zipfile.ZipFile(path) as archive:
+                original=json.loads(archive.read('manifest.json'))
+            output=scratch/f'proof-{index:02d}.bundle'
+            command=[str(binary),'bundle','export','--local','--db',str(snapshot),
+                     '--profile','personal','--workspace','dakota-codex-only',
+                     '--target-profile','personal','--target-workspace','dakota-codex-only']
+            for record_id in original['selection']['record_ids']:
+                command.extend(['--record-id',record_id])
+            command.extend(['--write',str(output)])
+            result=subprocess.run(command,env=env,capture_output=True,timeout=600)
+            if result.returncode:
+                raise ValueError('Released codex-memoryd could not verify the frozen bundle selection')
+            with zipfile.ZipFile(output) as archive:
+                regenerated=json.loads(archive.read('manifest.json'))
+            _verify_frozen_manifest(original,regenerated)
+            wal=Path(str(snapshot)+'-wal')
+            if _sha256_file(snapshot)!=expected or (wal.exists() and wal.stat().st_size):
+                raise ValueError('Frozen source backup copy changed during bundle verification')
 
 
 def memoryd_transfer_payload():
     transfer=load_memoryd_transfer_set()
+    _verify_frozen_bundle_payloads(transfer)
     return transfer
 
 
@@ -928,6 +980,7 @@ def deploy_memoryd(source_sha, directory):
                 'mutated':False}
     preflight = remote('memoryd-preflight')
     existing_memoryd=False
+    app_registered=False
     if preflight.get('ready') is not True:
         if (preflight.get('target_container_count')==0
                 and preflight.get('target_volume_exists') is False
@@ -946,11 +999,12 @@ def deploy_memoryd(source_sha, directory):
                 or preflight.get('target_volume_exists') is not True
                 or set(preflight.get('target_listeners',[]))!={'127.0.0.1:8787',f"{INSTANCE['vm']['network']['gateway']}:8090"}
                 or memoryd_state.get('status')!='HEALTHY'
-                or memoryd_state.get('app_registered') is not False
+                or type(memoryd_state.get('app_registered')) is not bool
                 or memoryd_state.get('adapter_sha256')!=adapter_sha):
             return {'operation':'memoryd','status':'BLOCKED','reason':preflight.get('reason','memoryd_preflight_failed'),
                     'preflight':preflight,'memoryd_status':memoryd_state,'mutated':False}
         existing_memoryd=True
+        app_registered=memoryd_state['app_registered']
     current = remote('current')
     if (not current or current.get('authority') != 'kamal'
             or current.get('identity') != before['identity']
@@ -960,6 +1014,8 @@ def deploy_memoryd(source_sha, directory):
     profile_value = profile()
     remote('profile')
     remote('network-check',profile_value['network'])
+    if app_registered and remote('memoryd-registration-check').get('registration_verified') is not True:
+        raise ValueError('Existing MemoryD app registration could not be verified')
     adapter_path=ROOT/'scripts/codex_memoryd_mcp.py'
     adapter_stat=adapter_path.lstat()
     if adapter_path.is_symlink() or not adapter_path.is_file() or adapter_stat.st_uid!=os.getuid():
@@ -1004,17 +1060,20 @@ def deploy_memoryd(source_sha, directory):
         after_status = remote('status')
         after = remote('snapshot')
         health = remote('memoryd-health')
+        pin = remote('memoryd-pin-adapter-image')
         if (after_status.get('authority') != 'kamal' or after_status.get('healthy') is not True
                 or after_status.get('tunnel_count') != 1
                 or after.get('identity') != before['identity']
                 or after.get('inventory') != before.get('inventory')
                 or smoke_result.get('catalog')!='PASS'
                 or smoke_result.get('devsy_reads')!='PASS'
+                or (app_registered and smoke_result.get('memoryd_discovery')!='PASS')
                 or health.get('status') != 'PASS'
+                or pin.get('adapter_image_pinned') is not True
                 or health.get('adapter_sha256') != adapter_sha):
             raise RuntimeError('post-deploy acceptance mismatch')
         return {'operation':'memoryd','status':'PASS','services':health,
-                'executor_app_registered':False,'executor_origin_updated':executor_origin_updated,
+                'executor_app_registered':app_registered,'executor_origin_updated':executor_origin_updated,
                 'memoryd_already_running':existing_memoryd,
                 'existing_identity_preserved':True,
                 'existing_inventory_preserved':True,'tunnel_count':after_status['tunnel_count'],
