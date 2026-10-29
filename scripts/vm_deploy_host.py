@@ -814,7 +814,7 @@ def memoryd_import_bundles(data):
                 ['docker','exec','--user','10001:10001','mcp-control-plane-memoryd','rm','-f',*target_tmp],timeout=60)
 
 
-def register_memoryd_app(data):
+def _require_completed_memoryd_transfer(data):
     if not isinstance(data,dict) or set(data)!={'transfer_manifest_sha256'}:
         raise ValueError('MemoryD registration request shape is invalid')
     transfer_id=data['transfer_manifest_sha256']
@@ -831,6 +831,81 @@ def register_memoryd_app(data):
             or receipt['imported_record_count']<1
             or _memoryd_record_count()!=receipt['imported_record_count']):
         raise ValueError('A completed MemoryD transfer is required for registration')
+    return receipt
+
+
+def _memoryd_firewall_commands(network, bridge):
+    try:
+        subnet=ipaddress.ip_network(network['subnet'],strict=True)
+        gateway=ipaddress.ip_address(network['gateway'])
+        private_ranges=tuple(ipaddress.ip_network(value) for value in
+                             ('10.0.0.0/8','172.16.0.0/12','192.168.0.0/16'))
+        if (subnet.version!=4 or subnet.prefixlen<24 or gateway not in subnet
+                or not any(subnet.subnet_of(value) for value in private_ranges)
+                or not re.fullmatch(r'br-[a-f0-9]{12}',bridge)):
+            raise ValueError
+    except (KeyError,TypeError,ValueError):
+        raise ValueError('MemoryD firewall requires a private bridge subnet and gateway') from None
+    check=['sudo','-n','iptables','-C','ufw-user-input','-i',bridge,'-s',str(subnet),
+           '-d',str(gateway),'-p','tcp','--dport','8090','-j','ACCEPT']
+    allow=['sudo','-n','ufw','allow','in','on',bridge,'from',str(subnet),'to',str(gateway),
+           'port','8090','proto','tcp','comment','mcp-control-plane MemoryD private bridge']
+    return check,allow
+
+
+def memoryd_network_allow(data):
+    transfer=_require_completed_memoryd_transfer(data)
+    memoryd_health()
+    if not network_check(NETWORK):
+        raise ValueError('MemoryD private network is not owned by Kamal')
+    rows=json.loads(run(['docker','network','inspect',NETWORK['name']]))
+    if len(rows)!=1:
+        raise ValueError('MemoryD private bridge identity is ambiguous')
+    row=rows[0]
+    bridge=(row.get('Options') or {}).get('com.docker.network.bridge.name','br-'+row['Id'][:12])
+    check,allow=_memoryd_firewall_commands(NETWORK,bridge)
+    addresses=json.loads(run(['ip','-j','-4','address','show','dev',bridge]))
+    prefix=ipaddress.ip_network(NETWORK['subnet']).prefixlen
+    if not any(item.get('local')==NETWORK['gateway'] and item.get('prefixlen')==prefix
+               for row in addresses for item in row.get('addr_info',[])):
+        raise ValueError('MemoryD gateway is not assigned to the owned bridge')
+    ufw=run(['sudo','-n','ufw','status']).decode()
+    if not re.search(r'(?m)^Status: active\s*$',ufw):
+        raise ValueError('MemoryD private firewall requires active UFW')
+    run(['sudo','-n','iptables','-S','ufw-user-input'])
+    def rule_exists():
+        result=subprocess.run(check,capture_output=True,timeout=15)
+        if result.returncode not in (0,1):
+            raise ValueError('MemoryD firewall rule check failed')
+        return result.returncode==0
+    path=STATE/'bootstrap/memoryd-firewall.json'
+    previous=json.loads(private(path)) if path.exists() or path.is_symlink() else None
+    identity={'bridge':bridge,'subnet':NETWORK['subnet'],'gateway':NETWORK['gateway'],
+              'port':8090,'transfer_manifest_sha256':transfer['transfer_manifest_sha256']}
+    if previous and any(previous.get(key)!=value for key,value in identity.items()):
+        raise ValueError('MemoryD firewall receipt identity changed')
+    exists=rule_exists()
+    created_now=False
+    if not exists:
+        previous={**identity,'status':'pending','created':True}
+        write(path,previous)
+        run(allow,timeout=60)
+        created_now=True
+        if not rule_exists():
+            raise ValueError('MemoryD private firewall rule was not installed')
+    if not previous:
+        previous={**identity,'status':'active','created':False}
+        write(path,previous)
+    elif previous.get('status')!='active':
+        previous['status']='active';write(path,previous)
+    probe='import socket,sys; s=socket.create_connection((sys.argv[1],8090),timeout=5); s.close()'
+    run(['docker','exec','mcp-control-plane-schema-proxy','python3','-c',probe,NETWORK['gateway']],timeout=15)
+    return {**identity,'status':'PASS','rule_created':created_now,
+            'rule_owned':previous['created'],'bridge_reachable':True}
+
+
+def register_memoryd_app(data):
+    _require_completed_memoryd_transfer(data)
     memoryd_health()
     sys.path.insert(0, str(ROOT / 'scripts'))
     import compose_control as c
@@ -1572,7 +1647,7 @@ def main():
                         'devsy-tap-reconcile-plan','devsy-tap-reconcile',
                         'devsy-tap-rollback-plan','devsy-tap-rollback'):
         STORE.mkdir(mode=0o700,exist_ok=True)
-    data=json.load(sys.stdin) if action in ('images','image-check','network','network-check','wait','commit','baseline','set-current','rollback-commit','restart-local','activation-plan','activation-preflight','activation-begin','activation-pull-images','activation-install','activation-track','activation-seed','activation-network','activation-identity','activation-cleanup','activation-record','smoke','memoryd-adapter-prepare','memoryd-adapter-finalize','memoryd-transfer-prepare','memoryd-import-bundles','memoryd-app-register','devsy-plan','devsy-check','devsy-rollback-plan','devsy-apply','devsy-rollback','devsy-scope-rebind-check','devsy-scope-rebind','devsy-bridge-path-check','devsy-bridge-path-apply','devsy-tap-reconcile-plan','devsy-tap-reconcile','devsy-tap-rollback-plan','devsy-tap-rollback') else {}
+    data=json.load(sys.stdin) if action in ('images','image-check','network','network-check','wait','commit','baseline','set-current','rollback-commit','restart-local','activation-plan','activation-preflight','activation-begin','activation-pull-images','activation-install','activation-track','activation-seed','activation-network','activation-identity','activation-cleanup','activation-record','smoke','memoryd-adapter-prepare','memoryd-adapter-finalize','memoryd-transfer-prepare','memoryd-import-bundles','memoryd-network-allow','memoryd-app-register','devsy-plan','devsy-check','devsy-rollback-plan','devsy-apply','devsy-rollback','devsy-scope-rebind-check','devsy-scope-rebind','devsy-bridge-path-check','devsy-bridge-path-apply','devsy-tap-reconcile-plan','devsy-tap-reconcile','devsy-tap-rollback-plan','devsy-tap-rollback') else {}
     if action=='activation-plan':result=activation_plan(data['generation_dir'])
     elif action=='activation-preflight':
         info=_ensure_empty_activation_target(data['generation_dir'],allow_lock=True)
@@ -1617,6 +1692,7 @@ def main():
     elif action=='memoryd-transfer-preflight':result=memoryd_transfer_preflight()
     elif action=='memoryd-transfer-prepare':result=memoryd_transfer_prepare(data)
     elif action=='memoryd-import-bundles':result=memoryd_import_bundles(data)
+    elif action=='memoryd-network-allow':result=memoryd_network_allow(data)
     elif action=='memoryd-app-register':result=register_memoryd_app(data)
     elif action=='lifecycle-check':result=lifecycle_check()
     elif action=='identity-check':

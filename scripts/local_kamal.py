@@ -16,6 +16,8 @@ HELP = '''Usage:
   bin/kamal accessory stop [NAME|all]    Stop containers, tunnel first
   bin/kamal accessory details [NAME|all] Show current service health
   bin/kamal accessory transfer memoryd   Import the prepared private portable bundles
+  bin/kamal accessory network memoryd    Allow the owned bridge to reach MemoryD
+  bin/kamal accessory register memoryd   Register the imported read-only app
   bin/kamal deploy | rollback | preflight | status
   bin/kamal setup-local                 Install the isolated Kamal bundle
 
@@ -47,7 +49,7 @@ def parse_command(argv):
         target = argv[2] if len(argv) == 3 else 'all'
         if operation == 'reboot':
             operation = 'deploy'
-        if operation not in ('deploy', 'start', 'stop', 'details', 'transfer'):
+        if operation not in ('deploy', 'start', 'stop', 'details', 'transfer', 'network', 'register'):
             raise ValueError(HELP)
     elif len(argv) == 1 and argv[0] in ('deploy', 'rollback', 'preflight', 'status', 'setup-local'):
         operation, target = argv[0], 'all'
@@ -59,8 +61,8 @@ def parse_command(argv):
         raise ValueError('Unknown control-plane accessory')
     if operation == 'deploy' and target not in ('all', 'cas', 'memoryd'):
         raise ValueError('Use deploy cas, deploy memoryd, or deploy all to retain coordinated state and identity checks')
-    if operation == 'transfer' and target != 'memoryd':
-        raise ValueError('Only the managed MemoryD bundle transfer is supported')
+    if operation in ('transfer','network','register') and target != 'memoryd':
+        raise ValueError('Only managed MemoryD transfer, network, and registration are supported')
     return operation, target
 
 
@@ -142,7 +144,9 @@ def main(argv=None):
             result = deploy.execute(argparse.Namespace(
                 operation='cas' if operation == 'deploy' and target == 'cas' else
                           'memoryd' if operation == 'deploy' and target == 'memoryd' else
-                          'memoryd-transfer' if operation == 'transfer' and target == 'memoryd' else operation,
+                          'memoryd-transfer' if operation == 'transfer' and target == 'memoryd' else
+                          'memoryd-network' if operation == 'network' and target == 'memoryd' else
+                          'memoryd-register' if operation == 'register' and target == 'memoryd' else operation,
                 local=True, approve_full_stack=True, cas_digest='', cas_revision='',
             ))
         print(json.dumps(result, indent=2))

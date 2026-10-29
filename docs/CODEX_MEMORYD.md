@@ -92,11 +92,24 @@ transfer manifest and retains any earlier incomplete receipt. The managed
 import streams verified bundles into the container's writable temporary
 filesystem; the container root filesystem remains read-only.
 
+After import, the managed transfer permits TCP port 8090 only from the owned
+private bridge subnet to its gateway, on that bridge interface. It requires an
+active UFW firewall and records whether it created the rule. If import completed
+before network setup or registration failed, resume with
+`bin/kamal accessory network memoryd` and then
+`bin/kamal accessory register memoryd`.
+
 For rollback, disable the MemoryD app in Executor and run
-`bin/kamal accessory stop memoryd`. This retains the named volume and the
-verified pre-transfer backup. Restoring that backup replaces the target database;
-first back up and verify the current database, then use the released backup
-restore command with an explicit operator decision.
+`bin/kamal accessory stop memoryd`. If the private firewall receipt says this
+deployment created the rule, remove only that exact UFW allow using the recorded
+bridge, subnet, gateway, and TCP port 8090. The receipt is
+`bootstrap/memoryd-firewall.json` under the VM's private state directory. On
+the VM, substitute those recorded values into `sudo ufw delete allow in on
+<bridge> from <subnet> to <gateway> port 8090 proto tcp` and verify the rule is
+gone. This retains the named volume and the verified pre-transfer backup.
+Restoring that backup replaces the target database; first back up and verify
+the current database, then use the released backup restore command with an
+explicit operator decision.
 
 ## Activation envelope
 

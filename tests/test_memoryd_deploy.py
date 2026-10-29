@@ -191,6 +191,52 @@ def test_memoryd_registration_requires_a_completed_matching_transfer(tmp_path, m
         vm_deploy_host.register_memoryd_app({'transfer_manifest_sha256':'a'*64})
 
 
+def test_memoryd_firewall_rule_is_limited_to_the_owned_private_bridge():
+    network={'name':'mcp-control-plane','subnet':'172.30.86.0/24','gateway':'172.30.86.1'}
+    check,allow=vm_deploy_host._memoryd_firewall_commands(network,'br-123456789abc')
+    assert check==['sudo','-n','iptables','-C','ufw-user-input','-i','br-123456789abc',
+        '-s','172.30.86.0/24','-d','172.30.86.1','-p','tcp','--dport','8090','-j','ACCEPT']
+    assert allow==['sudo','-n','ufw','allow','in','on','br-123456789abc','from','172.30.86.0/24',
+        'to','172.30.86.1','port','8090','proto','tcp','comment','mcp-control-plane MemoryD private bridge']
+    with pytest.raises(ValueError,match='private bridge'):
+        vm_deploy_host._memoryd_firewall_commands({**network,'subnet':'0.0.0.0/0'},'br-123456789abc')
+    with pytest.raises(ValueError,match='private bridge'):
+        vm_deploy_host._memoryd_firewall_commands(network,'eth0;bad')
+
+
+def test_memoryd_firewall_allow_is_idempotent_and_requires_owned_bridge(tmp_path,monkeypatch):
+    tmp_path.chmod(0o700)
+    network={'name':'mcp-control-plane','subnet':'172.30.86.0/24','gateway':'172.30.86.1'}
+    monkeypatch.setattr(vm_deploy_host,'STATE',tmp_path)
+    monkeypatch.setattr(vm_deploy_host,'NETWORK',network)
+    monkeypatch.setattr(vm_deploy_host,'_require_completed_memoryd_transfer',
+        lambda _data:{'transfer_manifest_sha256':'a'*64})
+    monkeypatch.setattr(vm_deploy_host,'memoryd_health',lambda:{'status':'PASS'})
+    monkeypatch.setattr(vm_deploy_host,'network_check',lambda _network:True)
+    present={'value':False};calls=[]
+    def run(args,**_kwargs):
+        calls.append(args)
+        if args[:3]==['docker','network','inspect']:
+            return json.dumps([{'Id':'123456789abc'+'0'*52,'Options':{}}]).encode()
+        if args[:4]==['ip','-j','-4','address']:
+            return json.dumps([{'addr_info':[{'local':'172.30.86.1','prefixlen':24}]}]).encode()
+        if args[:4]==['sudo','-n','ufw','status']:return b'Status: active\n'
+        if args[:4]==['sudo','-n','iptables','-S']:return b''
+        if args[:4]==['sudo','-n','ufw','allow']:
+            present['value']=True;return b''
+        if args[:2]==['docker','exec']:return b''
+        raise AssertionError(args)
+    def check(args,**_kwargs):
+        return vm_deploy_host.subprocess.CompletedProcess(args,0 if present['value'] else 1,b'',b'')
+    monkeypatch.setattr(vm_deploy_host,'run',run)
+    monkeypatch.setattr(vm_deploy_host.subprocess,'run',check)
+    first=vm_deploy_host.memoryd_network_allow({'transfer_manifest_sha256':'a'*64})
+    second=vm_deploy_host.memoryd_network_allow({'transfer_manifest_sha256':'a'*64})
+    assert first['rule_created'] is True and first['bridge_reachable'] is True
+    assert second['rule_created'] is False and second['rule_owned'] is True
+    assert sum(args[:4]==['sudo','-n','ufw','allow'] for args in calls)==1
+
+
 def test_memoryd_preflight_is_read_only_and_stops_on_low_available_memory(monkeypatch):
     commands = []
     monkeypatch.setattr(vm_deploy_host, 'status', lambda: {
@@ -560,6 +606,8 @@ def test_memoryd_transfer_imports_before_executor_registration_and_preserves_exi
             return {'directory':remote_dir,'missing_bundles':[p.name for p in files]}
         if action=='memoryd-import-bundles':
             return {'status':'complete','source_record_count':3}
+        if action=='memoryd-network-allow':
+            return {'status':'PASS','bridge_reachable':True}
         if action=='memoryd-app-register':
             return {'registered':True,'tool_count':3}
         if action=='memoryd-health':
@@ -575,6 +623,6 @@ def test_memoryd_transfer_imports_before_executor_registration_and_preserves_exi
     result=deploy_control_plane.transfer_memoryd(tmp_path)
 
     assert result['status']=='PASS'
-    assert calls.index('memoryd-import-bundles') < calls.index('memoryd-app-register')
+    assert calls.index('memoryd-import-bundles') < calls.index('memoryd-network-allow') < calls.index('memoryd-app-register')
     assert result['existing_identity_preserved'] is True
     assert result['tunnel_count']==1

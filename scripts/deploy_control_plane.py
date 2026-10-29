@@ -1080,6 +1080,10 @@ def transfer_memoryd(directory):
       receipt=remote('memoryd-import-bundles',{
           'transfer_manifest_sha256':transfer['manifest_sha256'],
       })
+      phase='private-network'
+      network=remote('memoryd-network-allow',{
+          'transfer_manifest_sha256':transfer['manifest_sha256'],
+      })
       phase='executor-registration'
       registration=remote('memoryd-app-register',{
           'transfer_manifest_sha256':transfer['manifest_sha256'],
@@ -1102,7 +1106,7 @@ def transfer_memoryd(directory):
               'source_db_sha256':transfer['manifest']['source_database_sha256'],
               'source_instance_id':transfer['manifest']['source_instance_id'],
               'transfer_manifest_sha256':transfer['manifest_sha256'],
-              'bundle_receipt':receipt,'registration':registration,'services':health,
+              'bundle_receipt':receipt,'private_network':network,'registration':registration,'services':health,
               'executor_discovery':'PASS','existing_identity_preserved':True,
               'existing_inventory_preserved':True,'tunnel_count':after_status['tunnel_count'],
               'preflight':gate}
@@ -1115,6 +1119,31 @@ def transfer_memoryd(directory):
       else:
           detail='remote stage refused'
       raise RuntimeError('MemoryD transfer failed during '+phase+' ('+detail+'); verify the persistent transfer receipt before retrying. Existing control-plane services were not restarted.') from None
+
+
+def finish_memoryd(operation):
+    before_status=remote('status')
+    before=remote('snapshot')
+    if (before_status.get('authority')!='kamal' or before_status.get('healthy') is not True
+            or before_status.get('tunnel_count')!=1 or not before.get('identity')):
+        raise ValueError('Existing control-plane health or identity is not acceptable')
+    transfer=memoryd_transfer_payload()
+    request={'transfer_manifest_sha256':transfer['manifest_sha256']}
+    action='memoryd-network-allow' if operation=='memoryd-network' else 'memoryd-app-register'
+    result=remote(action,request)
+    discovery=smoke(None) if operation=='memoryd-register' else None
+    after_status=remote('status')
+    after=remote('snapshot')
+    health=remote('memoryd-health')
+    if (after_status.get('authority')!='kamal' or after_status.get('healthy') is not True
+            or after_status.get('tunnel_count')!=1 or after.get('identity')!=before['identity']
+            or after.get('inventory')!=before.get('inventory') or health.get('status')!='PASS'
+            or (operation=='memoryd-register' and (result.get('registered') is not True
+                or discovery.get('memoryd_discovery')!='PASS'))):
+        raise RuntimeError('MemoryD post-operation acceptance mismatch')
+    return {'operation':operation,'status':'PASS','result':result,
+            'existing_identity_preserved':True,'existing_inventory_preserved':True,
+            'tunnel_count':after_status['tunnel_count'],'services':health}
 
 
 def execute(args):
@@ -1162,6 +1191,10 @@ def execute(args):
             if not (args.local and LOCAL_CONFIGURED):
                 raise ValueError('MemoryD bundle transfer requires the private pinned local Kamal profile')
             return transfer_memoryd(directory)
+        if args.operation in ('memoryd-network','memoryd-register'):
+            if not (args.local and LOCAL_CONFIGURED):
+                raise ValueError('MemoryD integration requires the private pinned local Kamal profile')
+            return finish_memoryd(args.operation)
         if args.operation=='devsy-check':
             return {'operation':'devsy-check','plan':remote('devsy-plan',devsy_payload()),'mutated':False}
         if args.operation=='devsy-tap-reconcile-check':
@@ -1272,7 +1305,7 @@ def execute(args):
 
 
 def main():
-    p=argparse.ArgumentParser();p.add_argument('operation',choices=('devsy-bridge-path-check','devsy-bridge-path-apply','devsy-scope-rebind-check','devsy-scope-rebind','preflight','status','memoryd','memoryd-transfer','adopt','cas','deploy','rollback','devsy-check','devsy-apply','devsy-rollback','devsy-tap-reconcile-check','devsy-tap-reconcile','devsy-tap-rollback-check','devsy-tap-rollback'));p.add_argument('--cas-digest',default='');p.add_argument('--cas-revision',default='');p.add_argument('--approve-bridge-kubectl-path',action='store_true');p.add_argument('--approve-scope-binding-rebind',action='store_true');p.add_argument('--approve-full-stack',action='store_true');p.add_argument('--approve-host-devsy-apply',action='store_true');p.add_argument('--approve-host-devsy-rollback',action='store_true');p.add_argument('--approve-host-tap-reconciliation',action='store_true');p.add_argument('--approve-host-tap-rollback',action='store_true');p.add_argument('--tap-reconciliation-run-id',default=os.environ.get('TAP_RECONCILIATION_RUN_ID'));p.add_argument('--tap-reconciliation-run-attempt',default=os.environ.get('TAP_RECONCILIATION_RUN_ATTEMPT'));p.add_argument('--instance-profile',help='Absolute path to an owned mode-0600 private instance profile');p.add_argument('--native-target',default=os.environ.get('NATIVE_TARGET'));p.add_argument('--native-cwd',default=os.environ.get('NATIVE_CWD'));p.add_argument('--native-thread-id',default=os.environ.get('NATIVE_THREAD_ID'));p.add_argument('--local',action='store_true',help='Approved Pi break-glass, or bin/kamal with explicit private local config')
+    p=argparse.ArgumentParser();p.add_argument('operation',choices=('devsy-bridge-path-check','devsy-bridge-path-apply','devsy-scope-rebind-check','devsy-scope-rebind','preflight','status','memoryd','memoryd-transfer','memoryd-network','memoryd-register','adopt','cas','deploy','rollback','devsy-check','devsy-apply','devsy-rollback','devsy-tap-reconcile-check','devsy-tap-reconcile','devsy-tap-rollback-check','devsy-tap-rollback'));p.add_argument('--cas-digest',default='');p.add_argument('--cas-revision',default='');p.add_argument('--approve-bridge-kubectl-path',action='store_true');p.add_argument('--approve-scope-binding-rebind',action='store_true');p.add_argument('--approve-full-stack',action='store_true');p.add_argument('--approve-host-devsy-apply',action='store_true');p.add_argument('--approve-host-devsy-rollback',action='store_true');p.add_argument('--approve-host-tap-reconciliation',action='store_true');p.add_argument('--approve-host-tap-rollback',action='store_true');p.add_argument('--tap-reconciliation-run-id',default=os.environ.get('TAP_RECONCILIATION_RUN_ID'));p.add_argument('--tap-reconciliation-run-attempt',default=os.environ.get('TAP_RECONCILIATION_RUN_ATTEMPT'));p.add_argument('--instance-profile',help='Absolute path to an owned mode-0600 private instance profile');p.add_argument('--native-target',default=os.environ.get('NATIVE_TARGET'));p.add_argument('--native-cwd',default=os.environ.get('NATIVE_CWD'));p.add_argument('--native-thread-id',default=os.environ.get('NATIVE_THREAD_ID'));p.add_argument('--local',action='store_true',help='Approved Pi break-glass, or bin/kamal with explicit private local config')
     args=p.parse_args()
     try:print(json.dumps(execute(args),indent=2))
     except Exception as e:print(str(e),file=sys.stderr);sys.exit(1)
