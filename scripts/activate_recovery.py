@@ -135,7 +135,7 @@ def activate(args, generation, prepared):
                 phase = "devsy-start"
                 deploy.remote("devsy-start")
                 phase = "native-and-devsy-smoke"
-                deploy.remote("smoke")
+                deploy.remote("smoke", {"activation_id": activation_id})
                 phase = "preserved-identity-check"
                 identity = deploy.remote("activation-identity", {"expected_identity": expected,"activation_id":activation_id})
                 if identity.get("identity_preserved") is not True:
@@ -152,20 +152,28 @@ def activate(args, generation, prepared):
                 if (after.get("authority") != "kamal" or after.get("identity") != expected
                         or after.get("tunnel_count") != 1):
                     raise ValueError("Replacement VM did not reach the captured identity and single-tunnel state")
-                deploy.remote("smoke")
-                deploy.remote("activation-record", {
+                smoke = deploy.remote("smoke", {"activation_id": activation_id})
+                if (smoke.get("memoryd_discovery") not in ("PASS", "UNREGISTERED", "UNAVAILABLE")
+                        or smoke.get("memoryd_restored") is not False):
+                    raise ValueError("Recovery smoke did not report MemoryD status")
+                receipt = deploy.remote("activation-record", {
                     "activation_id": activation_id,
                     "source_sha": generation["source_sha"],
                     "expected_identity": expected,
                     "identity_preserved": True,
                     "original_stopped_attested": True,
                 })
+                if (receipt.get("memoryd_discovery") != smoke["memoryd_discovery"]
+                        or receipt.get("memoryd_restored") is not False):
+                    raise ValueError("Recovery receipt did not match MemoryD smoke status")
                 return {
                     "mode": "ACTIVATED",
                     "authority": "kamal",
                     "identity_preserved": True,
                     "single_tunnel": True,
                     "source_sha": generation["source_sha"],
+                    "memoryd_discovery": smoke["memoryd_discovery"],
+                    "memoryd_restored": False,
                 }
         except Exception:
             if boot_attempted:

@@ -115,6 +115,8 @@ def test_successful_activation_checks_identity_before_tunnel_and_tunnel_is_last(
                     "prepared_manifest_sha256": "b" * 64}
         if action == "activation-identity":return {"identity_preserved": True}
         if action == "snapshot":return {"authority": "kamal", "identity": generation()["identity"], "tunnel_count": 1}
+        if action in ("smoke", "activation-record"):
+            return {"memoryd_discovery": "UNAVAILABLE", "memoryd_restored": False}
         return {}
 
     booted=[]
@@ -127,12 +129,17 @@ def test_successful_activation_checks_identity_before_tunnel_and_tunnel_is_last(
         result=activation.execute(cli_args(original_stopped=True,approve_activation=True))
 
     assert result["mode"]=="ACTIVATED" and result["single_tunnel"] is True
+    assert result["memoryd_discovery"] == "UNAVAILABLE"
+    assert result["memoryd_restored"] is False
     assert booted==[("boot","executor"),("boot","schema-proxy"),("boot","cas"),("boot","tunnel")]
     names=[action for action,_ in calls]
     assert events.index("activation-identity") < events.index("kamal:tunnel")
     assert events.index("activation-identity") < events.index("activation-record")
     assert names.index("smoke") < names.index("activation-identity")
     assert names.index("snapshot") < names.index("activation-record")
+    begin = next(data for action, data in calls if action == "activation-begin")
+    smokes = [data for action, data in calls if action == "smoke"]
+    assert smokes == [{"activation_id": begin["activation_id"]}] * 2
     assert "compose-start" not in names and "compose-stop" not in names
 
 
@@ -234,6 +241,43 @@ def start_activation_marker(activation_id="c"*32):
         "source_sha":"a"*40,"expected_identity":generation()["identity"],"prepared_manifest_sha256":"b"*64,
         "original_stopped_attested":True,"started_services":[]}))
     marker.chmod(0o600)
+
+
+def test_activation_receipt_records_degraded_memoryd_result(tmp_path):
+    generation_tree(tmp_path, lock=True)
+    marker_path = host.STORE / "activation-in-progress.json"
+    marker = json.loads(marker_path.read_text())
+    marker.update(status="activating", memoryd_discovery="UNAVAILABLE", memoryd_restored=False)
+    marker_path.write_text(json.dumps(marker))
+    data = {
+        "activation_id": "c" * 32, "source_sha": "a" * 40,
+        "expected_identity": generation()["identity"], "identity_preserved": True,
+        "original_stopped_attested": True,
+    }
+
+    result = host.activation_record(data)
+
+    receipt = json.loads((host.STORE / "recovery-activation.json").read_text())
+    assert result["memoryd_discovery"] == "UNAVAILABLE"
+    assert result["memoryd_restored"] is False
+    assert receipt["memoryd_discovery"] == "UNAVAILABLE"
+    assert receipt["memoryd_restored"] is False
+
+
+def test_activation_receipt_refuses_missing_memoryd_smoke_result(tmp_path):
+    generation_tree(tmp_path, lock=True)
+    marker_path = host.STORE / "activation-in-progress.json"
+    marker = json.loads(marker_path.read_text())
+    marker["status"] = "activating"
+    marker_path.write_text(json.dumps(marker))
+    data = {
+        "activation_id": "c" * 32, "source_sha": "a" * 40,
+        "expected_identity": generation()["identity"], "identity_preserved": True,
+        "original_stopped_attested": True,
+    }
+    with pytest.raises(ValueError, match="MemoryD"):
+        host.activation_record(data)
+    assert not (host.STORE / "recovery-activation.json").exists()
 
 
 def safe_vm_run(command):

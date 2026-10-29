@@ -1457,6 +1457,27 @@ def activation_identity(expected_identity,activation_id):
     return {'identity_preserved':True}
 
 
+def activation_record(data):
+    marker=_activation_marker(data.get('activation_id'))
+    if (set(data)!={'activation_id','source_sha','expected_identity','identity_preserved','original_stopped_attested'}
+            or data['identity_preserved'] is not True or data['original_stopped_attested'] is not True
+            or not re.fullmatch('[a-f0-9]{40}',data['source_sha'])
+            or not isinstance(data['expected_identity'],str)
+            or data['source_sha']!=marker['source_sha'] or data['expected_identity']!=marker['expected_identity']):
+        raise ValueError('Activation receipt input is invalid')
+    discovery=marker.get('memoryd_discovery')
+    if (marker.get('status')!='activating' or marker.get('original_stopped_attested') is not True
+            or discovery not in ('PASS','UNREGISTERED','UNAVAILABLE')
+            or marker.get('memoryd_restored') is not False):
+        raise ValueError('Activation receipt requires a completed MemoryD recovery smoke result')
+    if (STORE/'recovery-activation.json').exists():raise ValueError('Activation receipt already exists')
+    marker['status']='activated';write(STORE/'activation-in-progress.json',marker)
+    receipt={**data,'schema_version':1,'recorded_at_ns':time.time_ns(),
+             'memoryd_discovery':discovery,'memoryd_restored':False}
+    write(STORE/'recovery-activation.json',receipt)
+    return {'activation_recorded':True,'memoryd_discovery':discovery,'memoryd_restored':False}
+
+
 def activation_cleanup(activation_id,attempted_services):
     marker=_activation_marker(activation_id,allow_completed=True)
     if (not isinstance(attempted_services,list)
@@ -1689,21 +1710,50 @@ def native_thread_read(client, session, supplied):
     return {"status": "PASS", "target": identity["target"]}
 
 
+def _recovery_memoryd_absent():
+    ids=run(['docker','ps','-aq']).decode().split()
+    rows=json.loads(run(['docker','inspect',*ids])) if ids else []
+    if not isinstance(rows,list) or len(rows)!=len(ids):
+        raise ValueError('MemoryD container inventory is invalid')
+    for row in rows:
+        if (not isinstance(row,dict) or not isinstance(row.get('Name'),str)
+                or not isinstance(row.get('Config'),dict)):
+            raise ValueError('MemoryD container inventory is invalid')
+        labels=row['Config'].get('Labels')
+        if labels is None:labels={}
+        if not isinstance(labels,dict):raise ValueError('MemoryD container labels are invalid')
+        if (row['Name'].lstrip('/') in MEMORYD_SERVICES
+                or labels.get('service') in MEMORYD_SERVICES
+                or (labels.get('com.docker.compose.project')=='codex-control-plane'
+                    and labels.get('com.docker.compose.service') in ('memoryd','memoryd-mcp'))):
+            return False
+    volumes=set(run(['docker','volume','ls','--format','{{.Name}}']).decode().split())
+    return MEMORYD_VOLUME not in volumes
+
+
 def smoke(request=None):
     request = request or {}
     if not isinstance(request, dict):
         raise ValueError("Smoke request is invalid")
+    recovery=None
+    if 'activation_id' in request:
+        recovery=_activation_marker(request['activation_id'])
+        if recovery.get('status')!='activating' or recovery.get('original_stopped_attested') is not True:
+            raise ValueError('Recovery smoke requires an active authorized activation')
     require_native = request.get("require_native") is True
     os.environ.update(EXECUTOR_URL='http://127.0.0.1:4312',EXECUTOR_PAT_FILE=str(STATE/'secrets/executor-pat'))
     sys.path.insert(0,str(ROOT/'scripts'));import compose_control as c
     _,m=c.executor_session();c.verify_compact(m)
     profile=json.loads(private(STATE/'bootstrap/devsy-integration.json'))['profile'];c.read_devsy(m,profile)
-    memoryd_discovery = False
+    memoryd_discovery = 'UNREGISTERED'
     memoryd_marker = STATE / 'bootstrap/memoryd-integration.json'
     if memoryd_marker.exists() or memoryd_marker.is_symlink():
         private(memoryd_marker)
-        c.search_memoryd(m)
-        memoryd_discovery = True
+        if recovery is not None and _recovery_memoryd_absent():
+            memoryd_discovery = 'UNAVAILABLE'
+        else:
+            c.search_memoryd(m)
+            memoryd_discovery = 'PASS'
     supplied=request.get("native_codex")
     if supplied is None:
         native={"status":"UNCONFIGURED"}
@@ -1713,8 +1763,13 @@ def smoke(request=None):
         if native["status"] == "UNCONFIGURED":
             raise ValueError("qualified native read is required")
         raise ValueError("qualified native read failed: " + native.get("error_code", "UNKNOWN"))
-    return {'catalog':'PASS','native_read':native,'devsy_reads':'PASS',
-            'memoryd_discovery':'PASS' if memoryd_discovery else 'UNREGISTERED'}
+    result={'catalog':'PASS','native_read':native,'devsy_reads':'PASS',
+            'memoryd_discovery':memoryd_discovery}
+    if recovery is not None:
+        recovery.update(memoryd_discovery=memoryd_discovery,memoryd_restored=False)
+        write(STORE/'activation-in-progress.json',recovery)
+        result['memoryd_restored']=False
+    return result
 
 
 def _devsy_bootstrap(data):
@@ -1798,19 +1853,7 @@ def main():
     elif action=='activation-network':result=activation_network(data['activation_id'])
     elif action=='activation-identity':result=activation_identity(data['expected_identity'],data['activation_id'])
     elif action=='activation-cleanup':result=activation_cleanup(data['activation_id'],data['attempted_services'])
-    elif action=='activation-record':
-        marker=_activation_marker(data.get('activation_id'))
-        if (set(data)!={'activation_id','source_sha','expected_identity','identity_preserved','original_stopped_attested'}
-                or data['identity_preserved'] is not True or data['original_stopped_attested'] is not True
-                or not re.fullmatch('[a-f0-9]{40}',data['source_sha'])
-                or not isinstance(data['expected_identity'],str)
-                or data['source_sha']!=marker['source_sha'] or data['expected_identity']!=marker['expected_identity']):
-            raise ValueError('Activation receipt input is invalid')
-        marker['status']='activated';write(STORE/'activation-in-progress.json',marker)
-        receipt={**data,'schema_version':1,'recorded_at_ns':time.time_ns()}
-        if (STORE/'recovery-activation.json').exists():raise ValueError('Activation receipt already exists')
-        write(STORE/'recovery-activation.json',receipt)
-        result={'activation_recorded':True}
+    elif action=='activation-record':result=activation_record(data)
     elif action=='lock':
         fd=os.open(STORE/'deploy.lock',os.O_CREAT|os.O_RDWR|os.O_NOFOLLOW,0o600)
         s=os.fstat(fd)
