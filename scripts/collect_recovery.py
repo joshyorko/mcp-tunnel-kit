@@ -15,6 +15,7 @@ import tarfile
 
 import deploy_control_plane as deploy
 import vm_deploy_host as vm
+import prepare_recovery_generation as recovery
 from native_codex_ssh import load_profile as load_native_profile
 
 
@@ -146,12 +147,25 @@ def collect(local_config, native_profile, instance_profile, output, tailnet_requ
             if hashlib.file_digest(stream, 'sha256').hexdigest() != snapshot['executor_sha256']:
                 raise ValueError('Transported Executor snapshot digest mismatch')
         memoryd = validate_memoryd_snapshot(output / 'vm-snapshot', snapshot.get('memoryd'))
-        receipt = {'schema_version': 2, 'generation': generation,
+        guard = snapshot.get('legacy_guard')
+        essential = output / 'vm-snapshot/essential.tar'
+        if guard is not None or essential.exists():
+            try:
+                entries = recovery._scan_tar(essential, guarded=guard is not None, essential=True)
+                if guard is None:
+                    recovery._reject_unguarded_legacy_artifacts(entries)
+                else:
+                    recovery._guard_archive(guard, entries, essential, memoryd, output / 'vm-snapshot/memoryd/backup.db')
+            except recovery.GenerationError as error:
+                raise ValueError('Transported legacy import guard is invalid') from error
+        receipt = {'schema_version': 3 if guard is not None else 2, 'generation': generation,
                    'captured_at_utc': datetime.now(timezone.utc).isoformat(),
                    'executor_sha256': snapshot['executor_sha256'],
                    'identity_preserved': True, 'single_tunnel': True,
                    'capture_kind': 'executor-paused-copy-and-sqlite-online-backups',
                    'memoryd': memoryd}
+        if guard is not None:
+            receipt['legacy_guard'] = guard
         (output / 'capture-receipt.json').write_text(json.dumps(receipt, indent=2) + '\n')
         manifest = {'version': 1, 'bundle_id': output.name, 'members': [
             {'name': name, 'source': str(output / name), 'required': True}
