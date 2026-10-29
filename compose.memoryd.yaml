@@ -7,6 +7,7 @@ services:
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
+    tmpfs: [/tmp:rw,nosuid,nodev,size=32m,mode=1777]
     mem_limit: 256m
     cpus: "0.5"
     environment:
@@ -31,6 +32,7 @@ services:
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
+    tmpfs: [/tmp:rw,nosuid,nodev,size=32m,mode=1777]
     mem_limit: 128m
     cpus: "0.25"
     entrypoint: [python3, /opt/tunnel-kit/codex_memoryd_mcp.py]

@@ -31,6 +31,7 @@ def test_memoryd_deploy_routes_to_its_capacity_gated_controller():
     assert cli.parse_command(['accessory', 'deploy', 'memoryd']) == ('deploy', 'memoryd')
     assert cli.parse_command(['accessory', 'start', 'memoryd']) == ('start', 'memoryd')
     assert cli.parse_command(['accessory', 'stop', 'memoryd']) == ('stop', 'memoryd')
+    assert cli.parse_command(['accessory', 'transfer', 'memoryd']) == ('transfer', 'memoryd')
 
 
 def test_memoryd_rollback_stops_only_its_accessories_and_preserves_volume(tmp_path):

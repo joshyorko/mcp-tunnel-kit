@@ -75,6 +75,12 @@ plan ID. Transfer the bundle bytes over the pinned SSH path and verify their
 SHA-256 before import. Preserve the source instance ID and bundle manifest
 digests; a repeated import should plan zero creates and exact identity reuse.
 
+Freeze one source cutoff with the official verified backup before chunking.
+Export every chunk from that backup, and validate the bundle selections against
+its active record IDs. If native files change afterward, keep this snapshot
+consistent or create a new backup and regenerate every chunk; do not mix live
+source generations in one transfer.
+
 ## Activation envelope
 
 Keep the planned memory limits at 256 MiB for codex-memoryd and 128 MiB for the

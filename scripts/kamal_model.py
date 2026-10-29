@@ -146,7 +146,7 @@ def _accessory(service, image, host, network, *, options=None, **values):
     return result
 
 
-def render(profile, manifest):
+def render(profile, manifest, *, allow_memoryd_mcp=True):
     """Return a Kamal config as JSON (valid YAML), with no secret contents."""
     profile = _validate_profile(profile)
     images = validate_manifest(manifest)
@@ -183,7 +183,8 @@ def render(profile, manifest):
                 "EXECUTOR_DATA_DIR": "/app/data",
                 "EXECUTOR_APPS_ALLOW_PRIVATE_FETCH": "true",
                 "EXECUTOR_URL_ALLOW_HTTP_ORIGINS": json.dumps(
-                    [f"http://{gateway}:8088", f"http://{gateway}:8089"],
+                    [f"http://{gateway}:8088", f"http://{gateway}:8089"]
+                    + ([f"http://{gateway}:8090"] if allow_memoryd_mcp else []),
                     separators=(",", ":"),
                 ),
             }
@@ -306,6 +307,8 @@ def render(profile, manifest):
         "host",
         options={
             "user": "10001:10001",
+            "read-only": True,
+            "tmpfs": "/tmp:rw,nosuid,nodev,size=32m,mode=1777",
             "memory": "256m",
             "cpus": "0.5",
             "log-opt": "max-size=10m",
@@ -336,6 +339,7 @@ def render(profile, manifest):
             "read-only": True,
             "cap-drop": ["ALL"],
             "security-opt": "no-new-privileges:true",
+            "tmpfs": "/tmp:rw,nosuid,nodev,size=32m,mode=1777",
             "memory": "128m",
             "cpus": "0.25",
             "log-opt": "max-size=10m",
