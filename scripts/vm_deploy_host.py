@@ -1781,6 +1781,335 @@ def activation_seed(generation_dir,expected_manifest_sha256,manifest,activation_
     return {'executor_volume_seeded':True,'helper_started':False,'volume':volume}
 
 
+def _memoryd_restore_descriptor(prepared):
+    descriptor=prepared.get('memoryd')
+    keys={'status','backend_image','adapter_image','adapter_sha256','backup_sha256',
+          'backup_manifest_sha256','backup_size_bytes','source_instance_id','record_count',
+          'active_record_count','archived_record_count','profile','workspace','captured_at'}
+    if (prepared.get('schema_version')!=2 or not isinstance(descriptor,dict) or set(descriptor)!=keys
+            or descriptor.get('status')!='captured' or descriptor.get('backend_image')!=MEMORYD_IMAGE
+            or not isinstance(descriptor.get('adapter_image'),str)
+            or not re.fullmatch(r'ghcr\.io/joshyorko/codex-action-server@sha256:[a-f0-9]{64}',descriptor['adapter_image'])
+            or any(not isinstance(descriptor.get(key),str) or not re.fullmatch('[a-f0-9]{64}',descriptor[key])
+                   for key in ('adapter_sha256','backup_sha256','backup_manifest_sha256'))
+            or type(descriptor.get('backup_size_bytes')) is not int or descriptor['backup_size_bytes']<=0
+            or not isinstance(descriptor.get('source_instance_id'),str)
+            or not re.fullmatch(r'cmi_[a-f0-9]{32}',descriptor['source_instance_id'])
+            or any(type(descriptor.get(key)) is not int or descriptor[key]<0
+                   for key in ('record_count','active_record_count','archived_record_count'))
+            or descriptor['record_count']!=descriptor['active_record_count']+descriptor['archived_record_count']
+            or descriptor.get('profile')!='personal' or descriptor.get('workspace')!='dakota-codex-only'
+            or not isinstance(descriptor.get('captured_at'),str) or not descriptor['captured_at']):
+        raise ValueError('Prepared MemoryD recovery descriptor is invalid')
+    return descriptor
+
+
+def _memoryd_restore_private_hash(path, expected, *, size=None):
+    fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW)
+    try:
+        before=os.fstat(fd)
+        if (not stat.S_ISREG(before.st_mode) or before.st_uid!=os.getuid()
+                or before.st_mode&0o777!=0o600 or before.st_nlink!=1
+                or (size is not None and before.st_size!=size)):
+            raise ValueError('Prepared MemoryD recovery file is unsafe')
+        with os.fdopen(fd,'rb',closefd=False) as stream:
+            digest=hashlib.file_digest(stream,'sha256').hexdigest()
+        after=os.fstat(fd)
+        if (digest!=expected or before.st_size!=after.st_size or before.st_mtime_ns!=after.st_mtime_ns
+                or before.st_ctime_ns!=after.st_ctime_ns):
+            raise ValueError('Prepared MemoryD recovery file digest changed')
+    finally:os.close(fd)
+
+
+def _memoryd_restore_sources(info,descriptor):
+    root=info['root']
+    _verify_private_directory(root)
+    _verify_private_directory(root/'memoryd')
+    _memoryd_restore_private_hash(root/'prepared-manifest.json',info['manifest_sha256'])
+    _memoryd_restore_private_hash(root/'memoryd/backup.db',descriptor['backup_sha256'],size=descriptor['backup_size_bytes'])
+    _memoryd_restore_private_hash(root/'memoryd/backup.db.manifest.json',descriptor['backup_manifest_sha256'])
+
+
+def _memoryd_restore_inventory(*, helper_id=None, owned_volume=False):
+    ids=run(['docker','ps','-aq']).decode().split()
+    rows=json.loads(run(['docker','inspect',*ids])) if ids else []
+    if not isinstance(rows,list) or len(rows)!=len(ids):raise ValueError('MemoryD container inventory is invalid')
+    for row in rows:
+        if (not isinstance(row,dict) or not isinstance(row.get('Id'),str)
+                or not isinstance(row.get('Name'),str) or not isinstance(row.get('Config'),dict)
+                or not isinstance(row.get('Mounts'),list)
+                or any(not isinstance(mount,dict) for mount in row['Mounts'])):
+            raise ValueError('MemoryD container inventory is invalid')
+        if row['Id']==helper_id:continue
+        config=row['Config'];labels=config.get('Labels') or {};image=config.get('Image') or ''
+        if not isinstance(labels,dict) or not isinstance(image,str):raise ValueError('MemoryD container inventory is invalid')
+        name=row['Name'].lstrip('/')
+        if ('memoryd' in name.lower() or 'codex-memoryd' in image.lower()
+                or labels.get('service') in MEMORYD_SERVICES
+                or (labels.get('com.docker.compose.project')=='codex-control-plane'
+                    and labels.get('com.docker.compose.service') in ('memoryd','memoryd-mcp'))
+                or any('memoryd' in str(m.get('Name','')).lower() for m in row['Mounts'])):
+            raise ValueError('Existing MemoryD container or volume writer blocks recovery')
+    volumes=set(run(['docker','volume','ls','--format','{{.Name}}']).decode().split())
+    memory_volumes={name for name in volumes if 'memoryd' in name.lower()}
+    if memory_volumes!=({MEMORYD_VOLUME} if owned_volume else set()):
+        raise ValueError('Existing or missing MemoryD volume blocks recovery')
+    if memoryd_listener_addresses(run(['ss','-Hln']).decode()):
+        raise ValueError('Existing MemoryD listener blocks recovery')
+
+
+def _memoryd_restore_image(descriptor):
+    rows=json.loads(run(['docker','image','inspect',descriptor['backend_image']]))
+    if (not isinstance(rows,list) or len(rows)!=1 or not isinstance(rows[0],dict)
+            or rows[0].get('Architecture')!='amd64' or rows[0].get('Os')!='linux'
+            or descriptor['backend_image'] not in (rows[0].get('RepoDigests') or [])
+            or not re.fullmatch(r'sha256:[a-f0-9]{64}',rows[0].get('Id',''))):
+        raise ValueError('Captured MemoryD image is not available locally by immutable digest')
+    return rows[0]['Id']
+
+
+def _memoryd_restore_intent(path,intent):
+    fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+    try:
+        with os.fdopen(fd,'w',closefd=False) as stream:
+            json.dump(intent,stream);stream.write('\n');stream.flush();os.fsync(stream.fileno())
+    finally:os.close(fd)
+    directory=os.open(path.parent,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+    try:os.fsync(directory)
+    finally:os.close(directory)
+
+
+def _memoryd_restore_volume(activation_id,nonce):
+    rows=json.loads(run(['docker','volume','inspect',MEMORYD_VOLUME]))
+    if (not isinstance(rows,list) or len(rows)!=1 or not isinstance(rows[0],dict)
+            or rows[0].get('Name')!=MEMORYD_VOLUME or rows[0].get('Driver')!='local'
+            or rows[0].get('Scope')!='local' or (rows[0].get('Options') or {})!={}
+            or (rows[0].get('Labels') or {}).get('mcp-control-plane.recovery-activation')!=activation_id
+            or (rows[0].get('Labels') or {}).get('mcp-control-plane.restore-nonce')!=nonce):
+        raise ValueError('MemoryD recovery volume ownership could not be verified')
+
+
+def _memoryd_restore_helper(helper, name, activation_id, nonce, image_id, *, running):
+    rows=json.loads(run(['docker','inspect',helper]))
+    if not isinstance(rows,list) or len(rows)!=1 or not isinstance(rows[0],dict):
+        raise ValueError('MemoryD recovery helper inspection failed')
+    row=rows[0];config=row.get('Config') or {};labels=config.get('Labels') or {};state=row.get('State') or {}
+    mounts=row.get('Mounts') or []
+    if (row.get('Id')!=helper or row.get('Name','').lstrip('/')!=name or row.get('Image')!=image_id
+            or config.get('Image')!=MEMORYD_IMAGE or config.get('User')!='10001:10001'
+            or config.get('Entrypoint')!=['/bin/sleep'] or config.get('Cmd')!=['infinity']
+            or (config.get('Healthcheck') or {}).get('Test')!=['NONE']
+            or labels.get('mcp-control-plane.recovery-activation')!=activation_id
+            or labels.get('mcp-control-plane.restore-nonce')!=nonce
+            or (row.get('HostConfig') or {}).get('NetworkMode')!='none'
+            or state.get('Running') is not running or state.get('Paused') is not False
+            or len(mounts)!=1 or mounts[0].get('Name')!=MEMORYD_VOLUME
+            or mounts[0].get('Destination')!='/data' or mounts[0].get('RW') is not True):
+        raise ValueError('MemoryD recovery helper ownership or isolation is invalid')
+
+
+def _memoryd_restore_exec(helper,*args):
+    return run(['docker','exec','--user','10001:10001',helper,*args],timeout=600)
+
+
+def _memoryd_restore_pipe(helper,source,destination):
+    fd=os.open(source,os.O_RDONLY|os.O_NOFOLLOW)
+    try:
+        with os.fdopen(fd,'rb',closefd=False) as stream:
+            result=subprocess.run(['docker','exec','-i','--user','10001:10001',helper,
+                                   '/bin/sh','-c','umask 077; exec cat > "$1"','sh',destination],
+                                  stdin=stream,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,timeout=600)
+        if result.returncode:raise RuntimeError('MemoryD backup staging failed; output withheld')
+    finally:os.close(fd)
+
+
+def _memoryd_restore_copy_target(helper,destination):
+    fd=os.open(destination,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+    try:
+        with os.fdopen(fd,'wb',closefd=False) as stream:
+            result=subprocess.run(['docker','exec','--user','10001:10001',helper,'/bin/cat','/data/memory.db'],
+                                  stdout=stream,stderr=subprocess.PIPE,timeout=600)
+            stream.flush();os.fsync(stream.fileno())
+        if result.returncode:raise RuntimeError('MemoryD restored database copy failed; output withheld')
+    finally:os.close(fd)
+
+
+def _memoryd_restore_scratch(helper,info,descriptor):
+    _memoryd_restore_sources(info,descriptor)
+    _memoryd_restore_exec(helper,'/bin/sh','-c',
+                          ' # SCRATCH_FILES\n'
+                          'for p in /tmp/restore/backup.db /tmp/restore/backup.db.manifest.json; do '
+                          'test -f "$p" && test ! -L "$p" || exit 1; done; '
+                          'for p in /tmp/restore/backup.db-wal /tmp/restore/backup.db-shm /tmp/restore/backup.db-journal; do '
+                          'if [ -e "$p" ] || [ -L "$p" ]; then exit 1; fi; done')
+    for path,digest in (('/tmp/restore/backup.db',descriptor['backup_sha256']),
+                        ('/tmp/restore/backup.db.manifest.json',descriptor['backup_manifest_sha256'])):
+        output=_memoryd_restore_exec(helper,'/usr/bin/sha256sum','--',path).decode().split()
+        if len(output)!=2 or output[0]!=digest or output[1]!=path:
+            raise ValueError('MemoryD scratch backup digest changed')
+
+
+def _memoryd_restore_target(helper, *, present):
+    # Check dangling symlinks too: restore-apply removes sidecars and overwrites a target.
+    if present:
+        script=(' # TARGET_PRESENT\n'
+                'test -f /data/memory.db && test ! -L /data/memory.db && '
+                'for p in /data/memory.db-wal /data/memory.db-shm /data/memory.db-journal; do '
+                'if [ -e "$p" ] || [ -L "$p" ]; then exit 1; fi; done')
+    else:
+        script=(' # TARGET_ABSENT\n'
+                'for p in /data/memory.db /data/memory.db-wal /data/memory.db-shm /data/memory.db-journal; do '
+                'if [ -e "$p" ] || [ -L "$p" ]; then exit 1; fi; done')
+    _memoryd_restore_exec(helper,'/bin/sh','-c',script)
+
+
+def _memoryd_restore_verified_report(value,descriptor):
+    manifest=value.get('manifest') if isinstance(value,dict) else None
+    return (isinstance(manifest,dict) and all(value.get(key) is True
+            for key in ('ok','digest_matches','integrity_ok','schema_matches'))
+            and manifest.get('sha256')=='sha256:'+descriptor['backup_sha256']
+            and manifest.get('size_bytes')==descriptor['backup_size_bytes'])
+
+
+def _memoryd_restore_sqlite(path,descriptor):
+    try:
+        db=sqlite3.connect(path.as_uri()+'?mode=ro&immutable=1',uri=True)
+        try:
+            integrity=db.execute('PRAGMA integrity_check').fetchall()
+            instance=db.execute('SELECT singleton_key, instance_id FROM instance_metadata').fetchall()
+            total=db.execute('SELECT count(*) FROM memory_records').fetchone()[0]
+            counts=db.execute('SELECT count(*), coalesce(sum(archived=0),0), coalesce(sum(archived=1),0) '
+                              'FROM memory_records WHERE profile_id=? AND workspace_id=?',
+                              (descriptor['profile'],descriptor['workspace'])).fetchone()
+        finally:db.close()
+    except (sqlite3.Error,OSError):
+        raise ValueError('Restored MemoryD database could not be checked privately') from None
+    if (integrity!=[('ok',)] or instance!=[('default',descriptor['source_instance_id'])]
+            or total!=descriptor['record_count'] or counts!=(descriptor['record_count'],
+                descriptor['active_record_count'],descriptor['archived_record_count'])):
+        raise ValueError('Restored MemoryD identity or scoped record counts do not match capture')
+
+
+def _memoryd_restore_idle(helper):
+    lines=run(['docker','top',helper,'-eo','pid,comm']).decode().splitlines()
+    if len(lines)!=2 or lines[1].split()[-1:]!=['sleep']:
+        raise ValueError('MemoryD recovery helper may still be writing')
+
+
+def _memoryd_restore_guard(helper,name,activation_id,nonce,image_id):
+    _memoryd_restore_helper(helper,name,activation_id,nonce,image_id,running=True)
+    _memoryd_restore_volume(activation_id,nonce)
+    _memoryd_restore_inventory(helper_id=helper,owned_volume=True)
+    _memoryd_restore_idle(helper)
+
+
+def _memoryd_restore_remove_helper(helper,name,activation_id,nonce,image_id):
+    _memoryd_restore_guard(helper,name,activation_id,nonce,image_id)
+    run(['docker','stop','--time','10',helper])
+    _memoryd_restore_helper(helper,name,activation_id,nonce,image_id,running=False)
+    run(['docker','rm',helper])
+
+
+def activation_memoryd_restore(generation_dir,expected_manifest_sha256,activation_id):
+    marker=_activation_marker(activation_id)
+    info=_prepared_generation(generation_dir)
+    descriptor=_memoryd_restore_descriptor(info['prepared'])
+    if (not isinstance(expected_manifest_sha256,str) or not re.fullmatch('[a-f0-9]{64}',expected_manifest_sha256)
+            or info['manifest_sha256']!=expected_manifest_sha256
+            or marker.get('prepared_manifest_sha256')!=expected_manifest_sha256
+            or marker.get('source_sha')!=info['generation']['source_sha']
+            or marker.get('expected_identity')!=info['expected_identity']
+            or marker.get('original_stopped_attested') is not True or marker.get('memoryd')!=descriptor):
+        raise ValueError('MemoryD recovery does not match the activation authorization')
+    _memoryd_restore_sources(info,descriptor)
+    _memoryd_restore_inventory()
+    image_id=_memoryd_restore_image(descriptor)
+    nonce=uuid.uuid4().hex
+    name='mcp-recovery-memoryd-'+activation_id[:12]+'-'+nonce[:12]
+    receipt_path=STORE/f'memoryd-restore-{activation_id}.json'
+    receipt={'schema_version':1,'status':'intent','activation_id':activation_id,
+             'prepared_manifest_sha256':expected_manifest_sha256,'backup_sha256':descriptor['backup_sha256'],
+             'source_instance_id':descriptor['source_instance_id'],'record_count':descriptor['record_count'],
+             'active_record_count':descriptor['active_record_count'],'archived_record_count':descriptor['archived_record_count'],
+             'profile':descriptor['profile'],'workspace':descriptor['workspace'],'volume':MEMORYD_VOLUME,
+             'helper_name':name,'owner_nonce':nonce,'started_at_ns':time.time_ns()}
+    _memoryd_restore_intent(receipt_path,receipt)
+    helper=None
+    try:
+        _memoryd_restore_inventory()
+        run(['docker','volume','create','--driver','local','--label','mcp-control-plane.recovery-activation='+activation_id,
+             '--label','mcp-control-plane.restore-nonce='+nonce,MEMORYD_VOLUME])
+        _memoryd_restore_volume(activation_id,nonce)
+        _memoryd_restore_inventory(owned_volume=True)
+        helper=run(['docker','create','--pull','never','--name',name,'--network','none','--no-healthcheck',
+                    '--user','10001:10001','--label','mcp-control-plane.recovery-activation='+activation_id,
+                    '--label','mcp-control-plane.restore-nonce='+nonce,
+                    '--mount','type=volume,source='+MEMORYD_VOLUME+',target=/data',
+                    '--entrypoint','/bin/sleep',descriptor['backend_image'],'infinity']).decode().strip()
+        _memoryd_restore_helper(helper,name,activation_id,nonce,image_id,running=False)
+        _memoryd_restore_inventory(helper_id=helper,owned_volume=True)
+        run(['docker','start',helper])
+        _memoryd_restore_guard(helper,name,activation_id,nonce,image_id)
+        _memoryd_restore_exec(helper,'/bin/mkdir','-m','0700','/tmp/restore')
+        _memoryd_restore_pipe(helper,info['root']/'memoryd/backup.db','/tmp/restore/backup.db')
+        _memoryd_restore_pipe(helper,info['root']/'memoryd/backup.db.manifest.json','/tmp/restore/backup.db.manifest.json')
+        _memoryd_restore_scratch(helper,info,descriptor)
+        _memoryd_restore_guard(helper,name,activation_id,nonce,image_id)
+        _memoryd_restore_target(helper,present=False)
+        base=['/usr/local/bin/codex-memoryd','backup']
+        common=['--local','--db','/tmp/restore/unused.db']
+        verify_raw=_memoryd_restore_exec(helper,*base,'verify',*common,'--path','/tmp/restore/backup.db')
+        _memoryd_restore_scratch(helper,info,descriptor)
+        verify=json.loads(verify_raw)
+        if not _memoryd_restore_verified_report(verify,descriptor):raise ValueError('MemoryD backup verification failed')
+        _memoryd_restore_guard(helper,name,activation_id,nonce,image_id)
+        _memoryd_restore_target(helper,present=False)
+        preview_raw=_memoryd_restore_exec(helper,*base,'restore-preview',*common,
+                                        '--from','/tmp/restore/backup.db','--target','/data/memory.db')
+        _memoryd_restore_scratch(helper,info,descriptor)
+        preview=json.loads(preview_raw)
+        if (not isinstance(preview,dict) or preview.get('safe_to_apply') is not True
+                or preview.get('target_exists') is not False
+                or not _memoryd_restore_verified_report(preview.get('verify'),descriptor)):
+            raise ValueError('MemoryD restore preview is unsafe')
+        _memoryd_restore_guard(helper,name,activation_id,nonce,image_id)
+        _memoryd_restore_target(helper,present=False)
+        _memoryd_restore_scratch(helper,info,descriptor)
+        applied_raw=_memoryd_restore_exec(helper,*base,'restore-apply',*common,
+                                        '--from','/tmp/restore/backup.db','--target','/data/memory.db')
+        _memoryd_restore_scratch(helper,info,descriptor)
+        applied=json.loads(applied_raw)
+        if (not isinstance(applied,dict) or applied.get('restored') is not True
+                or applied.get('target_path')!='/data/memory.db' or applied.get('prior_backup') is not None):
+            raise ValueError('MemoryD restore result is invalid')
+        _memoryd_restore_guard(helper,name,activation_id,nonce,image_id)
+        _memoryd_restore_target(helper,present=True)
+        _memoryd_restore_exec(helper,'/usr/bin/sync','-f','/data/memory.db','/data')
+        with tempfile.TemporaryDirectory(prefix='memoryd-restore-check-',dir=STORE) as directory:
+            copy=Path(directory)/'memory.db'
+            _memoryd_restore_copy_target(helper,copy)
+            _memoryd_restore_private_hash(copy,descriptor['backup_sha256'],size=descriptor['backup_size_bytes'])
+            _memoryd_restore_sqlite(copy,descriptor)
+            _memoryd_restore_private_hash(copy,descriptor['backup_sha256'],size=descriptor['backup_size_bytes'])
+        target_hash=_memoryd_restore_exec(helper,'/usr/bin/sha256sum','--','/data/memory.db').decode().split()
+        if target_hash!=[descriptor['backup_sha256'],'/data/memory.db']:
+            raise ValueError('Restored MemoryD target digest does not match backup')
+        _memoryd_restore_target(helper,present=True)
+        _memoryd_restore_scratch(helper,info,descriptor)
+        _memoryd_restore_guard(helper,name,activation_id,nonce,image_id)
+        _memoryd_restore_remove_helper(helper,name,activation_id,nonce,image_id)
+        helper=None
+        _memoryd_restore_volume(activation_id,nonce)
+        _memoryd_restore_inventory(owned_volume=True)
+        _memoryd_restore_sources(info,descriptor)
+        receipt.update(status='verified',verified_at_ns=time.time_ns())
+        write(receipt_path,receipt)
+        return {'memoryd_restored':True,'backup_sha256':descriptor['backup_sha256']}
+    except BaseException:
+        # An interrupted Docker exec can remain active. Retain its helper and volume.
+        raise
+
+
 def activation_identity(expected_identity,activation_id):
     marker=_activation_marker(activation_id)
     if marker['expected_identity']!=expected_identity:raise ValueError('Activation identity does not match its private operation marker')
@@ -2203,7 +2532,7 @@ def main():
                         'devsy-tap-reconcile-plan','devsy-tap-reconcile',
                         'devsy-tap-rollback-plan','devsy-tap-rollback'):
         STORE.mkdir(mode=0o700,exist_ok=True)
-    data=json.load(sys.stdin) if action in ('images','image-check','network','network-check','wait','commit','baseline','set-current','rollback-commit','restart-local','activation-plan','activation-preflight','activation-begin','activation-pull-images','activation-install','activation-track','activation-seed','activation-network','activation-identity','activation-cleanup','activation-record','activation-memoryd-wait','smoke','memoryd-adapter-prepare','memoryd-adapter-finalize','memoryd-transfer-prepare','memoryd-import-bundles','memoryd-network-allow','memoryd-app-register','memoryd-registration-reconcile','memoryd-identity-reconcile','devsy-plan','devsy-check','devsy-rollback-plan','devsy-apply','devsy-rollback','devsy-scope-rebind-check','devsy-scope-rebind','devsy-bridge-path-check','devsy-bridge-path-apply','devsy-tap-reconcile-plan','devsy-tap-reconcile','devsy-tap-rollback-plan','devsy-tap-rollback') else {}
+    data=json.load(sys.stdin) if action in ('images','image-check','network','network-check','wait','commit','baseline','set-current','rollback-commit','restart-local','activation-plan','activation-preflight','activation-begin','activation-pull-images','activation-install','activation-track','activation-seed','activation-network','activation-identity','activation-cleanup','activation-record','activation-memoryd-wait','activation-memoryd-restore','smoke','memoryd-adapter-prepare','memoryd-adapter-finalize','memoryd-transfer-prepare','memoryd-import-bundles','memoryd-network-allow','memoryd-app-register','memoryd-registration-reconcile','memoryd-identity-reconcile','devsy-plan','devsy-check','devsy-rollback-plan','devsy-apply','devsy-rollback','devsy-scope-rebind-check','devsy-scope-rebind','devsy-bridge-path-check','devsy-bridge-path-apply','devsy-tap-reconcile-plan','devsy-tap-reconcile','devsy-tap-rollback-plan','devsy-tap-rollback') else {}
     if action=='activation-plan':result=activation_plan(data['generation_dir'])
     elif action=='activation-preflight':
         info=_ensure_empty_activation_target(data['generation_dir'],allow_lock=True)
@@ -2214,6 +2543,9 @@ def main():
     elif action=='activation-install':result=activation_install(data['generation_dir'],data['prepared_manifest_sha256'],data['activation_id'])
     elif action=='activation-track':result=activation_track(data['activation_id'],data['service'])
     elif action=='activation-seed':result=activation_seed(data['generation_dir'],data['prepared_manifest_sha256'],data['manifest'],data['activation_id'])
+    elif action=='activation-memoryd-restore':
+        if set(data)!={'generation_dir','prepared_manifest_sha256','activation_id'}:raise ValueError('MemoryD recovery request is invalid')
+        result=activation_memoryd_restore(data['generation_dir'],data['prepared_manifest_sha256'],data['activation_id'])
     elif action=='activation-network':result=activation_network(data['activation_id'])
     elif action=='activation-identity':result=activation_identity(data['expected_identity'],data['activation_id'])
     elif action=='activation-memoryd-wait':result=memoryd_wait(activation_id=data['activation_id'])
