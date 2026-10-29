@@ -758,6 +758,7 @@ def test_full_backup_captures_recovery_inputs_and_consistent_database_map(tmp_pa
          patch.object(h,"run",side_effect=run), \
          patch.object(h,"subprocess",SimpleNamespace(Popen=lambda *args,**kwargs:Guard(),run=cp,DEVNULL=subprocess.DEVNULL)):
         result=h.backup()
+    assert "memoryd" not in result
     assert events.index("pause") < events.index("docker-cp") < events.index("unpause")
     assert events[-2:]==["guard-terminate","guard-wait"]
     backup=Path(result["backup"])
@@ -778,6 +779,16 @@ def test_full_backup_captures_recovery_inputs_and_consistent_database_map(tmp_pa
         assert connection.execute("SELECT value FROM proof").fetchone()==("consistent-copy",)
     assert "cas/runtime/server.db" not in members
     assert not any("runtime-source.bundle" in name for name in members)
+
+    memoryd_state = {"status": "absent"}
+    with patch.object(h,"inspect",return_value=("kamal",{"kamal":{"executor":{"Id":"executor-id"}}},[])), \
+         patch.object(h,"run",side_effect=run), \
+         patch.object(h,"subprocess",SimpleNamespace(Popen=lambda *args,**kwargs:Guard(),run=cp,DEVNULL=subprocess.DEVNULL)), \
+         patch.object(h,"memoryd_capture_preflight",return_value=memoryd_state), \
+         patch.object(h,"capture_memoryd",return_value=memoryd_state) as capture:
+        recovery=h.backup(include_memoryd=True)
+    assert recovery["memoryd"] == memoryd_state
+    capture.assert_called_once_with(Path(recovery["backup"])/"memoryd", expected=memoryd_state)
 
 
 def test_runtime_source_bundle_is_clonable_at_the_recorded_clean_revision(tmp_path):

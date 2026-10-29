@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
+import re
 import shlex
 import shutil
 import stat
@@ -13,6 +14,7 @@ import subprocess
 import tarfile
 
 import deploy_control_plane as deploy
+import vm_deploy_host as vm
 from native_codex_ssh import load_profile as load_native_profile
 
 
@@ -50,6 +52,26 @@ def unpack_snapshot(archive, destination):
                 with stream.extractfile(member) as source, path.open('xb') as target:
                     shutil.copyfileobj(source, target)
                 path.chmod(0o600)
+
+
+def validate_memoryd_snapshot(snapshot_dir, descriptor):
+    memoryd = snapshot_dir / 'memoryd'
+    if descriptor == {'status': 'absent'}:
+        if os.path.lexists(memoryd):
+            raise ValueError('Absent MemoryD capture contains unexpected artifacts')
+        return descriptor
+    if (not isinstance(descriptor, dict) or descriptor.get('status') != 'captured'
+            or descriptor.get('backend_image') != vm.MEMORYD_IMAGE
+            or not isinstance(descriptor.get('adapter_image'), str)
+            or not re.fullmatch(r'ghcr\.io/joshyorko/codex-action-server@sha256:[a-f0-9]{64}',
+                                descriptor['adapter_image'])):
+        raise ValueError('MemoryD capture descriptor is invalid')
+    facts = vm._validate_memoryd_capture(memoryd)
+    expected = {'status': 'captured', 'backend_image': descriptor['backend_image'],
+                'adapter_image': descriptor['adapter_image'], **facts}
+    if descriptor != expected:
+        raise ValueError('Transported MemoryD artifacts do not match the capture descriptor')
+    return descriptor
 
 
 def collect(local_config, native_profile, instance_profile, output, tailnet_requirements=None):
@@ -97,7 +119,7 @@ def collect(local_config, native_profile, instance_profile, output, tailnet_requ
             if (not isinstance(generation, dict)
                     or any(not generation.get(field) or generation.get(field) != before.get(field) for field in fields)):
                 raise ValueError('Recorded generation differs from the live control plane; capture refused')
-            snapshot = deploy.remote('backup')
+            snapshot = deploy.remote('backup', {'include_memoryd': True})
             expected = Path(deploy.INSTANCE['vm']['state_dir']) / 'deployment/backups'
             snapshot_path = Path(snapshot['backup'])
             if snapshot_path.parent != expected or not snapshot_path.name.isdigit():
@@ -123,11 +145,13 @@ def collect(local_config, native_profile, instance_profile, output, tailnet_requ
         with executor.open('rb') as stream:
             if hashlib.file_digest(stream, 'sha256').hexdigest() != snapshot['executor_sha256']:
                 raise ValueError('Transported Executor snapshot digest mismatch')
-        receipt = {'schema_version': 1, 'generation': generation,
+        memoryd = validate_memoryd_snapshot(output / 'vm-snapshot', snapshot.get('memoryd'))
+        receipt = {'schema_version': 2, 'generation': generation,
                    'captured_at_utc': datetime.now(timezone.utc).isoformat(),
                    'executor_sha256': snapshot['executor_sha256'],
                    'identity_preserved': True, 'single_tunnel': True,
-                   'capture_kind': 'executor-paused-copy-and-sqlite-online-backups'}
+                   'capture_kind': 'executor-paused-copy-and-sqlite-online-backups',
+                   'memoryd': memoryd}
         (output / 'capture-receipt.json').write_text(json.dumps(receipt, indent=2) + '\n')
         manifest = {'version': 1, 'bundle_id': output.name, 'members': [
             {'name': name, 'source': str(output / name), 'required': True}

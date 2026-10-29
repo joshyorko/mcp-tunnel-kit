@@ -1,4 +1,6 @@
 import io
+import hashlib
+import json
 from contextlib import nullcontext
 from pathlib import Path
 import tarfile
@@ -85,3 +87,40 @@ def test_stale_recorded_generation_refuses_before_backup_and_removes_own_staging
                         collect('/unused', '/unused', '/unused', destination, requirements)
                     assert [call.args[0] for call in remote.call_args_list] == ['current', 'snapshot']
     assert not destination.exists()
+
+
+def test_collection_records_the_explicit_absence_of_memoryd(tmp_path, monkeypatch):
+    tmp_path.chmod(0o700)
+    requirements = tmp_path / 'requirements.json'
+    requirements.write_text('{}')
+    requirements.chmod(0o600)
+    source = tmp_path / 'executor.tar'
+    source.write_bytes(b'synthetic executor snapshot')
+    generation = {'authority': 'kamal', 'identity': 'preserved', 'source_sha': 'a' * 40}
+    live = {**generation, 'tunnel_count': 1}
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    snapshot = {'backup': '/vm/state/deployment/backups/123', 'executor_sha256': digest,
+                'memoryd': {'status': 'absent'}}
+    calls = []
+
+    def remote(action, data=None):
+        calls.append((action, data))
+        return {'current': generation, 'snapshot': live, 'backup': snapshot}[action]
+
+    def transfer(_command, stdout, **_kwargs):
+        with tarfile.open(fileobj=stdout, mode='w') as output:
+            output.add(source, arcname='vm-snapshot/executor.tar')
+        return type('Result', (), {'returncode': 0})()
+
+    with patch('collect_recovery.deploy.configure_local'), patch('collect_recovery.deploy.trusted_context'), \
+         patch('collect_recovery.load_native_profile', return_value={'state_dir': str(tmp_path / 'native')}), \
+         patch('collect_recovery.copy_private'), patch('collect_recovery.deploy.lock', return_value=nullcontext()), \
+         patch('collect_recovery.deploy.INSTANCE', {'vm': {'state_dir': '/vm/state'}}), \
+         patch('collect_recovery.deploy.remote', side_effect=remote), \
+         patch('collect_recovery.deploy.ssh_args', return_value=['fixture']), \
+         patch('collect_recovery.subprocess.run', side_effect=transfer):
+        collect('/unused', '/unused', '/unused', tmp_path / 'capture', requirements)
+    receipt = json.loads((tmp_path / 'capture/capture-receipt.json').read_text())
+    assert receipt['schema_version'] == 2
+    assert receipt['memoryd'] == {'status': 'absent'}
+    assert ('backup', {'include_memoryd': True}) in calls
