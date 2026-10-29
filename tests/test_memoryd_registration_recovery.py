@@ -102,6 +102,10 @@ def registration(tmp_path, monkeypatch):
     monkeypatch.setattr(control, 'Mcp', Upstream)
     monkeypatch.setenv('EXECUTOR_URL', 'http://127.0.0.1:4312')
     monkeypatch.setenv('EXECUTOR_PAT_FILE', str(secrets / 'executor-pat'))
+    store=tmp_path/'deployment';store.mkdir(mode=0o700)
+    monkeypatch.setattr(host,'STORE',store)
+    host.write(store/'current.json',{'authority':'kamal',
+        'identity':host.identity(host.NAMES['kamal']['executor'],exclude_memoryd=True)})
     return executor, tmp_path
 
 
@@ -143,8 +147,6 @@ def test_interrupted_import_recovers_without_a_second_app(registration, monkeypa
 def test_controller_retries_interrupted_import_and_reconciles_original_identity(registration, monkeypatch):
     executor, state = registration
     store = state / 'deployment'
-    store.mkdir(mode=0o700)
-    monkeypatch.setattr(host, 'STORE', store)
     baseline = host.identity(host.NAMES['kamal']['executor'], exclude_memoryd=True)
     host.write(store / 'current.json', {'authority': 'kamal', 'identity': baseline})
     interrupt_before_receipt(registration, monkeypatch)
@@ -221,6 +223,16 @@ def test_unreceipted_app_without_intent_is_never_adopted(registration):
         host.register_memoryd_app(REQUEST)
     assert executor.imports == 0
     assert not (state / 'bootstrap/memoryd-integration.json').exists()
+
+
+def test_registration_refuses_recorded_identity_drift_before_import(registration,monkeypatch):
+    executor,state=registration
+    store=state/'deployment'
+    host.write(store/'current.json',{'authority':'kamal','identity':'different'})
+    with pytest.raises(ValueError,match='identity drift'):
+        host.register_memoryd_app(REQUEST)
+    assert executor.imports==0
+    assert not (state/'bootstrap/memoryd-registration-pending.json').exists()
 
 
 def test_pending_import_without_a_visible_app_never_reimports(registration, monkeypatch):

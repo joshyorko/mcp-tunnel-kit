@@ -156,6 +156,12 @@ def _valid_memoryd_receipt(receipt):
             and all(isinstance(value,str) and value for value in receipt.values()))
 
 
+def _memoryd_require_recorded_base(base):
+    current=json.loads(private(STORE/'current.json'))
+    if current.get('authority')!='kamal' or current.get('identity')!=base:
+        raise ValueError('Executor identity drift prevents MemoryD registration')
+
+
 def _memoryd_base_apps(apps,org,marker,gateway):
     matches=[app for app in apps if app.get('slug')=='memoryd' or app.get('name')=='MemoryD']
     if matches or marker:
@@ -181,6 +187,7 @@ def _memoryd_pending_app(intent,org,apps,get):
             or any(not isinstance(intent[key],str) or not re.fullmatch(r'[a-f0-9]{64}',intent[key])
                    for key in ('transfer_manifest_sha256','transfer_receipt_sha256','source_sha256','base_identity'))):
         raise ValueError('MemoryD pending registration identity changed')
+    _memoryd_require_recorded_base(intent['base_identity'])
     transfer_id=intent['transfer_manifest_sha256']
     _require_completed_memoryd_transfer({'transfer_manifest_sha256':transfer_id})
     if hashlib.sha256(private(_memoryd_receipt_path(transfer_id))).hexdigest()!=intent['transfer_receipt_sha256']:
@@ -1068,6 +1075,7 @@ def register_memoryd_app(data):
         raise ValueError('MemoryD pending registration identity changed')
     if not has_intent and receipt is None:
         base=identity(NAMES['kamal']['executor'],exclude_memoryd=True)
+        _memoryd_require_recorded_base(base)
         context,_=http.request('GET','/api/context')
         org=context.get('organization')
         if not isinstance(org,str) or not org:
