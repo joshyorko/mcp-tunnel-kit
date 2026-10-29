@@ -1,0 +1,60 @@
+services:
+  memoryd:
+    image: ghcr.io/joshyorko/codex-memoryd@sha256:70465d5250f693d15408fe904d30e3035360d8a46ac6f1caea8c3660eac09996
+    network_mode: host
+    restart: unless-stopped
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: [/tmp:rw,nosuid,nodev,size=32m,mode=1777]
+    mem_limit: 256m
+    cpus: "0.5"
+    environment:
+      CODEX_MEMORYD_DB: /data/memory.db
+      CODEX_MEMORYD_BIND: ${CODEX_MEMORYD_BIND:?Set CODEX_MEMORYD_BIND to a verified free loopback address and port}
+      CODEX_MEMORYD_LOG: info
+    volumes:
+      - codex-memoryd-data:/data
+    healthcheck:
+      test: [CMD-SHELL, "curl -fsS http://${CODEX_MEMORYD_BIND}/healthz || exit 1"]
+      interval: 10s
+      timeout: 3s
+      start_period: 15s
+      retries: 6
+
+  memoryd-mcp:
+    image: ghcr.io/joshyorko/codex-action-server@sha256:bda7ef55e9d31574aefbd650ec38bfbe993b5adbbfffc15a49a7ca83e6ba26ca
+    platform: linux/amd64
+    network_mode: host
+    restart: unless-stopped
+    user: "1000:1000"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: [/tmp:rw,nosuid,nodev,size=32m,mode=1777]
+    mem_limit: 128m
+    cpus: "0.25"
+    entrypoint: [python3, /opt/tunnel-kit/codex_memoryd_mcp.py]
+    environment:
+      CODEX_MEMORYD_URL: ${CODEX_MEMORYD_URL:-http://127.0.0.1:8787}
+      CODEX_MEMORYD_MCP_BIND: ${CONTROL_PLANE_GATEWAY:-172.30.86.1}:8090
+    volumes:
+      - ./scripts/codex_memoryd_mcp.py:/opt/tunnel-kit/codex_memoryd_mcp.py:ro
+    depends_on:
+      memoryd:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python3
+        - -c
+        - "import urllib.request; opener=urllib.request.build_opener(urllib.request.ProxyHandler({})); opener.open('http://${CONTROL_PLANE_GATEWAY:-172.30.86.1}:8090/healthz',timeout=2).read()"
+      interval: 10s
+      timeout: 3s
+      start_period: 15s
+      retries: 6
+
+volumes:
+  codex-memoryd-data:
+    name: codex-memoryd-data

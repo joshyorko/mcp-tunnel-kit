@@ -11,12 +11,15 @@ from pathlib import Path, PurePosixPath
 import re
 import select
 import shlex
+import shutil
 import socket
+import sqlite3
 import stat
 import subprocess
 import sys
 import tempfile
 import time
+import zipfile
 import zlib
 
 from kamal_model import render,validate_manifest
@@ -33,6 +36,11 @@ KNOWN=DEFAULT_KNOWN
 LOCAL_CONFIGURED=False
 HOST=None
 ORDER=('executor','schema-proxy','cas','tunnel')
+MEMORYD_ORDER=('memoryd','memoryd-mcp')
+MEMORYD_RELEASE_BINARY_SHA256={
+    '6bd47e96dc225b88e5bf4eb0d45ef68eaec4df0e1582a0ad62b1930c459110e6',
+    'e6030a46216ab0c811a0d8fd937fa54132891469a60300ec64bc07f36996eb3f',
+}
 VMROOT=None
 VM_HOST_PIN=None
 INSTANCE=None
@@ -159,7 +167,7 @@ def lock():
 
 def remote_source():
     bootstrap='import sys,types\n'
-    for name in ('instance_profile','prepare_recovery_generation','devsy_vm_bootstrap','scope_binding_rebind','bridge_kubectl_path'):
+    for name in ('instance_profile','prepare_recovery_generation','devsy_vm_bootstrap','scope_binding_rebind','bridge_kubectl_path','compose_control'):
         source=(ROOT/'scripts'/(name+'.py')).read_text()
         bootstrap+=('_module=types.ModuleType('+repr(name)+')\n'
                     +'_module.__file__='+repr(str(ROOT/'scripts'/(name+'.py')))+'\n'
@@ -197,15 +205,15 @@ def profile():
 
 def kamal(config,operation,name):
     # Public images only. Never run the unrelated top-level app/proxy/registry commands.
-    if operation not in ('boot','reboot','start','stop','details') or name not in ORDER:raise ValueError('Unsupported Kamal operation')
+    if operation not in ('boot','reboot','start','stop','details') or name not in (*ORDER,*MEMORYD_ORDER):raise ValueError('Unsupported Kamal operation')
     docker_config=remote('anonymous-docker-config')['path']
     env={**os.environ,'BUNDLE_GEMFILE':str(ROOT/'Gemfile.deploy'),'KAMAL_PUBLIC_DOCKER_CONFIG':docker_config}
     r=subprocess.run(['bundle','exec','ruby',str(ROOT/'scripts/kamal_anonymous.rb'),'accessory',operation,name,'--config-file',str(config)],env=env,capture_output=True,text=True,timeout=300)
     if r.returncode:raise RuntimeError('Kamal accessory '+operation+' '+name+' failed; raw output withheld')
 
 
-def configuration(directory,manifest):
-    p=Path(directory)/'deploy.yml';p.write_text(render(profile(),manifest));p.chmod(0o600);return p
+def configuration(directory,manifest,*,allow_memoryd_mcp=True):
+    p=Path(directory)/'deploy.yml';p.write_text(render(profile(),manifest,allow_memoryd_mcp=allow_memoryd_mcp));p.chmod(0o600);return p
 
 
 def choose_manifest(current, digest, revision):
@@ -738,7 +746,514 @@ def restore_cas(previous,directory,native_tuple=None):
     return after
 
 
+def _sha256_file(path):
+    digest=hashlib.sha256()
+    with path.open('rb') as stream:
+        for chunk in iter(lambda:stream.read(1024*1024),b''):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _memory_public_handle(record_id):
+    digest=hashlib.sha256(b'mr_\x1f'+record_id.strip().encode()).hexdigest()
+    return 'mr_'+digest[:32]
+
+
+def load_memoryd_transfer_set(home=None):
+    """Verify a frozen, backup-backed source snapshot and its portable bundles."""
+    home=Path(home or os.environ.get('CODEX_MEMORYD_HOME')
+              or Path.home()/'.codex-memoryd/dakota-codex-only')
+    root_stat=home.lstat()
+    if (home.is_symlink() or not home.is_dir() or root_stat.st_uid!=os.getuid()
+            or stat.S_IMODE(root_stat.st_mode)!=0o700):
+        raise ValueError('Dakota MemoryD profile home must be a private owner directory')
+    export_dir=home/'exports'
+    export_stat=export_dir.lstat()
+    if (export_dir.is_symlink() or not export_dir.is_dir() or export_stat.st_uid!=os.getuid()
+            or stat.S_IMODE(export_stat.st_mode)!=0o700):
+        raise ValueError('MemoryD export directory must be private')
+    manifest_path=export_dir/'kamal-test-deploy-transfer-manifest-active.json'
+    manifest_text=_read_private_file(manifest_path,limit=1024*1024)
+    manifest=json.loads(manifest_text)
+    if (manifest.get('schema_version')!=1 or manifest.get('tool_version')!='0.1.0'
+            or manifest.get('source_profile')!='personal'
+            or manifest.get('source_workspace')!='dakota-codex-only'
+            or manifest.get('source_snapshot_kind')!='codex-memoryd-backup'
+            or manifest.get('include_archived') is not False
+            or type(manifest.get('source_record_count')) is not int
+            or manifest.get('source_record_count')<1
+            or type(manifest.get('source_database_record_count')) is not int
+            or manifest.get('source_database_record_count')<manifest.get('source_record_count')):
+        raise ValueError('MemoryD transfer manifest has an unexpected source scope or version')
+    cursor=manifest.get('source_sync_cursor',{})
+    if (cursor.get('status')!='synced' or cursor.get('unsynced_count')!=0
+            or not isinstance(cursor.get('source_root'),str)
+            or not Path(cursor.get('source_root','')).is_absolute()
+            or not isinstance(cursor.get('last_completed_at'),str)
+            or cursor.get('last_completed_at')!=manifest.get('source_cutoff_at')):
+        raise ValueError('Frozen MemoryD source cursor is incomplete or inconsistent')
+    if (type(manifest.get('source_markdown_file_count')) is not int
+            or not re.fullmatch(r'[a-f0-9]{64}',str(manifest.get('source_markdown_manifest_sha256','')))):
+        raise ValueError('Frozen native-source hash metadata is invalid')
+
+    backup_info=manifest.get('verified_source_backup',{})
+    backup_rel=Path(backup_info.get('path',''))
+    if not backup_rel.parts or backup_rel.is_absolute() or '..' in backup_rel.parts:
+        raise ValueError('MemoryD source backup path is invalid')
+    backup=home/backup_rel
+    backup_manifest=backup.with_name(backup.name+'.manifest.json')
+    for path in (backup,backup_manifest):
+        info=path.lstat()
+        if path.is_symlink() or not path.is_file() or info.st_uid!=os.getuid() or stat.S_IMODE(info.st_mode)!=0o600:
+            raise ValueError('MemoryD source backup must be owner-only')
+    backup_data=json.loads(_read_private_file(backup_manifest,limit=1024*1024))
+    backup_digest='sha256:'+_sha256_file(backup)
+    backup_wal=Path(str(backup)+'-wal')
+    if backup_wal.is_symlink() or (backup_wal.exists() and backup_wal.stat().st_size):
+        raise ValueError('Frozen source backup has uncheckpointed WAL data')
+    if (backup_info.get('verified') is not True
+            or backup_digest!=backup_info.get('sha256')
+            or backup_digest!=backup_data.get('sha256')
+            or backup_data.get('size_bytes')!=backup.stat().st_size
+            or backup_data.get('tool_version')!='0.1.0'
+            or backup_data.get('schema_version')!=backup_data.get('expected_schema_version')
+            or backup_digest[7:]!=manifest.get('source_database_sha256')):
+        raise ValueError('Verified source backup changed')
+    if sum(item.get('rows',0) for item in backup_data.get('tables',[]) if item.get('table')=='memory_records')!=manifest['source_database_record_count']:
+        raise ValueError('Frozen source backup record count does not match the manifest')
+    conn=sqlite3.connect(f'file:{backup}?mode=ro',uri=True)
+    try:
+        integrity=conn.execute('PRAGMA integrity_check').fetchone()[0]
+        source_ids={row[0] for row in conn.execute(
+            'SELECT id FROM memory_records WHERE profile_id=? AND workspace_id=? AND archived=0',
+            ('personal','dakota-codex-only'))}
+        total_records=conn.execute(
+            'SELECT count(*) FROM memory_records WHERE profile_id=? AND workspace_id=?',
+            ('personal','dakota-codex-only')).fetchone()[0]
+    finally:
+        conn.close()
+    if (integrity!='ok' or len(source_ids)!=manifest['source_record_count']
+            or total_records!=manifest['source_database_record_count']):
+        raise ValueError('Frozen source backup profile/workspace record counts do not match')
+
+    bundle_descriptors=manifest.get('bundles')
+    if not isinstance(bundle_descriptors,list) or not bundle_descriptors:
+        raise ValueError('No prepared portable bundles were supplied')
+    selected_ids=set()
+    paths=[]
+    remote_bundles=[]
+    total_bytes=0
+    for item in bundle_descriptors:
+        name=item.get('path','')
+        if (not isinstance(name,str) or Path(name).name!=name or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.bundle',name)):
+            raise ValueError('MemoryD bundle filename is invalid')
+        path=export_dir/name
+        info=path.lstat()
+        if path.is_symlink() or not path.is_file() or info.st_uid!=os.getuid() or stat.S_IMODE(info.st_mode)!=0o600:
+            raise ValueError('MemoryD bundle must be an owner-only regular file')
+        size=path.stat().st_size
+        total_bytes+=size
+        if (size!=item.get('size_bytes') or size>24*1024*1024
+                or _sha256_file(path)!=item.get('sha256')):
+            raise ValueError('MemoryD portable bundle hash or size changed')
+        if (item.get('integrity_status')!='verified'
+                or item.get('source_instance_id')!=manifest.get('source_instance_id')
+                or item.get('source_scope')!={'profile':'personal','workspace':'dakota-codex-only','repo_id':None}
+                or (item.get('destination_scope') is not None
+                    and item.get('destination_scope')!={'profile':'personal','workspace':'dakota-codex-only','repo_id':None})):
+            raise ValueError('MemoryD bundle provenance or scope does not match the transfer')
+        omissions=item.get('omissions',{})
+        counts=item.get('counts',{})
+        if (not isinstance(omissions,dict) or not isinstance(counts,dict)
+                or any(omissions.get(key,0) for key in
+                       ('secret_blocked','boundary','portability','quarantined','external_reference'))
+                or counts.get('rejected',0)!=0 or counts.get('conflicts',0)!=0):
+            raise ValueError('MemoryD bundle policy preview includes rejected or out-of-boundary objects')
+        with zipfile.ZipFile(path) as archive:
+            if archive.getinfo('manifest.json').file_size>1024*1024:
+                raise ValueError('Portable bundle manifest exceeds the release limit')
+            bundle_manifest=json.loads(archive.read('manifest.json'))
+        selection=bundle_manifest.get('selection',{}).get('record_ids',[])
+        intent=bundle_manifest.get('intent',{})
+        if (not isinstance(selection,list) or len(selection)>5000
+                or not all(isinstance(record_id,str) and record_id for record_id in selection)):
+            raise ValueError('Portable bundle root selection exceeds the release limit')
+        ids=set(selection)
+        if (not selection or len(ids)!=len(selection) or ids & selected_ids
+                or bundle_manifest.get('producer',{}).get('instance_id')!=manifest['source_instance_id']
+                or bundle_manifest.get('bundle_id')!=item.get('bundle_id')
+                or bundle_manifest.get('counts',{}).get('root_memories')!=len(selection)
+                or bundle_manifest.get('selection',{}).get('include_archived') is not False
+                or intent.get('source_profile')!='personal'
+                or intent.get('source_workspace')!='dakota-codex-only'
+                or intent.get('target_profile')!='personal'
+                or intent.get('target_workspace')!='dakota-codex-only'):
+            raise ValueError('Portable bundle selection or source provenance is invalid')
+        selected_ids.update(ids)
+        paths.append(path)
+        remote_bundles.append({'path':item['path'],'sha256':item['sha256'],'size_bytes':item['size_bytes'],
+                               'bundle_id':item['bundle_id'],'manifest_digest':item['manifest_digest'],
+                               'root_count':len(selection)})
+    expected_public_ids={_memory_public_handle(record_id) for record_id in source_ids}
+    if total_bytes>128*1024*1024 or selected_ids!=expected_public_ids:
+        raise ValueError('Portable bundle root selection does not exactly cover the source corpus')
+    manifest_sha=hashlib.sha256(manifest_text.encode()).hexdigest()
+    remote_manifest={
+        'schema_version':1,
+        'transfer_manifest_sha256':manifest_sha,
+        'source_database_sha256':manifest['source_database_sha256'],
+        'source_record_count':len(source_ids),
+        'source_database_record_count':total_records,
+        'source_cutoff_at':manifest['source_cutoff_at'],
+        'include_archived':False,
+        'source_instance_id':manifest['source_instance_id'],
+        'source_profile':'personal',
+        'source_workspace':'dakota-codex-only',
+        'target_profile':'personal',
+        'target_workspace':'dakota-codex-only',
+        'bundles':remote_bundles,
+    }
+    return {'manifest':manifest,'manifest_sha256':manifest_sha,'remote_manifest':remote_manifest,
+            'bundle_paths':paths,'backup_path':backup}
+
+
+def _verify_frozen_manifest(original, regenerated):
+    ignored={'created_at','bundle_id'}
+    if ({key:value for key,value in original.items() if key not in ignored}
+            != {key:value for key,value in regenerated.items() if key not in ignored}):
+        raise ValueError('Portable bundle contents differ from the frozen backup')
+
+
+def _memoryd_release_binary():
+    selected=os.environ.get('CODEX_MEMORYD_RELEASE_BIN')
+    default=Path.home()/'.local/opt/codex-memoryd/v0.1.0/bin/codex-memoryd'
+    candidate=Path(selected) if selected else (default if default.exists() else Path(shutil.which('codex-memoryd') or ''))
+    try:
+        if not candidate.is_absolute():raise ValueError
+        binary=candidate.resolve(strict=True)
+        if not binary.is_file() or _sha256_file(binary) not in MEMORYD_RELEASE_BINARY_SHA256:raise ValueError
+        version=subprocess.run([str(binary),'--version'],capture_output=True,text=True,timeout=15)
+    except (OSError,ValueError,subprocess.SubprocessError):
+        raise ValueError('Released codex-memoryd v0.1.0 binary is unavailable')
+    if version.returncode or version.stdout.strip()!='codex-memoryd 0.1.0':
+        raise ValueError('Frozen bundle verification requires released codex-memoryd v0.1.0')
+    return binary
+
+
+def _verify_frozen_bundle_payloads(transfer):
+    binary=_memoryd_release_binary()
+    expected=transfer['manifest']['source_database_sha256']
+    with tempfile.TemporaryDirectory(prefix='memoryd-frozen-proof-') as directory:
+        scratch=Path(directory);snapshot=scratch/'snapshot.db'
+        fd=os.open(snapshot,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+        with transfer['backup_path'].open('rb') as source,os.fdopen(fd,'wb') as target:
+            shutil.copyfileobj(source,target);target.flush();os.fsync(target.fileno())
+        if _sha256_file(snapshot)!=expected:
+            raise ValueError('Frozen source backup copy failed its hash check')
+        env={key:value for key,value in os.environ.items() if not key.startswith('CODEX_MEMORYD_')}
+        env.update(CODEX_MEMORYD_HOME=str(scratch),CODEX_MEMORYD_DB=str(snapshot))
+        for index,path in enumerate(transfer['bundle_paths'],1):
+            with zipfile.ZipFile(path) as archive:
+                original=json.loads(archive.read('manifest.json'))
+            output=scratch/f'proof-{index:02d}.bundle'
+            command=[str(binary),'bundle','export','--local','--db',str(snapshot),
+                     '--profile','personal','--workspace','dakota-codex-only',
+                     '--target-profile','personal','--target-workspace','dakota-codex-only']
+            for record_id in original['selection']['record_ids']:
+                command.extend(['--record-id',record_id])
+            command.extend(['--write',str(output)])
+            result=subprocess.run(command,env=env,capture_output=True,timeout=600)
+            if result.returncode:
+                raise ValueError('Released codex-memoryd could not verify the frozen bundle selection')
+            with zipfile.ZipFile(output) as archive:
+                regenerated=json.loads(archive.read('manifest.json'))
+            _verify_frozen_manifest(original,regenerated)
+            wal=Path(str(snapshot)+'-wal')
+            if _sha256_file(snapshot)!=expected or (wal.exists() and wal.stat().st_size):
+                raise ValueError('Frozen source backup copy changed during bundle verification')
+
+
+def memoryd_transfer_payload():
+    transfer=load_memoryd_transfer_set()
+    _verify_frozen_bundle_payloads(transfer)
+    return transfer
+
+
+def deploy_memoryd(source_sha, directory):
+    """Add only the private MemoryD accessories after a read-only capacity gate."""
+    before_status = remote('status')
+    if (before_status.get('authority') != 'kamal' or before_status.get('healthy') is not True
+            or before_status.get('tunnel_count') != 1):
+        return {'operation':'memoryd','status':'BLOCKED','reason':'existing_control_plane_unhealthy_or_unowned',
+                'mutated':False,'existing_status':before_status}
+    before = remote('snapshot')
+    if (before.get('authority') != 'kamal' or not before.get('identity')
+            or before.get('tunnel_count') != 1):
+        return {'operation':'memoryd','status':'BLOCKED','reason':'existing_control_plane_identity_unverified',
+                'mutated':False}
+    preflight = remote('memoryd-preflight')
+    existing_memoryd=False
+    app_registered=False
+    if preflight.get('ready') is not True:
+        if (preflight.get('target_container_count')==0
+                and preflight.get('target_volume_exists') is False
+                and not preflight.get('target_listeners')):
+            return {'operation':'memoryd','status':'BLOCKED','reason':preflight.get('reason','memoryd_preflight_failed'),
+                    'preflight':preflight,'mutated':False}
+        expected_existing_blockers={'memoryd_container_state_already_exists',
+                                    'memoryd_volume_already_exists',
+                                    'memoryd_listener_port_already_in_use'}
+        memoryd_state=remote('memoryd-status')
+        adapter_sha=_sha256_file(ROOT/'scripts/codex_memoryd_mcp.py')
+        if (set(preflight.get('blockers',[]))-expected_existing_blockers
+                or preflight.get('existing_services_healthy') is not True
+                or preflight.get('tunnel_count')!=1
+                or preflight.get('target_container_count')!=2
+                or preflight.get('target_volume_exists') is not True
+                or set(preflight.get('target_listeners',[]))!={'127.0.0.1:8787',f"{INSTANCE['vm']['network']['gateway']}:8090"}
+                or memoryd_state.get('status')!='HEALTHY'
+                or type(memoryd_state.get('app_registered')) is not bool
+                or memoryd_state.get('adapter_sha256')!=adapter_sha):
+            return {'operation':'memoryd','status':'BLOCKED','reason':preflight.get('reason','memoryd_preflight_failed'),
+                    'preflight':preflight,'memoryd_status':memoryd_state,'mutated':False}
+        existing_memoryd=True
+        app_registered=memoryd_state['app_registered']
+    current = remote('current')
+    if (not current or current.get('authority') != 'kamal'
+            or current.get('identity') != before['identity']
+            or current.get('manifest') is None):
+        return {'operation':'memoryd','status':'BLOCKED','reason':'deployment_receipt_changed',
+                'preflight':preflight,'mutated':False}
+    profile_value = profile()
+    remote('profile')
+    remote('network-check',profile_value['network'])
+    if app_registered and remote('memoryd-registration-check').get('registration_verified') is not True:
+        raise ValueError('Existing MemoryD app registration could not be verified')
+    adapter_path=ROOT/'scripts/codex_memoryd_mcp.py'
+    adapter_stat=adapter_path.lstat()
+    if adapter_path.is_symlink() or not adapter_path.is_file() or adapter_stat.st_uid!=os.getuid():
+        raise ValueError('MemoryD adapter source is not an owned regular file')
+    adapter_sha=_sha256_file(adapter_path)
+    if not existing_memoryd:
+        adapter_data={'adapter_sha256':adapter_sha,'size_bytes':adapter_stat.st_size,
+                      'controller_sha':source_sha}
+        staged=remote('memoryd-adapter-prepare',adapter_data)
+        adapter_directory=profile_value['state_dir']+'/memoryd-adapter/'+adapter_sha
+        if staged.get('directory')!=adapter_directory or staged.get('adapter_sha256')!=adapter_sha:
+            raise ValueError('VM returned an unexpected MemoryD adapter staging path')
+        if staged.get('needs_upload') is True:
+            source_args=['scp','-p','-F',str(SSH),'-o','BatchMode=yes',
+                         '-o','StrictHostKeyChecking=yes','-o','ForwardAgent=no',
+                         str(adapter_path),f'{HOST}:{adapter_directory}/codex_memoryd_mcp.py']
+            result=subprocess.run(source_args,capture_output=True,text=True,timeout=120)
+            if result.returncode:
+                raise RuntimeError('Pinned SSH MemoryD adapter staging failed; source output withheld') from None
+        remote('memoryd-adapter-finalize',adapter_data)
+    config = configuration(directory,current['manifest'])
+    phase = 'memoryd-boot'
+    executor_reconfigured=False
+    executor_origin_updated=False
+    try:
+        if not existing_memoryd:
+            kamal(config,'boot','memoryd')
+            phase = 'memoryd-mcp-boot'
+            kamal(config,'boot','memoryd-mcp')
+            phase = 'health'
+            remote('memoryd-wait')
+        origin=remote('memoryd-executor-origin-check')
+        if origin.get('memoryd_origin_allowed') is not True:
+            phase = 'executor-origin-update'
+            executor_reconfigured=True
+            kamal(config,'reboot','executor')
+            remote('wait',{'owner':'kamal','service':'executor'})
+            remote('identity-check')
+            executor_origin_updated=True
+        phase = 'existing-executor-smoke'
+        smoke_result=smoke(None)
+        after_status = remote('status')
+        after = remote('snapshot')
+        health = remote('memoryd-health')
+        pin = remote('memoryd-pin-adapter-image')
+        if (after_status.get('authority') != 'kamal' or after_status.get('healthy') is not True
+                or after_status.get('tunnel_count') != 1
+                or after.get('identity') != before['identity']
+                or after.get('inventory') != before.get('inventory')
+                or smoke_result.get('catalog')!='PASS'
+                or smoke_result.get('devsy_reads')!='PASS'
+                or (app_registered and smoke_result.get('memoryd_discovery')!='PASS')
+                or health.get('status') != 'PASS'
+                or pin.get('adapter_image_pinned') is not True
+                or health.get('adapter_sha256') != adapter_sha):
+            raise RuntimeError('post-deploy acceptance mismatch')
+        return {'operation':'memoryd','status':'PASS','services':health,
+                'executor_app_registered':app_registered,'executor_origin_updated':executor_origin_updated,
+                'memoryd_already_running':existing_memoryd,
+                'existing_identity_preserved':True,
+                'existing_inventory_preserved':True,'tunnel_count':after_status['tunnel_count'],
+                'controller_sha':source_sha,'adapter_sha256':adapter_sha,'preflight':preflight}
+    except Exception:
+        if executor_reconfigured:
+            try:
+                rollback_config=configuration(directory,current['manifest'],allow_memoryd_mcp=False)
+                kamal(rollback_config,'reboot','executor')
+                remote('wait',{'owner':'kamal','service':'executor'})
+                remote('identity-check')
+                rollback_smoke=smoke(None)
+                if rollback_smoke.get('catalog')!='PASS' or rollback_smoke.get('devsy_reads')!='PASS':
+                    raise RuntimeError('Executor rollback health failed')
+            except Exception:
+                raise RuntimeError('MemoryD deployment failed during '+phase+'; Executor allowlist rollback failed; inspect pinned service state') from None
+            raise RuntimeError('MemoryD deployment failed during '+phase+'; Executor allowlist restored, MemoryD remains private and unregistered') from None
+        raise RuntimeError('MemoryD deployment failed during '+phase+'; existing control plane was not restarted. Inspect the additive accessories before retrying.') from None
+
+
+def transfer_memoryd(directory):
+    """Transfer the prepared portable bundle set over the pinned SSH path."""
+    before_status=remote('status')
+    if (before_status.get('authority')!='kamal' or before_status.get('healthy') is not True
+            or before_status.get('tunnel_count')!=1):
+        return {'operation':'memoryd-transfer','status':'BLOCKED',
+                'reason':'existing_control_plane_unhealthy_or_unowned','mutated':False}
+    before=remote('snapshot')
+    if before.get('identity') is None or before.get('tunnel_count')!=1:
+        return {'operation':'memoryd-transfer','status':'BLOCKED',
+                'reason':'existing_control_plane_identity_unverified','mutated':False}
+    before_base=remote('memoryd-base-identity').get('identity')
+    if not before_base:
+        raise ValueError('Existing control-plane base identity is unavailable')
+    memoryd=remote('memoryd-status')
+    if memoryd.get('status')!='HEALTHY':
+        return {'operation':'memoryd-transfer','status':'BLOCKED',
+                'reason':'memoryd_accessories_not_healthy','memoryd_status':memoryd,'mutated':False}
+    gate=remote('memoryd-transfer-preflight')
+    if gate.get('ready') is not True:
+        return {'operation':'memoryd-transfer','status':'BLOCKED',
+                'reason':gate.get('reason','memoryd_transfer_preflight_failed'),
+                'preflight':gate,'mutated':False}
+    transfer=memoryd_transfer_payload()
+    prepared=remote('memoryd-transfer-prepare',transfer['remote_manifest'])
+    expected_dir=profile()['state_dir']+'/memoryd-transfer/'+transfer['manifest_sha256'][:16]
+    if prepared.get('directory')!=expected_dir:
+        raise ValueError('VM returned an unexpected private bundle directory')
+    missing=set(prepared.get('missing_bundles',[]))
+    bundle_names={path.name for path in transfer['bundle_paths']}
+    if not missing.issubset(bundle_names):
+        raise ValueError('VM requested an unknown bundle filename')
+    phase='bundle-upload'
+    try:
+      for path in transfer['bundle_paths']:
+        if path.name not in missing:
+            continue
+        remote_path=expected_dir+'/'+path.name
+        args=['scp','-p','-F',str(SSH),'-o','BatchMode=yes',
+              '-o','StrictHostKeyChecking=yes','-o','ForwardAgent=no',
+              str(path),f'{HOST}:{remote_path}']
+        result=subprocess.run(args,capture_output=True,text=True,timeout=300)
+        if result.returncode:
+            raise RuntimeError('Pinned SSH bundle transfer failed; no bundle contents were printed') from None
+      phase='bundle-import'
+      receipt=remote('memoryd-import-bundles',{
+          'transfer_manifest_sha256':transfer['manifest_sha256'],
+      })
+      phase='private-network'
+      network=remote('memoryd-network-allow',{
+          'transfer_manifest_sha256':transfer['manifest_sha256'],
+      })
+      phase='executor-registration'
+      registration=remote('memoryd-app-register',{
+          'transfer_manifest_sha256':transfer['manifest_sha256'],
+      })
+      phase='identity-reconciliation'
+      identity_receipt=remote('memoryd-identity-reconcile',{
+          'transfer_manifest_sha256':transfer['manifest_sha256'],
+      })
+      phase='executor-discovery'
+      smoke_result=smoke(None)
+      after_status=remote('status')
+      after=remote('snapshot')
+      after_base=remote('memoryd-base-identity').get('identity')
+      current=remote('current')
+      health=remote('memoryd-health')
+      if (after_status.get('authority')!='kamal' or after_status.get('healthy') is not True
+              or after_status.get('tunnel_count')!=1
+              or after_base!=before_base or current.get('identity')!=after.get('identity')
+              or after.get('inventory')!=before.get('inventory')
+              or health.get('status')!='PASS'
+              or receipt.get('status')!='complete'
+              or registration.get('registered') is not True
+              or smoke_result.get('memoryd_discovery')!='PASS'):
+          raise RuntimeError('post-transfer acceptance mismatch')
+      return {'operation':'memoryd-transfer','status':'PASS',
+              'source_db_sha256':transfer['manifest']['source_database_sha256'],
+              'source_instance_id':transfer['manifest']['source_instance_id'],
+              'transfer_manifest_sha256':transfer['manifest_sha256'],
+              'bundle_receipt':receipt,'private_network':network,'registration':registration,
+              'identity_receipt':identity_receipt,'services':health,
+              'executor_discovery':'PASS','existing_identity_preserved':True,
+              'existing_inventory_preserved':True,'tunnel_count':after_status['tunnel_count'],
+              'preflight':gate}
+    except Exception as error:
+      detail=str(error)
+      safe_markers=('MemoryD CLI ','MemoryD import step ')
+      safe_marker=next((marker for marker in safe_markers if marker in detail),None)
+      if safe_marker:
+          detail=detail[detail.index(safe_marker):].split(';',1)[0]
+      else:
+          detail='remote stage refused'
+      raise RuntimeError('MemoryD transfer failed during '+phase+' ('+detail+'); verify the persistent transfer receipt before retrying. Existing control-plane services were not restarted.') from None
+
+
+def finish_memoryd(operation):
+    before_status=remote('status')
+    before=remote('snapshot')
+    if (before_status.get('authority')!='kamal' or before_status.get('healthy') is not True
+            or before_status.get('tunnel_count')!=1 or not before.get('identity')):
+        raise ValueError('Existing control-plane health or identity is not acceptable')
+    before_base=remote('memoryd-base-identity').get('identity')
+    if not before_base:
+        raise ValueError('Existing control-plane base identity is unavailable')
+    transfer=memoryd_transfer_payload()
+    request={'transfer_manifest_sha256':transfer['manifest_sha256']}
+    action='memoryd-network-allow' if operation=='memoryd-network' else 'memoryd-app-register'
+    result=remote(action,request)
+    identity_receipt=remote('memoryd-identity-reconcile',request) if operation=='memoryd-register' else None
+    discovery=smoke(None) if operation=='memoryd-register' else None
+    after_status=remote('status')
+    after=remote('snapshot')
+    after_base=remote('memoryd-base-identity').get('identity')
+    current=remote('current') if operation=='memoryd-register' else None
+    health=remote('memoryd-health')
+    if (after_status.get('authority')!='kamal' or after_status.get('healthy') is not True
+            or after_status.get('tunnel_count')!=1 or after_base!=before_base
+            or after.get('inventory')!=before.get('inventory') or health.get('status')!='PASS'
+            or (operation=='memoryd-register' and (result.get('registered') is not True
+                or current.get('identity')!=after.get('identity')
+                or discovery.get('memoryd_discovery')!='PASS'))):
+        raise RuntimeError('MemoryD post-operation acceptance mismatch')
+    return {'operation':operation,'status':'PASS','result':result,'identity_receipt':identity_receipt,
+            'existing_identity_preserved':True,'existing_inventory_preserved':True,
+            'tunnel_count':after_status['tunnel_count'],'services':health}
+
+
+def _pin_memoryd_before_core_change():
+    inventory=remote('memoryd-inventory')
+    if inventory.get('status') in ('ABSENT','VOLUME_ONLY'):
+        return
+    if inventory.get('status') in ('UNVERIFIED','STOPPED') and remote('memoryd-adapter-pin-check').get('pinned') is True:
+        return
+    if inventory.get('status')!='UNVERIFIED' or remote('memoryd-status').get('status')!='HEALTHY':
+        raise ValueError('Start and verify MemoryD before changing the core deployment')
+    if remote('memoryd-pin-adapter-image').get('adapter_image_pinned') is not True:
+        raise ValueError('MemoryD adapter image could not be pinned before the core deployment')
+
+
 def execute(args):
+    if (getattr(args,'confirm_import_quiescent',False)
+            and args.operation!='memoryd-registration-reconcile'):
+        raise ValueError('Import quiescence confirmation is only valid for MemoryD registration reconciliation')
+    if (args.operation=='memoryd-registration-reconcile'
+            and getattr(args,'confirm_import_quiescent',False) is not True):
+        raise ValueError('Explicit confirmation that the MemoryD import is quiescent is required')
     host_tap_operations = (
         'devsy-tap-reconcile-check', 'devsy-tap-reconcile',
         'devsy-tap-rollback-check', 'devsy-tap-rollback',
@@ -775,6 +1290,22 @@ def execute(args):
             result['devsy_plan']=remote('devsy-plan',devsy_payload())
             result['smoke']=smoke(native_tuple) if result['healthy'] else {'status':'BLOCKED: managed service unhealthy'}
             return result
+        if args.operation=='memoryd':
+            if not (args.local and LOCAL_CONFIGURED):
+                raise ValueError('MemoryD accessory deployment requires the private pinned local Kamal profile')
+            return deploy_memoryd(sha,directory)
+        if args.operation=='memoryd-transfer':
+            if not (args.local and LOCAL_CONFIGURED):
+                raise ValueError('MemoryD bundle transfer requires the private pinned local Kamal profile')
+            return transfer_memoryd(directory)
+        if args.operation in ('memoryd-network','memoryd-register'):
+            if not (args.local and LOCAL_CONFIGURED):
+                raise ValueError('MemoryD integration requires the private pinned local Kamal profile')
+            return finish_memoryd(args.operation)
+        if args.operation=='memoryd-registration-reconcile':
+            if not (args.local and LOCAL_CONFIGURED):
+                raise ValueError('MemoryD reconciliation requires the private pinned local Kamal profile')
+            return remote('memoryd-registration-reconcile',{'confirm_import_quiescent':True})
         if args.operation=='devsy-check':
             return {'operation':'devsy-check','plan':remote('devsy-plan',devsy_payload()),'mutated':False}
         if args.operation=='devsy-tap-reconcile-check':
@@ -811,6 +1342,7 @@ def execute(args):
         if args.operation=='rollback':
             current=remote('current');previous=remote('rollback-target')
             if current is None:raise ValueError('No recorded deployment generation exists')
+            _pin_memoryd_before_core_change()
             remote('profile')
             previous['publication_proof']=prove_images(previous['manifest'],previous)
             remote('images',previous['manifest'])
@@ -844,6 +1376,7 @@ def execute(args):
         if args.operation=='deploy' and before['authority']!='kamal':raise ValueError('Use explicit adoption first')
         remote('devsy-check',devsy_payload())
         smoke(native_tuple, require_native=True)
+        _pin_memoryd_before_core_change()
         remote('images',manifest)
         if needs_baseline:remote('baseline',current)
         backup=remote('backup-cas' if args.operation=='cas' else 'backup')
@@ -885,7 +1418,8 @@ def execute(args):
 
 
 def main():
-    p=argparse.ArgumentParser();p.add_argument('operation',choices=('devsy-bridge-path-check','devsy-bridge-path-apply','devsy-scope-rebind-check','devsy-scope-rebind','preflight','status','adopt','cas','deploy','rollback','devsy-check','devsy-apply','devsy-rollback','devsy-tap-reconcile-check','devsy-tap-reconcile','devsy-tap-rollback-check','devsy-tap-rollback'));p.add_argument('--cas-digest',default='');p.add_argument('--cas-revision',default='');p.add_argument('--approve-bridge-kubectl-path',action='store_true');p.add_argument('--approve-scope-binding-rebind',action='store_true');p.add_argument('--approve-full-stack',action='store_true');p.add_argument('--approve-host-devsy-apply',action='store_true');p.add_argument('--approve-host-devsy-rollback',action='store_true');p.add_argument('--approve-host-tap-reconciliation',action='store_true');p.add_argument('--approve-host-tap-rollback',action='store_true');p.add_argument('--tap-reconciliation-run-id',default=os.environ.get('TAP_RECONCILIATION_RUN_ID'));p.add_argument('--tap-reconciliation-run-attempt',default=os.environ.get('TAP_RECONCILIATION_RUN_ATTEMPT'));p.add_argument('--instance-profile',help='Absolute path to an owned mode-0600 private instance profile');p.add_argument('--native-target',default=os.environ.get('NATIVE_TARGET'));p.add_argument('--native-cwd',default=os.environ.get('NATIVE_CWD'));p.add_argument('--native-thread-id',default=os.environ.get('NATIVE_THREAD_ID'));p.add_argument('--local',action='store_true',help='Approved Pi break-glass, or bin/kamal with explicit private local config')
+    p=argparse.ArgumentParser();p.add_argument('operation',choices=('devsy-bridge-path-check','devsy-bridge-path-apply','devsy-scope-rebind-check','devsy-scope-rebind','preflight','status','memoryd','memoryd-transfer','memoryd-network','memoryd-register','memoryd-registration-reconcile','adopt','cas','deploy','rollback','devsy-check','devsy-apply','devsy-rollback','devsy-tap-reconcile-check','devsy-tap-reconcile','devsy-tap-rollback-check','devsy-tap-rollback'));p.add_argument('--cas-digest',default='');p.add_argument('--cas-revision',default='');p.add_argument('--approve-bridge-kubectl-path',action='store_true');p.add_argument('--approve-scope-binding-rebind',action='store_true');p.add_argument('--approve-full-stack',action='store_true');p.add_argument('--approve-host-devsy-apply',action='store_true');p.add_argument('--approve-host-devsy-rollback',action='store_true');p.add_argument('--approve-host-tap-reconciliation',action='store_true');p.add_argument('--approve-host-tap-rollback',action='store_true');p.add_argument('--tap-reconciliation-run-id',default=os.environ.get('TAP_RECONCILIATION_RUN_ID'));p.add_argument('--tap-reconciliation-run-attempt',default=os.environ.get('TAP_RECONCILIATION_RUN_ATTEMPT'));p.add_argument('--instance-profile',help='Absolute path to an owned mode-0600 private instance profile');p.add_argument('--native-target',default=os.environ.get('NATIVE_TARGET'));p.add_argument('--native-cwd',default=os.environ.get('NATIVE_CWD'));p.add_argument('--native-thread-id',default=os.environ.get('NATIVE_THREAD_ID'));p.add_argument('--local',action='store_true',help='Approved Pi break-glass, or bin/kamal with explicit private local config')
+    p.add_argument('--confirm-import-quiescent',action='store_true')
     args=p.parse_args()
     try:print(json.dumps(execute(args),indent=2))
     except Exception as e:print(str(e),file=sys.stderr);sys.exit(1)

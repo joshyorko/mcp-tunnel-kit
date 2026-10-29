@@ -1,4 +1,5 @@
 import json
+import hashlib
 import subprocess
 import sys
 from pathlib import Path
@@ -75,12 +76,16 @@ def test_accessory_model_keeps_private_control_plane_topology_and_order():
         "username": "unused",
         "password": "unused",
     }
-    assert list(config["accessories"]) == ["executor", "schema-proxy", "cas", "tunnel"]
+    assert list(config["accessories"]) == [
+        "executor", "schema-proxy", "cas", "tunnel", "memoryd", "memoryd-mcp"
+    ]
     assert [item["service"] for item in config["accessories"].values()] == [
         "mcp-control-plane-executor",
         "mcp-control-plane-schema-proxy",
         "mcp-control-plane-cas",
         "mcp-control-plane-tunnel",
+        "mcp-control-plane-memoryd",
+        "mcp-control-plane-memoryd-mcp",
     ]
     assert all(
         item["host"] == "kamal-test-deploy" for item in config["accessories"].values()
@@ -90,7 +95,58 @@ def test_accessory_model_keeps_private_control_plane_topology_and_order():
         "mcp-control-plane",
         "host",
         "mcp-control-plane",
+        "host",
+        "host",
     ]
+
+
+def test_memoryd_accessories_are_pinned_private_and_resource_limited():
+    accessories = rendered()["accessories"]
+    memoryd = accessories["memoryd"]
+    bridge = accessories["memoryd-mcp"]
+
+    assert memoryd["image"] == (
+        "ghcr.io/joshyorko/codex-memoryd@sha256:"
+        "70465d5250f693d15408fe904d30e3035360d8a46ac6f1caea8c3660eac09996"
+    )
+    assert memoryd["network"] == "host"
+    assert memoryd["options"]["read-only"] is True
+    assert memoryd["options"]["tmpfs"] == "/tmp:rw,nosuid,nodev,size=32m,mode=1777"
+    assert memoryd["options"]["memory"] == "256m"
+    assert memoryd["options"]["cpus"] == "0.5"
+    assert memoryd["env"]["clear"]["CODEX_MEMORYD_BIND"] == "127.0.0.1:8787"
+    assert memoryd["volumes"] == ["codex-memoryd-data:/data"]
+    assert "port" not in memoryd and "ports" not in memoryd
+
+    assert bridge["image"].endswith("sha256:" + "a" * 64)
+    assert bridge["network"] == "host"
+    assert bridge["options"]["read-only"] is True
+    assert bridge["options"]["tmpfs"] == "/tmp:rw,nosuid,nodev,size=32m,mode=1777"
+    assert bridge["options"]["memory"] == "128m"
+    assert bridge["options"]["cpus"] == "0.25"
+    assert bridge["env"]["clear"]["CODEX_MEMORYD_URL"] == "http://127.0.0.1:8787"
+    assert bridge["env"]["clear"]["CODEX_MEMORYD_MCP_BIND"] == "172.30.86.1:8090"
+    bridge_sha = hashlib.sha256((ROOT / "scripts/codex_memoryd_mcp.py").read_bytes()).hexdigest()
+    assert bridge["volumes"] == [
+        f"/home/kdlocpanda/.local/share/codex-control-plane/memoryd-adapter/{bridge_sha}/codex_memoryd_mcp.py:"
+        "/opt/tunnel-kit/codex_memoryd_mcp.py:ro"
+    ]
+    assert "port" not in bridge and "ports" not in bridge
+
+
+def test_executor_origin_allowlist_adds_memoryd_only_for_opt_in_and_can_restore_prior_policy():
+    config = rendered()
+    executor = config["accessories"]["executor"]
+    origins = json.loads(executor["env"]["clear"]["EXECUTOR_URL_ALLOW_HTTP_ORIGINS"])
+    assert origins == [
+        "http://172.30.86.1:8088",
+        "http://172.30.86.1:8089",
+        "http://172.30.86.1:8090",
+    ]
+
+    rollback = json.loads(kamal_model.render(profile(), manifest(), allow_memoryd_mcp=False))
+    restored = json.loads(rollback["accessories"]["executor"]["env"]["clear"]["EXECUTOR_URL_ALLOW_HTTP_ORIGINS"])
+    assert restored == ["http://172.30.86.1:8088", "http://172.30.86.1:8089"]
 
 
 def test_runner_ssh_uses_selected_key_without_agent_or_default_config():

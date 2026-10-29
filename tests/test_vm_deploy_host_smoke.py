@@ -7,6 +7,8 @@ import re
 import sys
 from types import SimpleNamespace
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 import vm_deploy_host as host
@@ -98,6 +100,138 @@ def configured_host(tmp_path, monkeypatch, *, session):
     monkeypatch.setitem(sys.modules, "compose_control", fake)
     monkeypatch.setattr(host, "private", lambda _path: b'{"profile":"fixture"}')
     return fake
+
+
+def recovery_smoke_host(tmp_path, monkeypatch, *, status="activating", rows=(), volumes=()):
+    real_private = host.private
+    fake = configured_host(tmp_path, monkeypatch, session=FakeSession())
+    monkeypatch.setattr(host, "private", real_private)
+    bootstrap = host.STATE / "bootstrap"
+    bootstrap.mkdir(mode=0o700, parents=True)
+    for name, value in (("devsy-integration.json", {"profile": "fixture"}),
+                        ("memoryd-integration.json", {"id": "memoryd"})):
+        path = bootstrap / name
+        path.write_text(json.dumps(value))
+        path.chmod(0o600)
+    host.STORE.mkdir(mode=0o700)
+    marker = host.STORE / "activation-in-progress.json"
+    marker.write_text(json.dumps({
+        "schema_version": 1, "activation_id": "c" * 32, "status": status,
+        "original_stopped_attested": True, "started_services": ["executor"],
+        "source_sha": "a" * 40, "expected_identity": "fixture-preserved-identity",
+    }))
+    marker.chmod(0o600)
+
+    def run(command, *_args, **_kwargs):
+        if command == ["docker", "ps", "-aq"]:
+            return b"fixture-container\n" if rows else b""
+        if command[:2] == ["docker", "inspect"]:
+            return json.dumps(rows).encode()
+        if command[:3] == ["docker", "volume", "ls"]:
+            return ("\n".join(volumes)).encode()
+        raise AssertionError(command)
+
+    def missing_memoryd(_session):
+        raise ValueError("MemoryD discovery failed")
+
+    monkeypatch.setattr(host, "run", run)
+    fake.search_memoryd = missing_memoryd
+    return fake
+
+
+def test_active_recovery_reports_missing_memoryd_without_skipping_core_checks(tmp_path, monkeypatch):
+    fake = recovery_smoke_host(tmp_path, monkeypatch)
+    checks = []
+    fake.verify_compact = lambda _session: checks.append("executor")
+    fake.read_devsy = lambda _session, _profile: checks.append("devsy")
+
+    result = host.smoke({"activation_id": "c" * 32})
+
+    assert checks == ["executor", "devsy"]
+    assert result["memoryd_discovery"] == "UNAVAILABLE"
+    assert result["memoryd_restored"] is False
+    marker = json.loads((host.STORE / "activation-in-progress.json").read_text())
+    assert marker["memoryd_discovery"] == "UNAVAILABLE"
+    assert marker["memoryd_restored"] is False
+
+
+def test_normal_smoke_fails_closed_when_registered_memoryd_is_missing(tmp_path, monkeypatch):
+    recovery_smoke_host(tmp_path, monkeypatch)
+    with pytest.raises(ValueError, match="MemoryD discovery failed"):
+        host.smoke()
+
+
+@pytest.mark.parametrize("activation_id,status", [
+    ("d" * 32, "activating"), ("c" * 32, "installing"), ("c" * 32, "activated"),
+])
+def test_recovery_smoke_rejects_wrong_or_inactive_activation(tmp_path, monkeypatch, activation_id, status):
+    fake = recovery_smoke_host(tmp_path, monkeypatch, status=status)
+    calls = []
+    fake.search_memoryd = lambda _session: calls.append("discovery")
+    with pytest.raises(ValueError):
+        host.smoke({"activation_id": activation_id})
+    assert not calls
+
+
+def test_recovery_smoke_requires_original_stopped_attestation(tmp_path, monkeypatch):
+    fake = recovery_smoke_host(tmp_path, monkeypatch)
+    fake.search_memoryd = lambda _session: None
+    marker_path = host.STORE / "activation-in-progress.json"
+    marker = json.loads(marker_path.read_text())
+    marker["original_stopped_attested"] = False
+    marker_path.write_text(json.dumps(marker))
+    with pytest.raises(ValueError, match="authorized activation"):
+        host.smoke({"activation_id": "c" * 32})
+
+
+def test_recovery_smoke_fails_closed_when_memoryd_inventory_cannot_be_read(tmp_path, monkeypatch):
+    recovery_smoke_host(tmp_path, monkeypatch)
+    monkeypatch.setattr(host, "run", lambda _command: (_ for _ in ()).throw(RuntimeError("inventory failed")))
+    with pytest.raises(RuntimeError, match="inventory failed"):
+        host.smoke({"activation_id": "c" * 32})
+
+
+def test_recovery_smoke_rejects_incomplete_docker_inspection(tmp_path, monkeypatch):
+    recovery_smoke_host(tmp_path, monkeypatch)
+    def run(command):
+        if command == ["docker", "ps", "-aq"]:
+            return b"fixture-container\n"
+        if command[:2] == ["docker", "inspect"]:
+            return b"[]"
+        raise AssertionError(command)
+    monkeypatch.setattr(host, "run", run)
+    with pytest.raises(ValueError, match="inventory is invalid"):
+        host.smoke({"activation_id": "c" * 32})
+
+
+@pytest.mark.parametrize("rows,volumes", [
+    ([{"Name": "/mcp-control-plane-memoryd", "Config": {"Labels": {}}}], []),
+    ([{"Name": "/unrelated-name", "Config": {"Labels": {"service": "mcp-control-plane-memoryd-mcp"}}}], []),
+    ([{"Name": "/codex-control-plane-memoryd-1", "Config": {"Labels": {
+        "com.docker.compose.project": "codex-control-plane", "com.docker.compose.service": "memoryd"}}}], []),
+    ([], ["codex-memoryd-data"]),
+])
+def test_recovery_smoke_does_not_skip_discovery_when_any_memoryd_state_exists(
+        tmp_path, monkeypatch, rows, volumes):
+    recovery_smoke_host(tmp_path, monkeypatch, rows=rows, volumes=volumes)
+    with pytest.raises(ValueError, match="MemoryD discovery failed"):
+        host.smoke({"activation_id": "c" * 32})
+
+
+def test_recovery_smoke_reports_successful_discovery_without_claiming_restoration(tmp_path, monkeypatch):
+    fake = recovery_smoke_host(tmp_path, monkeypatch, volumes=["codex-memoryd-data"])
+    fake.search_memoryd = lambda _session: None
+    result = host.smoke({"activation_id": "c" * 32})
+    assert result["memoryd_discovery"] == "PASS"
+    assert result["memoryd_restored"] is False
+
+
+def test_recovery_smoke_reports_unregistered_memoryd_as_not_restored(tmp_path, monkeypatch):
+    recovery_smoke_host(tmp_path, monkeypatch)
+    (host.STATE / "bootstrap/memoryd-integration.json").unlink()
+    result = host.smoke({"activation_id": "c" * 32})
+    assert result["memoryd_discovery"] == "UNREGISTERED"
+    assert result["memoryd_restored"] is False
 
 
 def test_smoke_reads_explicit_dakota_tuple_and_not_vm_checkout(tmp_path, monkeypatch):

@@ -63,6 +63,8 @@ The output contains private plaintext. Keep it under the mode-`0700` recovery di
 
 The VM archives include encrypted Executor data, tunnel and service secrets, bootstrap state, Devsy configuration and context, kubeconfig, CAS target configuration, deployment ledgers, database snapshots, and the captured runtime Git bundle. The map at `vm-snapshot/cas-databases/manifest.json` identifies each SQLite snapshot's source path. The tailnet requirements file is not a full policy export. It records only the additive network grant needed by this endpoint. The collector never applies a tailnet change. Do not edit the capture manifest. Do not unpack the inner VM archives into live paths.
 
+When MemoryD is registered, the capture includes its Executor app and integration marker, but not the `codex-memoryd-data` volume or the staged MemoryD adapter. Keep a separate verified MemoryD backup. The portable transfer described in [MemoryD](CODEX_MEMORYD.md) covers active records only, not archived records.
+
 ## Configure private MinIO storage and age identities
 
 Use two age identities. Identity A decrypts one bundle. Identity B decrypts the wrapped copy of identity A on the removable drive. Store identity B as a private MinIO object, separate from that drive. Keep MinIO account access available through a separate recovery channel.
@@ -336,5 +338,9 @@ python3 scripts/activate_recovery.py \
 ```
 
 The command rejects a partial approval pair before connecting. It requires the replacement VM's runtime repository to be clean at the captured `source_sha` and the VM operator account to use UID/GID `1000:1000`. The Kamal Executor image runs as that account. Activation seeds the volume with archive-preserved ownership and does not change ownership. It refuses existing Executor volumes or controller containers, non-empty state paths, and a changed Executor identity. It checks image provenance and prepared-manifest digests remotely. It starts non-tunnel services first, checks health and identity, then starts the tunnel. It preserves recovered files and the named volume if activation fails. It never falls back to Compose. Stop the existing tunnel and all writers before activation.
+
+If the captured MemoryD registration exists but both MemoryD accessories and their volume are absent, the authorized activation reports `ACTIVATED_DEGRADED`, `memoryd_discovery: UNAVAILABLE`, and `memoryd_restored: false`. The private VM receipt at `deployment/recovery-activation.json` under the instance state directory records the MemoryD result. Executor identity and single-tunnel checks still apply. Outside active recovery, a registered but unavailable MemoryD still fails the normal smoke check.
+
+Recover MemoryD separately from a verified backup or suitable portable bundles, following [MemoryD](CODEX_MEMORYD.md). Inspect the retained registration and transfer receipts before choosing a recovery procedure; this activation does not reconcile them or provide an automatic MemoryD restore. Do not delete those records to bypass the checks. Verify the restored data and Executor discovery separately before treating MemoryD as available.
 
 A real encrypted bundle has been read back from private MinIO and removable media. The storage check recovered the wrapped identity and compared the restored files. This proves that bundle's encrypted readback and staging path. It does not prove a production VM was activated.

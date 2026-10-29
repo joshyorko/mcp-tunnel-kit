@@ -1,9 +1,10 @@
 """Render the checked-in, accessory-only Kamal 2.12 deployment model."""
 
 import json
+import hashlib
 import re
 import sys
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 
 _REPOSITORIES = {
     "cas": "ghcr.io/joshyorko/codex-action-server",
@@ -11,6 +12,15 @@ _REPOSITORIES = {
     "schema_proxy": "ghcr.io/joshyorko/codex-action-server",
     "tunnel": "ghcr.io/openai/tunnel-client:v0.0.15",
 }
+_CODEX_MEMORYD_IMAGE = (
+    "ghcr.io/joshyorko/codex-memoryd@sha256:"
+    "70465d5250f693d15408fe904d30e3035360d8a46ac6f1caea8c3660eac09996"
+)
+
+
+def _memoryd_adapter_digest():
+    source = Path(__file__).resolve().parent / "codex_memoryd_mcp.py"
+    return hashlib.sha256(source.read_bytes()).hexdigest()
 _PROFILE_KEYS = {
     "host",
     "network",
@@ -142,7 +152,7 @@ def _accessory(service, image, host, network, *, options=None, **values):
     return result
 
 
-def render(profile, manifest):
+def render(profile, manifest, *, allow_memoryd_mcp=True):
     """Return a Kamal config as JSON (valid YAML), with no secret contents."""
     profile = _validate_profile(profile)
     images = validate_manifest(manifest)
@@ -179,7 +189,8 @@ def render(profile, manifest):
                 "EXECUTOR_DATA_DIR": "/app/data",
                 "EXECUTOR_APPS_ALLOW_PRIVATE_FETCH": "true",
                 "EXECUTOR_URL_ALLOW_HTTP_ORIGINS": json.dumps(
-                    [f"http://{gateway}:8088", f"http://{gateway}:8089"],
+                    [f"http://{gateway}:8088", f"http://{gateway}:8089"]
+                    + ([f"http://{gateway}:8090"] if allow_memoryd_mcp else []),
                     separators=(",", ":"),
                 ),
             }
@@ -295,6 +306,74 @@ def render(profile, manifest):
         ],
     )
 
+    memoryd = _accessory(
+        "mcp-control-plane-memoryd",
+        _CODEX_MEMORYD_IMAGE,
+        host,
+        "host",
+        options={
+            "user": "10001:10001",
+            "read-only": True,
+            "tmpfs": "/tmp:rw,nosuid,nodev,size=32m,mode=1777",
+            "memory": "256m",
+            "cpus": "0.5",
+            "log-opt": "max-size=10m",
+            "health-cmd": "curl -fsS http://127.0.0.1:8787/healthz || exit 1",
+            "health-interval": "10s",
+            "health-timeout": "3s",
+            "health-start-period": "15s",
+            "health-retries": 6,
+        },
+        env={
+            "clear": {
+                "CODEX_MEMORYD_DB": "/data/memory.db",
+                "CODEX_MEMORYD_BIND": "127.0.0.1:8787",
+                "CODEX_MEMORYD_LOG": "info",
+            }
+        },
+        volumes=["codex-memoryd-data:/data"],
+    )
+
+    memoryd_adapter = _memoryd_adapter_digest()
+    memoryd_mcp = _accessory(
+        "mcp-control-plane-memoryd-mcp",
+        images["cas"],
+        host,
+        "host",
+        options={
+            "entrypoint": "python3",
+            "user": "1000:1000",
+            "read-only": True,
+            "cap-drop": ["ALL"],
+            "security-opt": "no-new-privileges:true",
+            "tmpfs": "/tmp:rw,nosuid,nodev,size=32m,mode=1777",
+            "memory": "128m",
+            "cpus": "0.25",
+            "log-opt": "max-size=10m",
+            "health-cmd": (
+                "python3 -c \"import urllib.request; opener=urllib.request.build_opener("
+                "urllib.request.ProxyHandler({})); opener.open('http://"
+                + gateway
+                + ":8090/healthz',timeout=2).read()\""
+            ),
+            "health-interval": "10s",
+            "health-timeout": "3s",
+            "health-start-period": "15s",
+            "health-retries": 6,
+        },
+        cmd="/opt/tunnel-kit/codex_memoryd_mcp.py",
+        env={
+            "clear": {
+                "CODEX_MEMORYD_URL": "http://127.0.0.1:8787",
+                "CODEX_MEMORYD_MCP_BIND": f"{gateway}:8090",
+            }
+        },
+        volumes=[
+            f"{state}/memoryd-adapter/{memoryd_adapter}/codex_memoryd_mcp.py:"
+            "/opt/tunnel-kit/codex_memoryd_mcp.py:ro"
+        ],
+    )
+
     config = {
         "service": "mcp-control-plane",
         "image": images["cas"],
@@ -323,6 +402,8 @@ def render(profile, manifest):
             "schema-proxy": schema_proxy,
             "cas": cas,
             "tunnel": tunnel,
+            "memoryd": memoryd,
+            "memoryd-mcp": memoryd_mcp,
         },
     }
     return json.dumps(config, indent=2) + "\n"

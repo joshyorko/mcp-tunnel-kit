@@ -7,6 +7,7 @@ import importlib.util
 import io
 import ipaddress
 import json
+import math
 import os
 from pathlib import Path
 from pathlib import PurePosixPath
@@ -30,6 +31,11 @@ NATIVE_SSH = None
 DEVSY = None
 NAMES = {'compose': {'executor':'codex-control-plane-executor-1','schema-proxy':'codex-control-plane-executor-schema-proxy-1','cas':'codex-control-plane-codex-action-server-1','tunnel':'codex-control-plane-tunnel-client-1'},
          'kamal': {name:'mcp-control-plane-'+name for name in ('executor','schema-proxy','cas','tunnel')}}
+MEMORYD_MIN_AVAILABLE_KB = 1_572_864
+MEMORYD_SERVICES = {'mcp-control-plane-memoryd', 'mcp-control-plane-memoryd-mcp'}
+MEMORYD_VOLUME = 'codex-memoryd-data'
+MEMORYD_IMAGE = ('ghcr.io/joshyorko/codex-memoryd@sha256:'
+                 '70465d5250f693d15408fe904d30e3035360d8a46ac6f1caea8c3660eac09996')
 
 
 def configure_profile(profile):
@@ -110,13 +116,25 @@ def private(path):
     return path.read_bytes()
 
 
+def file_sha256(path):
+    with path.open('rb') as stream:
+        return hashlib.file_digest(stream,'sha256').hexdigest()
+
+
 def write(path, value):
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     if path.parent.stat().st_mode & 0o077: raise ValueError('Deployment directory is not private')
-    temp = path.with_suffix('.new')
-    fd = os.open(temp, os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW, 0o600)
-    with os.fdopen(fd, 'w') as f: json.dump(value,f); f.write('\n'); f.flush(); os.fsync(f.fileno())
-    os.replace(temp,path)
+    fd,tempname=tempfile.mkstemp(prefix='.'+path.name+'.',dir=path.parent)
+    try:
+        os.fchmod(fd,0o600)
+        with os.fdopen(fd,'w') as f:
+            json.dump(value,f);f.write('\n');f.flush();os.fsync(f.fileno())
+        os.replace(tempname,path)
+        directory_fd=os.open(path.parent,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+        try:os.fsync(directory_fd)
+        finally:os.close(directory_fd)
+    finally:
+        if os.path.exists(tempname):os.unlink(tempname)
 
 
 def inspect():
@@ -140,12 +158,96 @@ def inspect():
     return owner,groups,matching
 
 
-def identity(executor):
+def _valid_memoryd_receipt(receipt):
+    return (isinstance(receipt,dict) and set(receipt)=={'organization','id','url'}
+            and all(isinstance(value,str) and value for value in receipt.values()))
+
+
+def _memoryd_require_recorded_base(base):
+    current=json.loads(private(STORE/'current.json'))
+    if current.get('authority')!='kamal' or current.get('identity')!=base:
+        raise ValueError('Executor identity drift prevents MemoryD registration')
+
+
+def _memoryd_base_apps(apps,org,marker,gateway):
+    matches=[app for app in apps if app.get('slug')=='memoryd' or app.get('name')=='MemoryD']
+    if matches or marker:
+        if (len(matches)!=1 or not marker or matches[0].get('slug')!='memoryd'
+                or matches[0].get('name')!='MemoryD' or matches[0].get('id')!=marker.get('id')
+                or marker.get('organization')!=org
+                or marker.get('url')!=f"http://{gateway}:8090/mcp"):
+            raise ValueError('MemoryD app identity does not match its private receipt')
+        return [app for app in apps if app.get('id')!=marker['id']]
+    return apps
+
+
+def _memoryd_pending_app(intent,org,apps,get):
+    """Validate an ambiguous import before treating it as our app."""
+    import compose_control as c
+    from urllib.parse import quote
+    url=f"http://{NETWORK['gateway']}:8090/mcp"
+    keys={'status','organization','url','transfer_manifest_sha256','transfer_receipt_sha256',
+          'source_sha256','base_identity'}
+    if (not isinstance(intent,dict) or set(intent)!=keys or intent['status'] not in ('prepared','importing')
+            or intent['organization']!=org or intent['url']!=url
+            or not isinstance(org,str) or not org
+            or any(not isinstance(intent[key],str) or not re.fullmatch(r'[a-f0-9]{64}',intent[key])
+                   for key in ('transfer_manifest_sha256','transfer_receipt_sha256','source_sha256','base_identity'))):
+        raise ValueError('MemoryD pending registration identity changed')
+    _memoryd_require_recorded_base(intent['base_identity'])
+    transfer_id=intent['transfer_manifest_sha256']
+    _require_completed_memoryd_transfer({'transfer_manifest_sha256':transfer_id})
+    if hashlib.sha256(private(_memoryd_receipt_path(transfer_id))).hexdigest()!=intent['transfer_receipt_sha256']:
+        raise ValueError('MemoryD pending registration transfer receipt changed')
+    source=c.devsy_app_source(url)
+    if hashlib.sha256(source.strip().encode()).hexdigest()!=intent['source_sha256']:
+        raise ValueError('MemoryD pending registration source changed')
+    matches=[app for app in apps if app.get('slug')=='memoryd' or app.get('name')=='MemoryD']
+    if not matches:
+        return None
+    if intent['status']=='prepared':
+        raise ValueError('MemoryD app appeared before the pending import was attempted')
+    if (len(matches)!=1 or matches[0].get('slug')!='memoryd' or matches[0].get('name')!='MemoryD'
+            or not isinstance(matches[0].get('id'),str) or not matches[0]['id']
+            or not matches[0].get('activeDeployment')
+            or sum(app.get('id')==matches[0]['id'] for app in apps)!=1):
+        raise ValueError('MemoryD pending registration app is ambiguous')
+    app=matches[0]
+    path='/api/organizations/'+quote(org,safe='')+'/apps/'+quote(app['id'],safe='')+'/source'
+    actual=get(path)
+    files=actual.get('files',[]) if isinstance(actual,dict) else []
+    if not isinstance(files,list) or sum(isinstance(file,dict) and file.get('path')=='index.ts' for file in files)!=1:
+        raise ValueError('MemoryD pending registration source is ambiguous')
+    c.verify_generated_source(actual,source,'MemoryD')
+    return {'organization':org,'id':app['id'],'url':url}
+
+
+def identity(executor, *, exclude_memoryd=False, require_memoryd_absent=False):
     from urllib.request import Request,urlopen
     pat = private(STATE/'secrets/executor-pat').decode().strip()
     def get(path):
         with urlopen(Request('http://127.0.0.1:4312'+path,headers={'Authorization':'Bearer '+pat}),timeout=15) as r: return json.load(r)
     context=get('/api/context');org=context['organization'];apps=get('/api/organizations/'+org+'/inventory')['apps']
+    if require_memoryd_absent and any(app.get('slug')=='memoryd' or app.get('name')=='MemoryD' for app in apps):
+        raise ValueError('MemoryD registration reconciliation requires no matching apps')
+    intent=None
+    has_intent=False
+    if exclude_memoryd:
+        marker_path=STATE/'bootstrap/memoryd-integration.json'
+        has_marker=marker_path.exists() or marker_path.is_symlink()
+        marker=json.loads(private(marker_path)) if has_marker else None
+        if has_marker and not _valid_memoryd_receipt(marker):
+            raise ValueError('MemoryD app receipt is invalid')
+        intent_path=STATE/'bootstrap/memoryd-registration-pending.json'
+        has_intent=intent_path.exists() or intent_path.is_symlink()
+        intent=json.loads(private(intent_path)) if has_intent else None
+        if has_intent:
+            pending_app=_memoryd_pending_app(intent,org,apps,get)
+            if marker is not None and marker!=pending_app:
+                raise ValueError('MemoryD pending registration differs from its private receipt')
+            if marker is None:
+                marker=pending_app
+        apps=_memoryd_base_apps(apps,org,marker,NETWORK['gateway'])
     proof={'organization':org,'apps':sorted((x['id'],x['slug']) for x in apps),'keys':{},'secrets':{}}
     for name in ('auth-secret.key','encryption.key','install-id'):
         raw=run(['docker','cp',executor+':/app/data/'+name,'-'])
@@ -153,7 +255,10 @@ def identity(executor):
         proof['keys'][name]=hashlib.sha256(data).hexdigest()
     for name in ('control-plane-api-key','control-plane-tunnel-id','executor-auth-header','executor-pat'):
         proof['secrets'][name]=hashlib.sha256(private(STATE/'secrets'/name)).hexdigest()
-    return hashlib.sha256(json.dumps(proof,sort_keys=True).encode()).hexdigest()
+    digest=hashlib.sha256(json.dumps(proof,sort_keys=True).encode()).hexdigest()
+    if has_intent and digest!=intent['base_identity']:
+        raise ValueError('Executor identity drift prevents MemoryD registration recovery')
+    return digest
 
 
 def snapshot():
@@ -171,6 +276,1047 @@ def status():
     if (STORE/'current.json').exists():owner=json.loads(private(STORE/'current.json'))['authority']
     inventory={key:{'name':r['Name'].lstrip('/'),'state':r['State']['Status'],'health':r['State'].get('Health',{}).get('Status'),'image':r['Image'],'restart':r['HostConfig']['RestartPolicy']['Name']} for key,r in groups[owner].items() if r}
     return {'authority':owner,'inventory':inventory,'tunnel_count':len(tunnels),'healthy':len(inventory)==4 and all(x['health']=='healthy' and x['state']=='running' for x in inventory.values())}
+
+
+def memoryd_resource_gate(raw_meminfo):
+    fields = {}
+    for line in raw_meminfo.splitlines():
+        name, separator, value = line.partition(':')
+        if separator:
+            match = re.fullmatch(r'\s*(\d+)\s+kB\s*', value)
+            if match:
+                fields[name] = int(match.group(1))
+    total = fields.get('MemTotal')
+    available = fields.get('MemAvailable')
+    if total is None or available is None:
+        raise ValueError('VM memory inventory is incomplete')
+    ready = available >= MEMORYD_MIN_AVAILABLE_KB
+    return {
+        'ready': ready,
+        'reason': 'ready' if ready else 'insufficient_available_memory',
+        'mem_total_kb': total,
+        'mem_available_kb': available,
+        'required_available_kb': MEMORYD_MIN_AVAILABLE_KB,
+        'swap_total_kb': fields.get('SwapTotal', 0),
+        'minimum_vm_ram_gib': None if ready else math.ceil(total / 1_048_576) + 1,
+    }
+
+
+def memoryd_listener_addresses(raw_ss):
+    addresses=set()
+    for line in raw_ss.splitlines():
+        columns=line.split()
+        if len(columns)>=5 and columns[0].startswith('tcp') and columns[1]=='LISTEN':
+            local=columns[4]
+            if local.endswith(':8787') or local.endswith(':8090'):
+                addresses.add(local)
+    return addresses
+
+
+def memoryd_preflight():
+    existing = status()
+    memory = memoryd_resource_gate(Path('/proc/meminfo').read_text())
+    containers = run(['docker', 'ps', '-aq']).decode().split()
+    rows = json.loads(run(['docker', 'inspect', *containers])) if containers else []
+    owned = [row for row in rows if (row.get('Config', {}).get('Labels') or {}).get('service') in MEMORYD_SERVICES]
+    volumes = set(run(['docker', 'volume', 'ls', '--format', '{{.Name}}']).decode().split())
+    listeners=sorted(memoryd_listener_addresses(run(['ss','-Hln']).decode()))
+    blockers = []
+    if existing.get('authority') != 'kamal' or not existing.get('healthy'):
+        blockers.append('existing_control_plane_unhealthy_or_unowned')
+    if existing.get('tunnel_count') != 1:
+        blockers.append('expected_exactly_one_existing_tunnel')
+    if not memory['ready']:
+        blockers.append(memory['reason'])
+    if owned:
+        blockers.append('memoryd_container_state_already_exists')
+    if MEMORYD_VOLUME in volumes:
+        blockers.append('memoryd_volume_already_exists')
+    if listeners:
+        blockers.append('memoryd_listener_port_already_in_use')
+    return {
+        **memory,
+        'ready': not blockers,
+        'reason': blockers[0] if blockers else 'ready',
+        'blockers': blockers,
+        'existing_services_healthy': existing.get('healthy') is True,
+        'tunnel_count': existing.get('tunnel_count'),
+        'target_container_count': len(owned),
+        'target_volume_exists': MEMORYD_VOLUME in volumes,
+        'target_listeners': listeners,
+        'mutated': False,
+    }
+
+
+def _memoryd_adapter_image(current, receipt):
+    if receipt is None:
+        cas=current['manifest']['images']['cas']
+        image=cas['repository']+'@'+cas['digest']
+    else:
+        if (not isinstance(receipt,dict) or set(receipt)!={'schema_version','image','adapter_sha256'}
+                or receipt.get('schema_version')!=1
+                or not isinstance(receipt.get('adapter_sha256'),str)
+                or not re.fullmatch(r'[a-f0-9]{64}',receipt['adapter_sha256'])):
+            raise ValueError('MemoryD adapter image receipt is invalid')
+        image=receipt.get('image')
+    if not isinstance(image,str) or not re.fullmatch(r'ghcr\.io/joshyorko/codex-action-server@sha256:[a-f0-9]{64}',image):
+        raise ValueError('MemoryD adapter image receipt is invalid')
+    return image
+
+
+def memoryd_health():
+    baseline = status()
+    if baseline.get('authority') != 'kamal' or not baseline.get('healthy') or baseline.get('tunnel_count') != 1:
+        raise ValueError('Existing control-plane health or tunnel identity is not acceptable')
+    ids = run(['docker', 'ps', '-aq']).decode().split()
+    rows = json.loads(run(['docker', 'inspect', *ids])) if ids else []
+    services = {}
+    for row in rows:
+        service = (row.get('Config', {}).get('Labels') or {}).get('service')
+        if service in MEMORYD_SERVICES:
+            if service in services:
+                raise ValueError('Duplicate MemoryD accessory identity')
+            services[service] = row
+    if set(services) != MEMORYD_SERVICES:
+        raise ValueError('MemoryD accessories are incomplete')
+
+    current = json.loads(private(STORE / 'current.json'))
+    image_path=STATE/'bootstrap/memoryd-adapter-image.json'
+    image_receipt=json.loads(private(image_path)) if image_path.exists() or image_path.is_symlink() else None
+    expected_bridge_image=_memoryd_adapter_image(current,image_receipt)
+    gateway = NETWORK['gateway']
+    memoryd = services['mcp-control-plane-memoryd']
+    bridge = services['mcp-control-plane-memoryd-mcp']
+
+    def assert_container(row, *, image, memory, nano_cpus):
+        state = row.get('State', {})
+        config = row.get('Config', {})
+        host = row.get('HostConfig', {})
+        if (state.get('Status') != 'running' or state.get('Health', {}).get('Status') != 'healthy'
+                or config.get('Image') != image or host.get('NetworkMode') != 'host'
+                or host.get('ReadonlyRootfs') is not True or not (host.get('Tmpfs') or {}).get('/tmp')
+                or host.get('Memory') != memory or host.get('NanoCpus') != nano_cpus
+                or host.get('PortBindings')):
+            raise ValueError('MemoryD accessory runtime contract failed')
+        return dict(item.split('=', 1) for item in config.get('Env', []) if '=' in item)
+
+    memory_env = assert_container(
+        memoryd, image=MEMORYD_IMAGE, memory=268_435_456, nano_cpus=500_000_000
+    )
+    bridge_env = assert_container(
+        bridge, image=expected_bridge_image, memory=134_217_728, nano_cpus=250_000_000
+    )
+    if (memory_env.get('CODEX_MEMORYD_BIND') != '127.0.0.1:8787'
+            or memory_env.get('CODEX_MEMORYD_DB') != '/data/memory.db'
+            or bridge_env.get('CODEX_MEMORYD_URL') != 'http://127.0.0.1:8787'
+            or bridge_env.get('CODEX_MEMORYD_MCP_BIND') != f'{gateway}:8090'):
+        raise ValueError('MemoryD bind or scope contract failed')
+    if memoryd.get('Config', {}).get('User') != '10001:10001':
+        raise ValueError('MemoryD container must retain its non-root image user')
+    volume_mounts = [mount for mount in memoryd.get('Mounts', [])
+                     if mount.get('Name') == MEMORYD_VOLUME and mount.get('Destination') == '/data']
+    bridge_mounts = [mount for mount in bridge.get('Mounts', [])
+                     if mount.get('Destination') == '/opt/tunnel-kit/codex_memoryd_mcp.py'
+                     and mount.get('Source','').startswith(str(STATE / 'memoryd-adapter') + '/')
+                     and mount.get('RW') is False]
+    if len(volume_mounts) != 1 or len(bridge_mounts) != 1:
+        raise ValueError('MemoryD persistence or read-only source mount failed')
+    adapter_path=Path(bridge_mounts[0]['Source'])
+    if (adapter_path.name!='codex_memoryd_mcp.py'
+            or not re.fullmatch(r'[a-f0-9]{64}',adapter_path.parent.name)):
+        raise ValueError('MemoryD bridge source path is not content-addressed')
+    adapter_root=STATE/'memoryd-adapter'
+    for directory in (adapter_root,adapter_path.parent):
+        directory_info=directory.lstat()
+        if (directory.is_symlink() or not directory.is_dir() or directory_info.st_uid!=os.getuid()
+                or stat.S_IMODE(directory_info.st_mode)!=0o700):
+            raise ValueError('MemoryD adapter artifact directories must be private')
+    adapter_stat=adapter_path.lstat()
+    if (adapter_path.is_symlink() or not adapter_path.is_file()
+            or adapter_stat.st_uid!=os.getuid() or stat.S_IMODE(adapter_stat.st_mode)!=0o600
+            or file_sha256(adapter_path)!=adapter_path.parent.name):
+        raise ValueError('Staged MemoryD bridge source does not match its private content address')
+    adapter_receipt=json.loads(private(adapter_path.parent/'artifact.json'))
+    if adapter_receipt.get('adapter_sha256')!=adapter_path.parent.name:
+        raise ValueError('Staged MemoryD bridge receipt does not match its content address')
+    if image_receipt and image_receipt['adapter_sha256']!=adapter_path.parent.name:
+        raise ValueError('MemoryD adapter image receipt does not match its artifact')
+    listeners=memoryd_listener_addresses(run(['ss','-Hln']).decode())
+    if listeners != {'127.0.0.1:8787', f'{gateway}:8090'}:
+        raise ValueError('MemoryD listeners do not match the private bind contract')
+    return {
+        'status': 'PASS',
+        'memoryd_image': MEMORYD_IMAGE,
+        'adapter_image': expected_bridge_image,
+        'adapter_sha256': adapter_path.parent.name,
+        'backend_bind': '127.0.0.1:8787',
+        'mcp_bind': f'{gateway}:8090',
+        'persistent_volume': MEMORYD_VOLUME,
+        'existing_tunnel_count': baseline['tunnel_count'],
+        'existing_control_plane_healthy': baseline['healthy'],
+    }
+
+
+def memoryd_pin_adapter_image():
+    health=memoryd_health()
+    path=STATE/'bootstrap/memoryd-adapter-image.json'
+    expected={'schema_version':1,'image':health['adapter_image'],
+              'adapter_sha256':health['adapter_sha256']}
+    if path.exists() or path.is_symlink():
+        if json.loads(private(path))!=expected:
+            raise ValueError('MemoryD adapter image receipt changed')
+        return {'adapter_image_pinned':True,'created':False}
+    write(path,expected)
+    return {'adapter_image_pinned':True,'created':True}
+
+
+def memoryd_adapter_pin_check():
+    path=STATE/'bootstrap/memoryd-adapter-image.json'
+    if not path.exists() and not path.is_symlink():return {'pinned':False}
+    receipt=json.loads(private(path))
+    image=_memoryd_adapter_image(None,receipt)
+    rows=json.loads(run(['docker','inspect','mcp-control-plane-memoryd-mcp']))
+    if len(rows)!=1:
+        raise ValueError('MemoryD adapter container identity is ambiguous')
+    row=rows[0]
+    artifact=STATE/'memoryd-adapter'/receipt['adapter_sha256']/'codex_memoryd_mcp.py'
+    for directory in (artifact.parent.parent,artifact.parent):
+        info=directory.lstat()
+        if (directory.is_symlink() or not stat.S_ISDIR(info.st_mode) or info.st_uid!=os.getuid()
+                or stat.S_IMODE(info.st_mode)!=0o700):
+            raise ValueError('MemoryD adapter artifact directory is unsafe')
+    mounts=[item for item in row.get('Mounts',[]) if item.get('Destination')=='/opt/tunnel-kit/codex_memoryd_mcp.py'
+            and item.get('Source')==str(artifact) and item.get('RW') is False]
+    info=artifact.lstat()
+    if (row.get('Name','').lstrip('/')!='mcp-control-plane-memoryd-mcp'
+            or (row.get('Config',{}).get('Labels') or {}).get('service')!='mcp-control-plane-memoryd-mcp'
+            or row.get('Config',{}).get('Image')!=image or len(mounts)!=1
+            or artifact.is_symlink() or not stat.S_ISREG(info.st_mode) or info.st_uid!=os.getuid()
+            or stat.S_IMODE(info.st_mode)!=0o600 or file_sha256(artifact)!=receipt['adapter_sha256']):
+        raise ValueError('MemoryD adapter does not match its pinned image and artifact')
+    return {'pinned':True}
+
+
+def memoryd_executor_origin_check():
+    owner,groups,_=inspect()
+    row=groups.get('kamal',{}).get('executor')
+    if owner!='kamal' or not row:
+        raise ValueError('Managed Executor is unavailable')
+    environment=dict(item.split('=',1) for item in row.get('Config',{}).get('Env',[]) if '=' in item)
+    try:
+        origins=json.loads(environment.get('EXECUTOR_URL_ALLOW_HTTP_ORIGINS','[]'))
+    except json.JSONDecodeError:
+        raise ValueError('Executor HTTP origin policy is invalid') from None
+    return {'memoryd_origin_allowed':f"http://{NETWORK['gateway']}:8090" in origins}
+
+
+def memoryd_wait(timeout=180):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        ids = run(['docker', 'ps', '-aq']).decode().split()
+        rows = json.loads(run(['docker', 'inspect', *ids])) if ids else []
+        services = {}
+        for row in rows:
+            service = (row.get('Config', {}).get('Labels') or {}).get('service')
+            if service in MEMORYD_SERVICES:
+                if service in services:
+                    raise ValueError('Duplicate MemoryD accessory identity')
+                services[service] = row
+        if len(services) == len(MEMORYD_SERVICES):
+            states = [row.get('State', {}) for row in services.values()]
+            if any(state.get('Status') in ('exited', 'dead') for state in states):
+                raise ValueError('A MemoryD accessory exited before becoming healthy')
+            if all(state.get('Status') == 'running'
+                   and state.get('Health', {}).get('Status') == 'healthy' for state in states):
+                return memoryd_health()
+        time.sleep(2)
+    raise ValueError('MemoryD accessories did not become healthy before the deadline')
+
+
+def _memoryd_adapter_dir(adapter_sha256):
+    if not isinstance(adapter_sha256,str) or not re.fullmatch(r'[a-f0-9]{64}',adapter_sha256):
+        raise ValueError('MemoryD adapter checksum is invalid')
+    return STATE/'memoryd-adapter'/adapter_sha256
+
+
+def memoryd_adapter_prepare(data):
+    if (not isinstance(data,dict) or set(data)!={'adapter_sha256','size_bytes','controller_sha'}
+            or not isinstance(data.get('controller_sha'),str)
+            or not re.fullmatch(r'[a-f0-9]{40}',data['controller_sha'])
+            or type(data.get('size_bytes')) is not int or not 0<data['size_bytes']<=1024*1024):
+        raise ValueError('MemoryD adapter staging request is invalid')
+    root=STATE/'memoryd-adapter'
+    if not root.exists():root.mkdir(mode=0o700)
+    root_info=root.lstat()
+    if root.is_symlink() or not root.is_dir() or root_info.st_uid!=os.getuid() or stat.S_IMODE(root_info.st_mode)!=0o700:
+        raise ValueError('MemoryD adapter staging root must be private')
+    directory=_memoryd_adapter_dir(data['adapter_sha256'])
+    if not directory.exists():directory.mkdir(mode=0o700)
+    info=directory.lstat()
+    if directory.is_symlink() or not directory.is_dir() or info.st_uid!=os.getuid() or stat.S_IMODE(info.st_mode)!=0o700:
+        raise ValueError('MemoryD adapter artifact directory must be private')
+    path=directory/'codex_memoryd_mcp.py'
+    present=False
+    if path.exists() or path.is_symlink():
+        info=path.lstat()
+        if (path.is_symlink() or not path.is_file() or info.st_uid!=os.getuid()
+                or info.st_size!=data['size_bytes'] or file_sha256(path)!=data['adapter_sha256']):
+            raise ValueError('Existing MemoryD adapter artifact does not match its immutable digest')
+        if stat.S_IMODE(info.st_mode)!=0o600:path.chmod(0o600)
+        present=True
+    metadata={'adapter_sha256':data['adapter_sha256'],'size_bytes':data['size_bytes'],
+              'controller_sha':data['controller_sha']}
+    marker=directory/'artifact.json'
+    if marker.exists() or marker.is_symlink():
+        existing=json.loads(private(marker))
+        if (existing.get('adapter_sha256')!=data['adapter_sha256']
+                or existing.get('size_bytes')!=data['size_bytes']):
+            raise ValueError('MemoryD adapter receipt does not match the immutable artifact')
+        if existing.get('controller_sha')!=data['controller_sha']:
+            write(marker,metadata)
+    else:
+        write(marker,metadata)
+    return {'directory':str(directory),'path':str(path),'present':present,
+            'needs_upload':not present,'adapter_sha256':data['adapter_sha256']}
+
+
+def memoryd_adapter_finalize(data):
+    if (not isinstance(data,dict) or set(data)!={'adapter_sha256','size_bytes','controller_sha'}
+            or type(data.get('size_bytes')) is not int
+            or not isinstance(data.get('controller_sha'),str)
+            or not re.fullmatch(r'[a-f0-9]{40}',data['controller_sha'])):
+        raise ValueError('MemoryD adapter finalization request is invalid')
+    directory=_memoryd_adapter_dir(data['adapter_sha256'])
+    path=directory/'codex_memoryd_mcp.py'
+    info=path.lstat()
+    if (path.is_symlink() or not path.is_file() or info.st_uid!=os.getuid()
+            or info.st_size!=data['size_bytes'] or file_sha256(path)!=data['adapter_sha256']):
+        raise ValueError('Staged MemoryD adapter failed its SHA-256 check')
+    path.chmod(0o600)
+    marker=directory/'artifact.json'
+    metadata={'adapter_sha256':data['adapter_sha256'],'size_bytes':data['size_bytes'],
+              'controller_sha':data['controller_sha']}
+    if json.loads(private(marker))!=metadata:
+        raise ValueError('MemoryD adapter receipt does not match its staged file')
+    return {'staged':True,'adapter_sha256':data['adapter_sha256'],'size_bytes':data['size_bytes']}
+
+
+def memoryd_inventory():
+    """Inspect labeled accessories without requiring a healthy control plane."""
+    ids = run(['docker', 'ps', '-aq']).decode().split()
+    rows = json.loads(run(['docker', 'inspect', *ids])) if ids else []
+    services = {}
+    for row in rows:
+        service = (row.get('Config', {}).get('Labels') or {}).get('service')
+        name = (row.get('Name') or '').lstrip('/')
+        if service in MEMORYD_SERVICES or name in MEMORYD_SERVICES:
+            if service not in MEMORYD_SERVICES or name != service:
+                raise ValueError('MemoryD accessory identity mismatch')
+            if service in services:
+                raise ValueError('Duplicate MemoryD accessory identity')
+            state = row.get('State', {})
+            services[service] = {'state': state.get('Status'),
+                                 'health': state.get('Health', {}).get('Status')}
+    volumes = set(run(['docker', 'volume', 'ls', '--format', '{{.Name}}']).decode().split())
+    marker = STATE / 'bootstrap/memoryd-integration.json'
+    if not services:
+        state = 'VOLUME_ONLY' if MEMORYD_VOLUME in volumes else 'ABSENT'
+    elif set(services) != MEMORYD_SERVICES:
+        state = 'PARTIAL'
+    elif all(item['state'] in ('exited', 'created') for item in services.values()):
+        state = 'STOPPED'
+    else:
+        state = 'UNVERIFIED'
+    return {'status': state, 'services': services,
+            'volume_exists': MEMORYD_VOLUME in volumes,
+            'app_registered': marker.exists() and not marker.is_symlink()}
+
+
+def memoryd_status():
+    result = memoryd_inventory()
+    services = result['services']
+    if result['status'] == 'UNVERIFIED':
+        if all(item['state'] == 'running' and item['health'] == 'healthy' for item in services.values()):
+            health=memoryd_health()
+            result['status'] = 'HEALTHY'
+            if health.get('adapter_sha256'):
+                result['adapter_sha256'] = health['adapter_sha256']
+        else:
+            result['status'] = 'UNHEALTHY'
+    return result
+
+
+def memoryd_transfer_preflight():
+    existing = status()
+    memory = memoryd_resource_gate(Path('/proc/meminfo').read_text())
+    provider = memoryd_status()
+    blockers = []
+    if existing.get('authority') != 'kamal' or existing.get('healthy') is not True:
+        blockers.append('existing_control_plane_unhealthy_or_unowned')
+    if existing.get('tunnel_count') != 1:
+        blockers.append('expected_exactly_one_existing_tunnel')
+    if not memory.get('ready'):
+        blockers.append(memory['reason'])
+    if provider.get('status') != 'HEALTHY':
+        blockers.append('memoryd_accessories_not_healthy')
+    return {**memory, 'ready': not blockers, 'reason': blockers[0] if blockers else 'ready',
+            'blockers': blockers, 'existing_services_healthy': existing.get('healthy') is True,
+            'tunnel_count': existing.get('tunnel_count'), 'memoryd_status': provider.get('status'),
+            'mutated': False}
+
+
+def _validate_memoryd_transfer_manifest(data):
+    expected = {'schema_version','transfer_manifest_sha256','source_database_sha256',
+                'source_record_count','source_database_record_count','source_cutoff_at',
+                'include_archived',
+                'source_instance_id','source_profile','source_workspace',
+                'target_profile','target_workspace','bundles'}
+    if not isinstance(data,dict) or set(data)!=expected or data.get('schema_version')!=1:
+        raise ValueError('MemoryD transfer manifest shape is invalid')
+    digest=data.get('transfer_manifest_sha256')
+    source_db=data.get('source_database_sha256')
+    if (not isinstance(digest,str) or not re.fullmatch(r'[a-f0-9]{64}',digest)
+            or not isinstance(source_db,str) or not re.fullmatch(r'[a-f0-9]{64}',source_db)):
+        raise ValueError('MemoryD transfer digest is invalid')
+    source_instance=data.get('source_instance_id')
+    if not isinstance(source_instance,str) or not re.fullmatch(r'cmi_[a-f0-9]{32}',source_instance):
+        raise ValueError('MemoryD source instance identity is invalid')
+    if (data.get('source_profile')!='personal' or data.get('target_profile')!='personal'
+            or data.get('source_workspace')!='dakota-codex-only'
+            or data.get('target_workspace')!='dakota-codex-only'):
+        raise ValueError('MemoryD transfer scope is invalid')
+    record_count=data.get('source_record_count')
+    bundles=data.get('bundles')
+    database_count=data.get('source_database_record_count')
+    if (type(record_count) is not int or record_count<1
+            or type(database_count) is not int or database_count<record_count
+            or data.get('include_archived') is not False
+            or not isinstance(data.get('source_cutoff_at'),str) or not data['source_cutoff_at']
+            or not isinstance(bundles,list) or not bundles):
+        raise ValueError('MemoryD transfer bundle selection is empty')
+    names=set();roots=0;total=0
+    for bundle in bundles:
+        if not isinstance(bundle,dict) or set(bundle)!={'path','sha256','size_bytes','bundle_id','manifest_digest','root_count'}:
+            raise ValueError('MemoryD bundle descriptor shape is invalid')
+        name=bundle['path']
+        if (not isinstance(name,str) or Path(name).name!=name
+                or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.bundle',name)
+                or name in names):
+            raise ValueError('MemoryD bundle filename is invalid')
+        names.add(name)
+        if (not isinstance(bundle['sha256'],str) or not re.fullmatch(r'[a-f0-9]{64}',bundle['sha256'])
+                or not isinstance(bundle['manifest_digest'],str)
+                or not re.fullmatch(r'sha256:[a-f0-9]{64}',bundle['manifest_digest'])):
+            raise ValueError('MemoryD bundle digest is invalid')
+        size=bundle['size_bytes'];root_count=bundle['root_count']
+        if type(size) is not int or not 0<size<=24*1024*1024 or type(root_count) is not int or not 0<root_count<=5000:
+            raise ValueError('MemoryD bundle exceeds the released size or root limit')
+        if not isinstance(bundle['bundle_id'],str) or not bundle['bundle_id'].startswith('sha256:'):
+            raise ValueError('MemoryD bundle identity is invalid')
+        total+=size;roots+=root_count
+    if total>128*1024*1024 or roots!=record_count:
+        raise ValueError('MemoryD bundle set does not exactly cover the source record count')
+    return data
+
+
+def memoryd_transfer_prepare(data):
+    manifest=_validate_memoryd_transfer_manifest(data)
+    transfer_root=STATE/'memoryd-transfer'
+    if not transfer_root.exists():
+        transfer_root.mkdir(mode=0o700,parents=True)
+    root_info=transfer_root.lstat()
+    if transfer_root.is_symlink() or not transfer_root.is_dir() or root_info.st_uid!=os.getuid() or stat.S_IMODE(root_info.st_mode)!=0o700:
+        raise ValueError('MemoryD transfer directory must be private')
+    directory=transfer_root/manifest['transfer_manifest_sha256'][:16]
+    if not directory.exists():
+        directory.mkdir(mode=0o700)
+    info=directory.lstat()
+    if directory.is_symlink() or not directory.is_dir() or info.st_uid!=os.getuid() or stat.S_IMODE(info.st_mode)!=0o700:
+        raise ValueError('MemoryD transfer directory identity is invalid')
+    manifest_path=directory/'transfer.json'
+    mutated=False
+    if manifest_path.exists() or manifest_path.is_symlink():
+        if json.loads(private(manifest_path))!=manifest:
+            raise ValueError('MemoryD transfer directory already belongs to another source manifest')
+    else:
+        write(manifest_path,manifest);mutated=True
+    expected_names={bundle['path'] for bundle in manifest['bundles']}|{'transfer.json'}
+    actual_names={item.name for item in directory.iterdir()}
+    if actual_names-expected_names:
+        raise ValueError('MemoryD transfer directory contains unrecognized files')
+    present=[];missing=[]
+    for bundle in manifest['bundles']:
+        path=directory/bundle['path']
+        if not path.exists() and not path.is_symlink():
+            missing.append(bundle['path']);continue
+        item=path.lstat()
+        if path.is_symlink() or not path.is_file() or item.st_uid!=os.getuid() or stat.S_IMODE(item.st_mode)!=0o600:
+            raise ValueError('VM bundle file must be an owner-only regular file')
+        if item.st_size!=bundle['size_bytes'] or file_sha256(path)!=bundle['sha256']:
+            raise ValueError('VM bundle file hash mismatch')
+        present.append(bundle['path'])
+    return {'directory':str(directory),'present_bundles':present,'missing_bundles':missing,'mutated':mutated}
+
+
+def _memoryd_cli(args, *, timeout=300):
+    command=['docker','exec','-i','mcp-control-plane-memoryd','/usr/local/bin/codex-memoryd',*args]
+    result=subprocess.run(command,input=b'',capture_output=True,timeout=timeout)
+    if result.returncode:
+        label=' '.join(str(item) for item in args[:2])
+        raise ValueError('MemoryD CLI '+label+' failed; command output withheld')
+    return result.stdout
+
+
+def _memoryd_cli_json(args, *, timeout=300):
+    try:
+        return json.loads(_memoryd_cli(args,timeout=timeout))
+    except (json.JSONDecodeError,UnicodeDecodeError):
+        label=' '.join(str(item) for item in args[:2])
+        raise ValueError('MemoryD CLI '+label+' returned invalid JSON') from None
+
+
+def _memoryd_run_step(label, args, *, timeout=180, stdin=None):
+    if label not in {'target backup permissions', 'bundle copy', 'bundle permissions', 'bundle cleanup'}:
+        raise ValueError('MemoryD import step label is invalid')
+    try:
+        result=subprocess.run(args,stdin=stdin,capture_output=True,timeout=timeout)
+    except Exception:
+        raise ValueError('MemoryD import step '+label+' failed (docker_unavailable)') from None
+    if result.returncode:
+        diagnostic=result.stderr.decode(errors='replace').lower()
+        categories=(
+            ('no space left on device','destination_capacity'),
+            ('read-only file system','read_only_destination'),
+            ('permission denied','permission_denied'),
+            ('no such file or directory','path_not_found'),
+            ('not a directory','invalid_destination'),
+            ('no such container','container_not_found'),
+            ('is not running','container_not_running'),
+        )
+        reason=next((category for needle,category in categories if needle in diagnostic),'docker_operation_failed')
+        raise ValueError('MemoryD import step '+label+' failed ('+reason+')')
+    return result.stdout
+
+
+def _memoryd_stage_bundle(path, container_path, bundle):
+    info=path.lstat()
+    fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW)
+    with os.fdopen(fd,'rb') as stream:
+        opened=os.fstat(stream.fileno())
+        if (path.is_symlink() or not stat.S_ISREG(opened.st_mode)
+                or opened.st_uid!=os.getuid() or stat.S_IMODE(opened.st_mode)!=0o600
+                or (info.st_dev,info.st_ino)!=(opened.st_dev,opened.st_ino)
+                or opened.st_size!=bundle['size_bytes']
+                or hashlib.file_digest(stream,'sha256').hexdigest()!=bundle['sha256']):
+            raise ValueError('MemoryD bundle transfer file failed its host-side hash check')
+        stream.seek(0)
+        _memoryd_run_step('bundle copy',
+            ['docker','exec','-i','--user','10001:10001','mcp-control-plane-memoryd',
+             'sh','-c','umask 077; set -C; cat > "$1"','sh',container_path],
+            timeout=120,stdin=stream)
+
+
+def _memoryd_record_count():
+    output=_memoryd_cli(['doctor','--local','--format','summary']).decode(errors='replace')
+    match=re.search(r'(?m)^storage: [^\n]*\brecords=(\d+)\b',output)
+    if not match:
+        raise ValueError('MemoryD doctor record count is unavailable')
+    return int(match.group(1))
+
+
+def _memoryd_tmp_available():
+    output=run(['docker','exec','mcp-control-plane-memoryd','df','-Pk','/tmp'],timeout=15).decode()
+    lines=output.splitlines()
+    fields=lines[-1].split() if lines else []
+    if len(fields)<6 or fields[-1]!='/tmp' or not fields[-3].isdigit():
+        raise ValueError('MemoryD temporary storage capacity is unavailable')
+    return int(fields[-3])*1024
+
+
+def _memoryd_process_start_ticks(pid):
+    raw=(Path('/proc')/str(pid)/'stat').read_text()
+    fields=raw.rsplit(')',1)[1].split()
+    return int(fields[19])
+
+
+def _memoryd_staging_owner():
+    return {'pid':os.getpid(),'start_ticks':_memoryd_process_start_ticks(os.getpid()),
+            'boot_id':Path('/proc/sys/kernel/random/boot_id').read_text().strip()}
+
+
+def _memoryd_staging_owner_alive(owner):
+    if Path('/proc/sys/kernel/random/boot_id').read_text().strip()!=owner['boot_id']:
+        return False
+    try:
+        return _memoryd_process_start_ticks(owner['pid'])==owner['start_ticks']
+    except FileNotFoundError:
+        return False
+    except (OSError,ValueError,IndexError):
+        raise ValueError('MemoryD staging owner cannot be verified') from None
+
+
+def _memoryd_staging_in_use(path):
+    target=path.encode()
+    if target in run(['docker','top','mcp-control-plane-memoryd','-eo','pid,args'],timeout=15):
+        return True
+    for process in Path('/proc').iterdir():
+        if not process.name.isdigit() or int(process.name)==os.getpid():continue
+        try:
+            if process.stat().st_uid==os.getuid() and target in (process/'cmdline').read_bytes():
+                return True
+        except FileNotFoundError:
+            continue
+        except OSError:
+            raise ValueError('MemoryD staging use cannot be verified') from None
+    return False
+
+
+def _memoryd_reconcile_staging(receipt,receipt_path,transfer_id):
+    owner=receipt.get('staging')
+    if owner is None:return
+    if (not isinstance(owner,dict) or set(owner)!={'path','pid','start_ticks','boot_id'}
+            or type(owner.get('pid')) is not int or owner['pid']<1
+            or type(owner.get('start_ticks')) is not int or owner['start_ticks']<1
+            or not isinstance(owner.get('boot_id'),str)
+            or not re.fullmatch(r'[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}',owner['boot_id'])
+            or not isinstance(owner.get('path'),str)
+            or not re.fullmatch(r'/tmp/memoryd-transfer-'+transfer_id[:12]+r'-[a-f0-9]{32}-[0-9]{2,6}-(?:apply|replay)\.bundle',owner['path'])):
+        raise ValueError('MemoryD staging receipt is invalid')
+    if _memoryd_staging_owner_alive(owner) or _memoryd_staging_in_use(owner['path']):
+        raise ValueError('MemoryD staging is still active; retry refused')
+    _memoryd_run_step('bundle cleanup',
+        ['docker','exec','--user','10001:10001','mcp-control-plane-memoryd','rm','-f',owner['path']],timeout=60)
+    receipt.pop('staging');write(receipt_path,receipt)
+
+
+def _validate_memoryd_bundle_report(report, manifest, bundle):
+    if (not isinstance(report,dict) or report.get('integrity_status')!='verified'
+            or report.get('bundle_id')!=bundle['bundle_id']
+            or report.get('manifest_digest')!=bundle['manifest_digest']
+            or report.get('source_instance_id')!=manifest['source_instance_id']
+            or report.get('source_scope',{}).get('profile')!='personal'
+            or report.get('source_scope',{}).get('workspace')!='dakota-codex-only'):
+        raise ValueError('MemoryD bundle integrity, provenance, or scope check failed')
+
+
+def _memoryd_receipt_path(transfer_id):
+    path=STATE/'bootstrap'/f'memoryd-transfer-{transfer_id}.json'
+    legacy=STATE/'bootstrap/memoryd-transfer.json'
+    if not path.exists() and not path.is_symlink() and (legacy.exists() or legacy.is_symlink()):
+        previous=json.loads(private(legacy))
+        if previous.get('transfer_manifest_sha256')==transfer_id:
+            return legacy
+    return path
+
+
+def memoryd_import_bundles(data):
+    if not isinstance(data,dict) or set(data)!={'transfer_manifest_sha256'}:
+        raise ValueError('MemoryD import request shape is invalid')
+    transfer_id=data['transfer_manifest_sha256']
+    if not isinstance(transfer_id,str) or not re.fullmatch(r'[a-f0-9]{64}',transfer_id):
+        raise ValueError('MemoryD transfer identity is invalid')
+    gate=memoryd_transfer_preflight()
+    if not gate['ready']:
+        raise ValueError('MemoryD transfer preflight blocked: '+gate['reason'])
+    directory=STATE/'memoryd-transfer'/transfer_id[:16]
+    manifest=json.loads(private(directory/'transfer.json'))
+    _validate_memoryd_transfer_manifest(manifest)
+    if manifest['transfer_manifest_sha256']!=transfer_id:
+        raise ValueError('MemoryD transfer manifest identity mismatch')
+    receipt_path=_memoryd_receipt_path(transfer_id)
+    receipt=json.loads(private(receipt_path)) if receipt_path.exists() or receipt_path.is_symlink() else None
+    if receipt and (receipt.get('transfer_manifest_sha256')!=transfer_id
+                    or receipt.get('source_database_sha256')!=manifest['source_database_sha256']):
+        raise ValueError('A different MemoryD transfer is already recorded')
+    current_records=_memoryd_record_count()
+    if receipt is None and current_records!=0:
+        raise ValueError('MemoryD target is nonempty without a matching transfer receipt')
+    legacy_path=STATE/'bootstrap/memoryd-transfer.json'
+    if receipt is None and (legacy_path.exists() or legacy_path.is_symlink()):
+        previous=json.loads(private(legacy_path))
+        if (previous.get('status')!='in_progress' or previous.get('bundles')
+                or previous.get('source_database_sha256')!=manifest['source_database_sha256']):
+            raise ValueError('Previous MemoryD transfer requires reconciliation')
+    backup_info=receipt.get('target_backup') if receipt else None
+    if not backup_info:
+        backup_path=f"/data/pre-transfer-{transfer_id[:12]}-{time.time_ns()}.db"
+        created=_memoryd_cli_json(['backup','create','--local','--dest',backup_path])
+        backup_manifest=created.get('manifest',{})
+        _memoryd_run_step('target backup permissions',
+            ['docker','exec','mcp-control-plane-memoryd','chmod','0600',
+             backup_path,backup_path+'.manifest.json'])
+        verified=_memoryd_cli_json(['backup','verify','--local','--path',backup_path])
+        if verified.get('ok') is not True or backup_manifest.get('sha256')!=verified.get('manifest',{}).get('sha256'):
+            raise ValueError('MemoryD target backup verification failed')
+        backup_info={'path':backup_path,'sha256':backup_manifest['sha256'],'size_bytes':backup_manifest['size_bytes']}
+    if receipt is None:
+        receipt={'schema_version':1,'status':'in_progress',
+                 'transfer_manifest_sha256':transfer_id,
+                 'source_database_sha256':manifest['source_database_sha256'],
+                 'source_instance_id':manifest['source_instance_id'],
+                 'source_profile':manifest['source_profile'],'source_workspace':manifest['source_workspace'],
+                 'target_profile':manifest['target_profile'],'target_workspace':manifest['target_workspace'],
+                 'target_backup':backup_info,'bundles':{}}
+        write(receipt_path,receipt)
+    _memoryd_reconcile_staging(receipt,receipt_path,transfer_id)
+
+    target_tmp=[];bundle_summaries=[];destination_instance_id=None
+    staging_id=uuid.uuid4().hex
+    def preview_apply(bundle,filename,*,idempotency=False):
+        nonlocal destination_instance_id
+        inspect=_memoryd_cli_json(['bundle','inspect',filename],timeout=180)
+        _validate_memoryd_bundle_report(inspect,manifest,bundle)
+        preview=_memoryd_cli_json(['bundle','import','--local','--preview',
+            '--to-profile','personal','--to-workspace','dakota-codex-only',filename],timeout=300)
+        if (preview.get('safe_to_apply') is not True
+                or preview.get('integrity_status')!='verified'
+                or preview.get('source_instance_id')!=manifest['source_instance_id']
+                or preview.get('source_scope',{}).get('profile')!='personal'
+                or preview.get('source_scope',{}).get('workspace')!='dakota-codex-only'
+                or preview.get('destination_scope',{}).get('profile')!='personal'
+                or preview.get('destination_scope',{}).get('workspace')!='dakota-codex-only'):
+            raise ValueError('MemoryD import preview rejected bundle scope or integrity')
+        counts=preview.get('counts',{})
+        if counts.get('rejected',0)!=0 or counts.get('conflicts',0)!=0:
+            raise ValueError('MemoryD import preview has rejected records or conflicts')
+        if idempotency and counts.get('create')!=0:
+            raise ValueError('MemoryD duplicate replay planned new records')
+        destination=preview.get('destination_instance_id')
+        if destination_instance_id and destination_instance_id!=destination:
+            raise ValueError('MemoryD destination instance changed between bundles')
+        destination_instance_id=destination
+        applied=_memoryd_cli_json(['bundle','import','--local','--apply','--plan-id',preview['plan_id'],
+            '--to-profile','personal','--to-workspace','dakota-codex-only',filename],timeout=600)
+        applied_receipt=applied.get('receipt',{})
+        if applied_receipt.get('status')!='applied':
+            raise ValueError('MemoryD bundle apply did not produce an applied receipt')
+        return {'counts':counts,'receipt_id':applied_receipt.get('receipt_id'),
+                'destination_instance_id':destination}
+
+    def stage_apply(bundle,index,*,idempotency=False):
+        if _memoryd_tmp_available()<bundle['size_bytes']+4*1024*1024:
+            raise ValueError('MemoryD temporary storage is insufficient for the next bundle')
+        suffix='replay' if idempotency else 'apply'
+        container_path=f"/tmp/memoryd-transfer-{transfer_id[:12]}-{staging_id}-{index:02d}-{suffix}.bundle"
+        receipt['staging']={'path':container_path,**_memoryd_staging_owner()}
+        write(receipt_path,receipt)
+        target_tmp.append(container_path)
+        try:
+            _memoryd_stage_bundle(directory/bundle['path'],container_path,bundle)
+            return preview_apply(bundle,container_path,idempotency=idempotency)
+        finally:
+            _memoryd_run_step('bundle cleanup',
+                ['docker','exec','--user','10001:10001','mcp-control-plane-memoryd','rm','-f',container_path],timeout=60)
+            target_tmp.remove(container_path)
+            receipt.pop('staging');write(receipt_path,receipt)
+
+    try:
+        for index,bundle in enumerate(manifest['bundles'],1):
+            name=bundle['path']
+            applied=stage_apply(bundle,index)
+            receipt['bundles'][name]={'sha256':bundle['sha256'],'manifest_digest':bundle['manifest_digest'],
+                                      'counts':applied['counts'],'receipt_id':applied['receipt_id']}
+            write(receipt_path,receipt)
+            bundle_summaries.append({'path':name,'counts':applied['counts']})
+        if _memoryd_record_count()!=manifest['source_record_count']:
+            raise ValueError('MemoryD target record count does not match Dakota source')
+        status_data=_memoryd_cli_json(['status','--local'])
+        if (status_data.get('active_profiles')!=['personal']
+                or status_data.get('active_workspaces')!=['dakota-codex-only']):
+            raise ValueError('MemoryD target profile/workspace boundary does not match source')
+        idempotency=[]
+        for index,bundle in enumerate(manifest['bundles'],1):
+            replay=stage_apply(bundle,index,idempotency=True)
+            idempotency.append({'path':bundle['path'],'creates':replay['counts'].get('create',0),
+                                'identity_reuses':replay['counts'].get('reuse_identity_exact',0),
+                                'content_reuses':replay['counts'].get('reuse_content_exact',0)})
+        if any(item['creates']!=0 for item in idempotency):
+            raise ValueError('MemoryD duplicate-safe replay created records')
+        if _memoryd_record_count()!=manifest['source_record_count']:
+            raise ValueError('MemoryD record count changed during idempotency replay')
+        recall=json.loads(_memoryd_cli(['recall','--local','--profile','personal','--workspace',
+            'dakota-codex-only','--query','Dakota Codex durable memory']))
+        recall_facts=len(recall.get('facts',[]));recall_citations=len(recall.get('citations',[]))
+        if recall_facts==0 or recall_citations==0 or recall.get('policy',{}).get('authority')!='recall_not_authority':
+            raise ValueError('MemoryD post-transfer recall smoke failed')
+        receipt.update(status='complete',destination_instance_id=destination_instance_id,
+                       imported_record_count=manifest['source_record_count'],
+                       idempotency=idempotency,recall_facts=recall_facts,
+                       recall_citations=recall_citations,completed_at_ns=time.time_ns())
+        write(receipt_path,receipt)
+        return {'status':'complete','source_instance_id':manifest['source_instance_id'],
+                'destination_instance_id':destination_instance_id,
+                'source_database_sha256':manifest['source_database_sha256'],
+                'source_record_count':manifest['source_record_count'],
+                'target_backup':backup_info,'bundles':bundle_summaries,
+                'idempotency':idempotency,'recall_facts':recall_facts,
+                'recall_citations':recall_citations}
+    finally:
+        if target_tmp:
+            _memoryd_run_step('bundle cleanup',
+                ['docker','exec','--user','10001:10001','mcp-control-plane-memoryd','rm','-f',*target_tmp],timeout=60)
+
+
+def _require_completed_memoryd_transfer(data):
+    if not isinstance(data,dict) or set(data)!={'transfer_manifest_sha256'}:
+        raise ValueError('MemoryD registration request shape is invalid')
+    transfer_id=data['transfer_manifest_sha256']
+    if not isinstance(transfer_id,str) or not re.fullmatch(r'[a-f0-9]{64}',transfer_id):
+        raise ValueError('MemoryD registration transfer identity is invalid')
+    receipt_path=_memoryd_receipt_path(transfer_id)
+    if not receipt_path.exists() or receipt_path.is_symlink():
+        raise ValueError('A completed MemoryD transfer is required for registration')
+    receipt=json.loads(private(receipt_path))
+    if (receipt.get('status')!='complete' or receipt.get('transfer_manifest_sha256')!=transfer_id
+            or receipt.get('source_profile')!='personal' or receipt.get('source_workspace')!='dakota-codex-only'
+            or receipt.get('target_profile')!='personal' or receipt.get('target_workspace')!='dakota-codex-only'
+            or type(receipt.get('imported_record_count')) is not int
+            or receipt['imported_record_count']<1
+            or _memoryd_record_count()!=receipt['imported_record_count']):
+        raise ValueError('A completed MemoryD transfer is required for registration')
+    return receipt
+
+
+def _memoryd_firewall_commands(network, bridge):
+    try:
+        subnet=ipaddress.ip_network(network['subnet'],strict=True)
+        gateway=ipaddress.ip_address(network['gateway'])
+        private_ranges=tuple(ipaddress.ip_network(value) for value in
+                             ('10.0.0.0/8','172.16.0.0/12','192.168.0.0/16'))
+        if (subnet.version!=4 or subnet.prefixlen<24 or gateway not in subnet
+                or not any(subnet.subnet_of(value) for value in private_ranges)
+                or not re.fullmatch(r'br-[a-f0-9]{12}',bridge)):
+            raise ValueError
+    except (KeyError,TypeError,ValueError):
+        raise ValueError('MemoryD firewall requires a private bridge subnet and gateway') from None
+    check=['sudo','-n','iptables','-C','ufw-user-input','-i',bridge,'-s',str(subnet),
+           '-d',str(gateway),'-p','tcp','--dport','8090','-j','ACCEPT']
+    allow=['sudo','-n','ufw','allow','in','on',bridge,'from',str(subnet),'to',str(gateway),
+           'port','8090','proto','tcp','comment','mcp-control-plane MemoryD private bridge']
+    return check,allow
+
+
+def memoryd_network_allow(data):
+    transfer=_require_completed_memoryd_transfer(data)
+    memoryd_health()
+    if not network_check(NETWORK):
+        raise ValueError('MemoryD private network is not owned by Kamal')
+    rows=json.loads(run(['docker','network','inspect',NETWORK['name']]))
+    if len(rows)!=1:
+        raise ValueError('MemoryD private bridge identity is ambiguous')
+    row=rows[0]
+    bridge=(row.get('Options') or {}).get('com.docker.network.bridge.name','br-'+row['Id'][:12])
+    check,allow=_memoryd_firewall_commands(NETWORK,bridge)
+    addresses=json.loads(run(['ip','-j','-4','address','show','dev',bridge]))
+    prefix=ipaddress.ip_network(NETWORK['subnet']).prefixlen
+    if not any(item.get('local')==NETWORK['gateway'] and item.get('prefixlen')==prefix
+               for row in addresses for item in row.get('addr_info',[])):
+        raise ValueError('MemoryD gateway is not assigned to the owned bridge')
+    ufw=run(['sudo','-n','ufw','status']).decode()
+    if not re.search(r'(?m)^Status: active\s*$',ufw):
+        raise ValueError('MemoryD private firewall requires active UFW')
+    run(['sudo','-n','iptables','-S','ufw-user-input'])
+    def rule_exists():
+        result=subprocess.run(check,capture_output=True,timeout=15)
+        if result.returncode not in (0,1):
+            raise ValueError('MemoryD firewall rule check failed')
+        return result.returncode==0
+    path=STATE/'bootstrap/memoryd-firewall.json'
+    previous=json.loads(private(path)) if path.exists() or path.is_symlink() else None
+    identity={'bridge':bridge,'subnet':NETWORK['subnet'],'gateway':NETWORK['gateway'],
+              'port':8090,'transfer_manifest_sha256':transfer['transfer_manifest_sha256']}
+    if previous and any(previous.get(key)!=value for key,value in identity.items()):
+        raise ValueError('MemoryD firewall receipt identity changed')
+    exists=rule_exists()
+    created_now=False
+    if not exists:
+        previous={**identity,'status':'pending','created':True}
+        write(path,previous)
+        run(allow,timeout=60)
+        created_now=True
+        if not rule_exists():
+            raise ValueError('MemoryD private firewall rule was not installed')
+    if not previous:
+        previous={**identity,'status':'active','created':False}
+        write(path,previous)
+    elif previous.get('status')!='active':
+        previous['status']='active';write(path,previous)
+    probe='import socket,sys; s=socket.create_connection((sys.argv[1],8090),timeout=5); s.close()'
+    run(['docker','exec','mcp-control-plane-schema-proxy','python3','-c',probe,NETWORK['gateway']],timeout=15)
+    return {**identity,'status':'PASS','rule_created':created_now,
+            'rule_owned':previous['created'],'bridge_reachable':True}
+
+
+def register_memoryd_app(data):
+    transfer=_require_completed_memoryd_transfer(data)
+    memoryd_health()
+    sys.path.insert(0, str(ROOT / 'scripts'))
+    import compose_control as c
+    os.environ.update(
+        EXECUTOR_URL='http://127.0.0.1:4312',
+        EXECUTOR_PAT_FILE=str(STATE / 'secrets/executor-pat'),
+    )
+    http, session = c.executor_session()
+    c.verify_compact(session)
+    url = f"http://{NETWORK['gateway']}:8090/mcp"
+    marker = STATE / 'bootstrap/memoryd-integration.json'
+    has_marker = marker.exists() or marker.is_symlink()
+    receipt = json.loads(private(marker)) if has_marker else None
+    if has_marker and not _valid_memoryd_receipt(receipt):
+        raise ValueError('MemoryD app receipt is invalid')
+    pending = STATE / 'bootstrap/memoryd-registration-pending.json'
+    has_intent = pending.exists() or pending.is_symlink()
+    intent = json.loads(private(pending)) if has_intent else None
+    if has_intent and not isinstance(intent,dict):
+        raise ValueError('MemoryD pending registration identity changed')
+    if not has_intent and receipt is None:
+        base=identity(NAMES['kamal']['executor'],exclude_memoryd=True)
+        _memoryd_require_recorded_base(base)
+        context,_=http.request('GET','/api/context')
+        org=context.get('organization')
+        if not isinstance(org,str) or not org:
+            raise ValueError('MemoryD registration organization is unavailable')
+        transfer_id=transfer['transfer_manifest_sha256']
+        intent={'status':'prepared','organization':org,'url':url,
+                'transfer_manifest_sha256':transfer_id,
+                'transfer_receipt_sha256':hashlib.sha256(private(_memoryd_receipt_path(transfer_id))).hexdigest(),
+                'source_sha256':hashlib.sha256(c.devsy_app_source(url).strip().encode()).hexdigest(),
+                'base_identity':base}
+        c.write_private(pending,json.dumps(intent)+'\n')
+    first_attempt=False
+    if intent is not None:
+        if intent.get('transfer_manifest_sha256')!=transfer['transfer_manifest_sha256']:
+            raise ValueError('MemoryD pending registration transfer changed')
+        identity(NAMES['kamal']['executor'],exclude_memoryd=True)
+        first_attempt=intent['status']=='prepared'
+        if not first_attempt and receipt is None:
+            from urllib.parse import quote
+            org=intent['organization']
+            inventory,_=http.request('GET','/api/organizations/'+quote(org,safe='')+'/inventory')
+            matches=[app for app in inventory['apps'] if app.get('slug')=='memoryd' or app.get('name')=='MemoryD']
+            if len(matches)!=1:
+                raise ValueError('MemoryD pending registration has no unique imported app; inspect before retrying')
+            receipt={'organization':org,'id':matches[0]['id'],'url':url}
+    def mark_importing():
+        identity(NAMES['kamal']['executor'],exclude_memoryd=True)
+        if json.loads(private(pending))!=intent:
+            raise ValueError('MemoryD pending registration changed before import')
+        intent['status']='importing'
+        c.write_private(pending,json.dumps(intent)+'\n')
+    registered = c.ensure_memoryd_app(http, url, receipt,
+        expected_organization=intent['organization'] if intent is not None else None,
+        require_absent=first_attempt, before_import=mark_importing if first_attempt else None)
+    if intent is not None:
+        identity(NAMES['kamal']['executor'],exclude_memoryd=True)
+    c.write_private(marker, json.dumps(registered)+'\n')
+    if intent is not None:
+        pending.unlink()
+    c.search_memoryd(session)
+    reads = c.probe_memoryd_reads(session)
+    denials = c.probe_memoryd_denials(url)
+    return {'registered': True, 'app_id': registered['id'], 'tool_count': 3,
+            'executor_discovery': 'PASS', 'read_smoke': reads,
+            'negative_checks': denials}
+
+
+def memoryd_reconcile_pending_registration(data):
+    """Reset only a verified, quiescent empty import under the controller lock."""
+    if (not isinstance(data,dict) or set(data)!={'confirm_import_quiescent'}
+            or data['confirm_import_quiescent'] is not True):
+        raise ValueError('Explicit confirmation that the MemoryD import is quiescent is required')
+    import compose_control as c
+    pending=STATE/'bootstrap/memoryd-registration-pending.json'
+    marker=STATE/'bootstrap/memoryd-integration.json'
+    _verify_private_directory(pending.parent)
+    original=private(pending)
+    intent=json.loads(original)
+    if not isinstance(intent,dict) or intent.get('status')!='importing':
+        raise ValueError('MemoryD reconciliation requires an importing registration intent')
+    if marker.exists() or marker.is_symlink():
+        raise ValueError('MemoryD reconciliation requires no app receipt')
+    identity(NAMES['kamal']['executor'],exclude_memoryd=True,require_memoryd_absent=True)
+    backup=pending.with_name('memoryd-registration-intent-backup-'+uuid.uuid4().hex+'.json')
+    fd=os.open(backup,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+    with os.fdopen(fd,'wb') as stream:
+        stream.write(original);stream.flush();os.fsync(stream.fileno())
+    directory_fd=os.open(backup.parent,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+    try:os.fsync(directory_fd)
+    finally:os.close(directory_fd)
+    if private(pending)!=original or marker.exists() or marker.is_symlink():
+        raise ValueError('MemoryD registration state changed during reconciliation')
+    identity(NAMES['kamal']['executor'],exclude_memoryd=True,require_memoryd_absent=True)
+    if private(pending)!=original or marker.exists() or marker.is_symlink():
+        raise ValueError('MemoryD registration state changed during reconciliation')
+    c.write_private(pending,json.dumps({**intent,'status':'prepared'})+'\n')
+    return {'status':'prepared','backup':str(backup),'app_created':False}
+
+
+def _verify_registered_memoryd_app():
+    marker=json.loads(private(STATE/'bootstrap/memoryd-integration.json'))
+    import compose_control as c
+    os.environ.update(EXECUTOR_URL='http://127.0.0.1:4312',
+                      EXECUTOR_PAT_FILE=str(STATE/'secrets/executor-pat'))
+    http,session=c.executor_session()
+    c.verify_compact(session)
+    url=f"http://{NETWORK['gateway']}:8090/mcp"
+    registered=c.ensure_memoryd_app(http,url,marker)
+    if registered!=marker:
+        raise ValueError('MemoryD app receipt does not match the registered app')
+    c.search_memoryd(session)
+    c.probe_memoryd_reads(session)
+    c.probe_memoryd_denials(url)
+    return registered
+
+
+def memoryd_reconcile_identity(data):
+    transfer=_require_completed_memoryd_transfer(data)
+    memoryd_health()
+    app=_verify_registered_memoryd_app()
+    base=identity(NAMES['kamal']['executor'],exclude_memoryd=True)
+    updated=identity(NAMES['kamal']['executor'])
+    if base==updated:
+        raise ValueError('MemoryD identity transition is missing its app')
+    transfer_id=transfer['transfer_manifest_sha256']
+    paths={name:STORE/(name+'.json') for name in ('current','previous')}
+    documents={name:json.loads(private(path)) for name,path in paths.items()
+               if path.exists() or path.is_symlink()}
+    if 'current' not in documents or documents['current'].get('authority')!='kamal':
+        raise ValueError('MemoryD identity transition requires a Kamal deployment receipt')
+    transition_path=STORE/f'memoryd-identity-{transfer_id}.json'
+    transition=json.loads(private(transition_path)) if transition_path.exists() or transition_path.is_symlink() else None
+    expected={'transfer_manifest_sha256':transfer_id,'previous_identity':base,
+              'updated_identity':updated,'memoryd_app_id':app['id'],
+              'has_previous':'previous' in documents}
+    if transition and (any(transition.get(key)!=value for key,value in expected.items())
+                       or transition.get('status') not in ('pending','complete')):
+        raise ValueError('MemoryD identity transition receipt changed')
+    if any(document.get('identity') not in (base,updated) for document in documents.values()):
+        raise ValueError('Executor identity drift prevents MemoryD reconciliation')
+    if transition is None and any(document.get('identity')!=base for document in documents.values()):
+        raise ValueError('Executor identity drift prevents MemoryD reconciliation')
+    for name,document in documents.items():
+        backup=STORE/f'pre-memoryd-{name}-{transfer_id}.json'
+        if backup.exists() or backup.is_symlink():
+            original=json.loads(private(backup))
+            if original.get('identity')!=base or {**original,'identity':document['identity']}!=document:
+                raise ValueError('MemoryD deployment receipt backup changed')
+        else:
+            if document.get('identity')!=base:
+                raise ValueError('MemoryD deployment receipt backup is missing')
+            write(backup,document)
+    if transition is None:
+        transition={**expected,'status':'pending'}
+        write(transition_path,transition)
+    changed=False
+    for name,document in documents.items():
+        if document['identity']==base:
+            document['identity']=updated
+            write(paths[name],document)
+            changed=True
+    if transition['status']!='complete':
+        transition['status']='complete';write(transition_path,transition)
+    return {'identity_updated':changed,'prior_identity_preserved':True,
+            'current_identity_matches':True,'previous_receipt_preserved':'previous' in documents}
 
 
 def lifecycle_check():
@@ -566,6 +1712,27 @@ def activation_identity(expected_identity,activation_id):
     return {'identity_preserved':True}
 
 
+def activation_record(data):
+    marker=_activation_marker(data.get('activation_id'))
+    if (set(data)!={'activation_id','source_sha','expected_identity','identity_preserved','original_stopped_attested'}
+            or data['identity_preserved'] is not True or data['original_stopped_attested'] is not True
+            or not re.fullmatch('[a-f0-9]{40}',data['source_sha'])
+            or not isinstance(data['expected_identity'],str)
+            or data['source_sha']!=marker['source_sha'] or data['expected_identity']!=marker['expected_identity']):
+        raise ValueError('Activation receipt input is invalid')
+    discovery=marker.get('memoryd_discovery')
+    if (marker.get('status')!='activating' or marker.get('original_stopped_attested') is not True
+            or discovery not in ('PASS','UNREGISTERED','UNAVAILABLE')
+            or marker.get('memoryd_restored') is not False):
+        raise ValueError('Activation receipt requires a completed MemoryD recovery smoke result')
+    if (STORE/'recovery-activation.json').exists():raise ValueError('Activation receipt already exists')
+    marker['status']='activated';write(STORE/'activation-in-progress.json',marker)
+    receipt={**data,'schema_version':1,'recorded_at_ns':time.time_ns(),
+             'memoryd_discovery':discovery,'memoryd_restored':False}
+    write(STORE/'recovery-activation.json',receipt)
+    return {'activation_recorded':True,'memoryd_discovery':discovery,'memoryd_restored':False}
+
+
 def activation_cleanup(activation_id,attempted_services):
     marker=_activation_marker(activation_id,allow_completed=True)
     if (not isinstance(attempted_services,list)
@@ -798,15 +1965,50 @@ def native_thread_read(client, session, supplied):
     return {"status": "PASS", "target": identity["target"]}
 
 
+def _recovery_memoryd_absent():
+    ids=run(['docker','ps','-aq']).decode().split()
+    rows=json.loads(run(['docker','inspect',*ids])) if ids else []
+    if not isinstance(rows,list) or len(rows)!=len(ids):
+        raise ValueError('MemoryD container inventory is invalid')
+    for row in rows:
+        if (not isinstance(row,dict) or not isinstance(row.get('Name'),str)
+                or not isinstance(row.get('Config'),dict)):
+            raise ValueError('MemoryD container inventory is invalid')
+        labels=row['Config'].get('Labels')
+        if labels is None:labels={}
+        if not isinstance(labels,dict):raise ValueError('MemoryD container labels are invalid')
+        if (row['Name'].lstrip('/') in MEMORYD_SERVICES
+                or labels.get('service') in MEMORYD_SERVICES
+                or (labels.get('com.docker.compose.project')=='codex-control-plane'
+                    and labels.get('com.docker.compose.service') in ('memoryd','memoryd-mcp'))):
+            return False
+    volumes=set(run(['docker','volume','ls','--format','{{.Name}}']).decode().split())
+    return MEMORYD_VOLUME not in volumes
+
+
 def smoke(request=None):
     request = request or {}
     if not isinstance(request, dict):
         raise ValueError("Smoke request is invalid")
+    recovery=None
+    if 'activation_id' in request:
+        recovery=_activation_marker(request['activation_id'])
+        if recovery.get('status')!='activating' or recovery.get('original_stopped_attested') is not True:
+            raise ValueError('Recovery smoke requires an active authorized activation')
     require_native = request.get("require_native") is True
     os.environ.update(EXECUTOR_URL='http://127.0.0.1:4312',EXECUTOR_PAT_FILE=str(STATE/'secrets/executor-pat'))
     sys.path.insert(0,str(ROOT/'scripts'));import compose_control as c
     _,m=c.executor_session();c.verify_compact(m)
     profile=json.loads(private(STATE/'bootstrap/devsy-integration.json'))['profile'];c.read_devsy(m,profile)
+    memoryd_discovery = 'UNREGISTERED'
+    memoryd_marker = STATE / 'bootstrap/memoryd-integration.json'
+    if memoryd_marker.exists() or memoryd_marker.is_symlink():
+        private(memoryd_marker)
+        if recovery is not None and _recovery_memoryd_absent():
+            memoryd_discovery = 'UNAVAILABLE'
+        else:
+            c.search_memoryd(m)
+            memoryd_discovery = 'PASS'
     supplied=request.get("native_codex")
     if supplied is None:
         native={"status":"UNCONFIGURED"}
@@ -816,7 +2018,13 @@ def smoke(request=None):
         if native["status"] == "UNCONFIGURED":
             raise ValueError("qualified native read is required")
         raise ValueError("qualified native read failed: " + native.get("error_code", "UNKNOWN"))
-    return {'catalog':'PASS','native_read':native,'devsy_reads':'PASS'}
+    result={'catalog':'PASS','native_read':native,'devsy_reads':'PASS',
+            'memoryd_discovery':memoryd_discovery}
+    if recovery is not None:
+        recovery.update(memoryd_discovery=memoryd_discovery,memoryd_restored=False)
+        write(STORE/'activation-in-progress.json',recovery)
+        result['memoryd_restored']=False
+    return result
 
 
 def _devsy_bootstrap(data):
@@ -880,11 +2088,12 @@ def main():
     if action=='lock':_ensure_private_state_store()
     elif action!='activation-plan' and action.startswith('activation-'):
         _verify_private_directory(STATE);_verify_private_directory(STORE)
-    elif action not in ('activation-plan','devsy-plan','devsy-check','devsy-rollback-plan',
+    elif action not in ('activation-plan','memoryd-preflight','memoryd-health','memoryd-wait','memoryd-status','memoryd-inventory','memoryd-transfer-preflight','memoryd-executor-origin-check',
+                        'devsy-plan','devsy-check','devsy-rollback-plan',
                         'devsy-tap-reconcile-plan','devsy-tap-reconcile',
                         'devsy-tap-rollback-plan','devsy-tap-rollback'):
         STORE.mkdir(mode=0o700,exist_ok=True)
-    data=json.load(sys.stdin) if action in ('images','image-check','network','network-check','wait','commit','baseline','set-current','rollback-commit','restart-local','activation-plan','activation-preflight','activation-begin','activation-pull-images','activation-install','activation-track','activation-seed','activation-network','activation-identity','activation-cleanup','activation-record','smoke','devsy-plan','devsy-check','devsy-rollback-plan','devsy-apply','devsy-rollback','devsy-scope-rebind-check','devsy-scope-rebind','devsy-bridge-path-check','devsy-bridge-path-apply','devsy-tap-reconcile-plan','devsy-tap-reconcile','devsy-tap-rollback-plan','devsy-tap-rollback') else {}
+    data=json.load(sys.stdin) if action in ('images','image-check','network','network-check','wait','commit','baseline','set-current','rollback-commit','restart-local','activation-plan','activation-preflight','activation-begin','activation-pull-images','activation-install','activation-track','activation-seed','activation-network','activation-identity','activation-cleanup','activation-record','smoke','memoryd-adapter-prepare','memoryd-adapter-finalize','memoryd-transfer-prepare','memoryd-import-bundles','memoryd-network-allow','memoryd-app-register','memoryd-registration-reconcile','memoryd-identity-reconcile','devsy-plan','devsy-check','devsy-rollback-plan','devsy-apply','devsy-rollback','devsy-scope-rebind-check','devsy-scope-rebind','devsy-bridge-path-check','devsy-bridge-path-apply','devsy-tap-reconcile-plan','devsy-tap-reconcile','devsy-tap-rollback-plan','devsy-tap-rollback') else {}
     if action=='activation-plan':result=activation_plan(data['generation_dir'])
     elif action=='activation-preflight':
         info=_ensure_empty_activation_target(data['generation_dir'],allow_lock=True)
@@ -899,19 +2108,7 @@ def main():
     elif action=='activation-network':result=activation_network(data['activation_id'])
     elif action=='activation-identity':result=activation_identity(data['expected_identity'],data['activation_id'])
     elif action=='activation-cleanup':result=activation_cleanup(data['activation_id'],data['attempted_services'])
-    elif action=='activation-record':
-        marker=_activation_marker(data.get('activation_id'))
-        if (set(data)!={'activation_id','source_sha','expected_identity','identity_preserved','original_stopped_attested'}
-                or data['identity_preserved'] is not True or data['original_stopped_attested'] is not True
-                or not re.fullmatch('[a-f0-9]{40}',data['source_sha'])
-                or not isinstance(data['expected_identity'],str)
-                or data['source_sha']!=marker['source_sha'] or data['expected_identity']!=marker['expected_identity']):
-            raise ValueError('Activation receipt input is invalid')
-        marker['status']='activated';write(STORE/'activation-in-progress.json',marker)
-        receipt={**data,'schema_version':1,'recorded_at_ns':time.time_ns()}
-        if (STORE/'recovery-activation.json').exists():raise ValueError('Activation receipt already exists')
-        write(STORE/'recovery-activation.json',receipt)
-        result={'activation_recorded':True}
+    elif action=='activation-record':result=activation_record(data)
     elif action=='lock':
         fd=os.open(STORE/'deploy.lock',os.O_CREAT|os.O_RDWR|os.O_NOFOLLOW,0o600)
         s=os.fstat(fd)
@@ -919,6 +2116,26 @@ def main():
         fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB);print('LOCKED',flush=True);sys.stdin.read();return
     elif action=='snapshot':result=snapshot()
     elif action=='status':result=status()
+    elif action=='memoryd-preflight':result=memoryd_preflight()
+    elif action=='memoryd-health':result=memoryd_health()
+    elif action=='memoryd-pin-adapter-image':result=memoryd_pin_adapter_image()
+    elif action=='memoryd-adapter-pin-check':result=memoryd_adapter_pin_check()
+    elif action=='memoryd-executor-origin-check':result=memoryd_executor_origin_check()
+    elif action=='memoryd-wait':result=memoryd_wait()
+    elif action=='memoryd-status':result=memoryd_status()
+    elif action=='memoryd-inventory':result=memoryd_inventory()
+    elif action=='memoryd-adapter-prepare':result=memoryd_adapter_prepare(data)
+    elif action=='memoryd-adapter-finalize':result=memoryd_adapter_finalize(data)
+    elif action=='memoryd-transfer-preflight':result=memoryd_transfer_preflight()
+    elif action=='memoryd-transfer-prepare':result=memoryd_transfer_prepare(data)
+    elif action=='memoryd-import-bundles':result=memoryd_import_bundles(data)
+    elif action=='memoryd-network-allow':result=memoryd_network_allow(data)
+    elif action=='memoryd-app-register':result=register_memoryd_app(data)
+    elif action=='memoryd-registration-check':
+        _verify_registered_memoryd_app();result={'registration_verified':True}
+    elif action=='memoryd-registration-reconcile':result=memoryd_reconcile_pending_registration(data)
+    elif action=='memoryd-base-identity':result={'identity':identity(NAMES['kamal']['executor'],exclude_memoryd=True)}
+    elif action=='memoryd-identity-reconcile':result=memoryd_reconcile_identity(data)
     elif action=='lifecycle-check':result=lifecycle_check()
     elif action=='identity-check':
         if identity(NAMES['kamal']['executor'])!=json.loads(private(STORE/'current.json'))['identity']:

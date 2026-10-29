@@ -104,6 +104,8 @@ def test_cas_failure_restores_only_cas_and_uses_cas_backup():
     def remote(action, data=None):
         nonlocal smoke_count
         calls.append((action, data))
+        if action == 'memoryd-inventory':
+            return {'status':'ABSENT'}
         if action == "snapshot":
             return before if calls.count(("snapshot", None)) == 1 else after
         if action == "current":
@@ -530,6 +532,8 @@ def test_source_sync_failure_is_inside_protected_deployment_path(rollback_fails)
 
     def remote(action, data=None):
         calls.append(action)
+        if action == 'memoryd-inventory':
+            return {'status':'ABSENT'}
         if action == "snapshot":
             return before
         if action == "current":
@@ -597,6 +601,8 @@ def test_adoption_network_check_precedes_compose_stop():
 
     def remote(action, data=None):
         calls.append(action)
+        if action == 'memoryd-inventory':
+            return {'status':'ABSENT'}
         if action == "snapshot":
             return before if calls.count("snapshot") == 1 else after
         if action == "current":
@@ -867,6 +873,7 @@ def test_explicit_rollback_recovers_unhealthy_generation_without_healthy_precond
     previous=generation(authority='kamal');calls=[]
     def remote(action,data=None):
         calls.append(action)
+        if action=='memoryd-inventory':return {'status':'ABSENT'}
         if action in ('current','rollback-target'):return previous
         if action=='status':return {'inventory':{'executor':{'state':'running'},'cas':{'state':'exited'}},'healthy':False}
         if action=='snapshot':raise AssertionError('Broken deployment cannot satisfy healthy snapshot')

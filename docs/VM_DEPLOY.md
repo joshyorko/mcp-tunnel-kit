@@ -33,6 +33,10 @@ The equivalent shortcuts are `make deploy`, `make cas`, `make down`, `make up`,
 start checks Executor identity before starting the tunnel. Both use the same VM
 lock as GitHub deployments. Full start/stop also manages only the stack's existing
 host Devsy service. Other applications and the host's native Codex are unaffected.
+If managed MemoryD is active, stop it first with
+`bin/kamal accessory stop memoryd`; full-stack stop refuses until MemoryD is
+stopped. Full-stack start leaves MemoryD unchanged. Start it separately with
+`bin/kamal accessory start memoryd` if needed. Its named volume is retained.
 
 This repository's `accessory deploy` command is an operator alias for the tested
 Kamal accessory reboot sequence, with image pins, backup, health checks and

@@ -74,6 +74,9 @@ def write_private(path: Path, value: str) -> None:
     private_directory(path.parent)
     if path.exists() or path.is_symlink():
         if read_private(path, strip=False) == value:
+            directory_fd=os.open(path.parent,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+            try:os.fsync(directory_fd)
+            finally:os.close(directory_fd)
             return
     with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, delete=False) as handle:
         temporary = Path(handle.name)
@@ -82,6 +85,9 @@ def write_private(path: Path, value: str) -> None:
             handle.flush()
             os.fsync(handle.fileno())
             os.replace(temporary, path)
+            directory_fd=os.open(path.parent,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+            try:os.fsync(directory_fd)
+            finally:os.close(directory_fd)
         finally:
             temporary.unlink(missing_ok=True)
 
@@ -649,17 +655,22 @@ def ensure_codex_app(http, url, receipt=None):
     return ensure_mcp_app(http, url, "Codex", receipt)
 
 
-def ensure_mcp_app(http, url, name, receipt=None):
-    if name not in {"Codex", "Devsy"}:
-        raise ControlError("Only the configured Codex and Devsy integrations are managed.")
+def ensure_mcp_app(http, url, name, receipt=None, *, expected_organization=None, require_absent=False,
+                   before_import=None):
+    if name not in {"Codex", "Devsy", "MemoryD"}:
+        raise ControlError("Only the configured Codex, Devsy, and MemoryD integrations are managed.")
     slug = name.lower()
     context, _ = http.request("GET", "/api/context")
     organization = context.get("organization")
     if not isinstance(organization, str) or not organization:
         raise ControlError("Use a PAT scoped to the browser-created organization.")
+    if expected_organization is not None and organization != expected_organization:
+        raise ControlError("The MCP app organization changed; no app was imported.")
     prefix = "/api/organizations/" + urllib.parse.quote(organization, safe="")
     inventory, _ = http.request("GET", prefix + "/inventory")
     existing = [app for app in inventory["apps"] if app.get("slug") == slug or app.get("name") == name]
+    if require_absent and existing:
+        raise ControlError("An unreceipted MCP app appeared; no app was imported.")
     if receipt:
         identity = [app for app in inventory["apps"] if app.get("id") == receipt.get("id")]
         if (receipt.get("organization") != organization or receipt.get("url") != url
@@ -671,6 +682,8 @@ def ensure_mcp_app(http, url, name, receipt=None):
     if existing:
         app = existing[0]
     else:
+        if before_import is not None:
+            before_import()
         app, _ = http.request("POST", prefix + "/apps/import", {"source": {"kind": "mcp", "name": name, "url": url}})
     if app.get("slug") != slug or not app.get("id") or not app.get("activeDeployment"):
         raise ControlError("MCP import returned an unexpected or undeployed app; inspect the dashboard.")
@@ -715,6 +728,84 @@ def ensure_mcp_app(http, url, name, receipt=None):
                 raise ControlError('The private owner Devsy profile is absent or ambiguous.')
             result['profile'] = selected[0]['id']
     return result
+
+
+def verify_memoryd_catalog(tools):
+    expected = {"memory_status", "memory_recall", "memory_search"}
+    if not isinstance(tools, list) or len(tools) != len(expected):
+        raise ControlError("MemoryD must expose exactly the three read-only tools.")
+    names = {tool.get("name") for tool in tools if isinstance(tool, dict)}
+    if names != expected:
+        raise ControlError("MemoryD tool discovery contains missing, duplicate, or write tools.")
+    for tool in tools:
+        annotations = tool.get("annotations", {})
+        schema = tool.get("inputSchema", {})
+        properties = schema.get("properties", {}) if isinstance(schema, dict) else {}
+        if (annotations.get("readOnlyHint") is not True
+                or annotations.get("destructiveHint") is not False
+                or not isinstance(properties, dict)
+                or "profile" in properties or "workspace" in properties
+                or schema.get("additionalProperties") is not False):
+            raise ControlError("MemoryD tool scope or read-only annotations are invalid.")
+
+
+def ensure_memoryd_app(http, url, receipt=None, *, expected_organization=None, require_absent=False,
+                       before_import=None):
+    parsed = urllib.parse.urlsplit(url)
+    try:
+        address = ipaddress.ip_address(parsed.hostname)
+    except (TypeError, ValueError):
+        address = None
+    if (parsed.scheme != "http" or address is None or not address.is_private
+            or parsed.port is None or not 1 <= parsed.port <= 65535
+            or parsed.path != "/mcp" or parsed.query
+            or parsed.fragment or parsed.username or parsed.password):
+        raise ControlError("MemoryD MCP must use a private managed HTTP endpoint.")
+    upstream = Mcp(Http(url.removesuffix("/mcp")), "/mcp")
+    verify_memoryd_catalog(upstream.tools())
+    return ensure_mcp_app(http, url, "MemoryD", receipt,
+                          expected_organization=expected_organization, require_absent=require_absent,
+                          before_import=before_import)
+
+
+def probe_memoryd_denials(url):
+    upstream=Mcp(Http(url.removesuffix("/mcp")),"/mcp")
+    verify_memoryd_catalog(upstream.tools())
+    write=upstream.call('tools/call',{'name':'memory_conclude','arguments':{'content':'denial fixture'}})
+    scope=upstream.call('tools/call',{'name':'memory_search','arguments':{'query':'scope fixture','workspace':'other-workspace'}})
+    if write.get('isError') is not True or scope.get('isError') is not True:
+        raise ControlError('MemoryD write or scope-override negative test did not fail closed.')
+    return {'write_blocked':True,'scope_override_blocked':True}
+
+
+def search_memoryd(session):
+    data = execution(session.call("tools/call", {"name": "execute", "arguments": {"code":
+        "const result = await tools.search(" + json.dumps({"namespace": "memoryd", "query": "memory", "limit": 100}) + "); return {items: result.items.map(item => ({path: item.path}))};"}}))
+    if (data.get("status") != "completed" or not data.get("execution", {}).get("ok")
+            or data.get("unavailableApps")):
+        raise ControlError("MemoryD discovery through Executor is unavailable; inspect app access and service health.")
+    paths = {item.get("path") for item in data["execution"]["value"].get("items", [])}
+    expected = {"tools.memoryd.memory_status", "tools.memoryd.memory_recall", "tools.memoryd.memory_search"}
+    if not expected.issubset(paths):
+        raise ControlError("Executor MemoryD discovery lacks the expected read-only tools.")
+
+
+def probe_memoryd_reads(session):
+    code = '''const values = await Promise.all([
+  tools.memoryd.memory_status({}),
+  tools.memoryd.memory_recall({query: "Dakota Codex durable memory"}),
+  tools.memoryd.memory_search({query: "Dakota Codex durable memory", limit: 3}),
+])
+return {read_only_tools: values.map(value => ({
+  isError: value?.isError === true,
+  contentBlocks: Array.isArray(value?.content) ? value.content.length : 0,
+}))}'''
+    data = execution(session.call("tools/call", {"name": "execute", "arguments": {"code": code}}))
+    values = data.get("execution", {}).get("value", {}).get("read_only_tools", [])
+    if (data.get("status") != "completed" or not data.get("execution", {}).get("ok")
+            or len(values) != 3 or any(item.get("isError") or item.get("contentBlocks", 0) < 1 for item in values)):
+        raise ControlError("Executor MemoryD status, recall, or search smoke failed.")
+    return {"status": "PASS", "tools_called": 3, "content_blocks": [item["contentBlocks"] for item in values]}
 
 
 def verify_devsy_catalog(tools):
@@ -774,6 +865,9 @@ def bootstrap():
     enabled = os.environ.get("DEVSY_MCP_ENABLED", "false")
     if enabled not in {"true", "false"}:
         raise ControlError("DEVSY_MCP_ENABLED must be true or false.")
+    memoryd_enabled = os.environ.get("MEMORYD_MCP_ENABLED", "false")
+    if memoryd_enabled not in {"true", "false"}:
+        raise ControlError("MEMORYD_MCP_ENABLED must be true or false.")
     if enabled == "true":
         devsy_url = os.environ["DEVSY_MCP_URL"]
         if devsy_url != f"http://{address}:8089/mcp":
@@ -786,7 +880,21 @@ def bootstrap():
         write_private(marker, json.dumps(receipt) + "\n")
         search_devsy(session)
         read_devsy(session, receipt.get('profile'))
+    if memoryd_enabled == "true":
+        memoryd_url = os.environ["MEMORYD_MCP_URL"]
+        if memoryd_url != f"http://{address}:8090/mcp":
+            raise ControlError("MemoryD import must use the private managed gateway at port 8090 and /mcp.")
+        marker = state / "memoryd-integration.json"
+        receipt = json.loads(read_private(marker)) if marker.exists() or marker.is_symlink() else None
+        receipt = ensure_memoryd_app(http, memoryd_url, receipt)
+        write_private(marker, json.dumps(receipt) + "\n")
+        search_memoryd(session)
+    if enabled == "true" and memoryd_enabled == "true":
+        print("Codex, Devsy, and read-only MemoryD retained; Executor discovery ready.")
+    elif enabled == "true":
         print("Codex and Devsy retained; browser MCP, discovery and harmless Devsy reads ready.")
+    elif memoryd_enabled == "true":
+        print("Codex and read-only MemoryD retained; Executor discovery ready. Devsy disabled.")
     else:
         print("Codex import retained; authenticated browser MCP and Codex discovery ready. Devsy disabled.")
 
