@@ -40,6 +40,9 @@ def guarded_fixture(tmp_path):
         'bundles': {},
     }
     receipt_bytes = encoded(receipt)
+    active_receipt = {**receipt, 'status': 'complete', 'transfer_manifest_sha256': ACTIVE_ID,
+                      'destination_instance_id': INSTANCE_ID, 'imported_record_count': 2}
+    active_receipt_bytes = encoded(active_receipt)
     marker = {
         'schema_version': 1, 'status': 'abandoned', 'policy': 'active_only',
         'legacy_transfer_id': LEGACY_ID, 'legacy_receipt_sha256': digest(receipt_bytes),
@@ -49,7 +52,7 @@ def guarded_fixture(tmp_path):
                             'root_count': 3}],
         'legacy_source_record_count': 3, 'active_source_record_count': 2,
         'source_database_record_count': 3, 'excluded_archived_record_count': 1,
-        'active_transfer_id': ACTIVE_ID, 'active_receipt_sha256': '3' * 64,
+        'active_transfer_id': ACTIVE_ID, 'active_receipt_sha256': digest(active_receipt_bytes),
         'active_staged_manifest_sha256': '4' * 64, 'source_database_sha256': 'd' * 64,
         'source_instance_id': 'cmi_' + 'e' * 32, 'source_profile': 'personal',
         'source_workspace': 'dakota-codex-only', 'target_profile': 'personal',
@@ -69,6 +72,7 @@ def guarded_fixture(tmp_path):
         ('bootstrap/memoryd-transfer.json', 'file', receipt_bytes, 0o400),
         (f'bootstrap/memoryd-legacy-receipt-{LEGACY_ID}.json', 'file', receipt_bytes, 0o600),
         (f'bootstrap/memoryd-abandonment-{LEGACY_ID}.json', 'file', marker_bytes, 0o600),
+        (f'bootstrap/memoryd-transfer-{ACTIVE_ID}.json', 'file', active_receipt_bytes, 0o600),
     ]
     restored, _ = captured_fixture(tmp_path, essential_changes=changes)
     backup = restored / 'vm-snapshot/memoryd/backup.db'
@@ -126,7 +130,9 @@ def replace_guard_marker(restored, update):
 
 @pytest.mark.parametrize('alteration', ['downgrade', 'downgrade_writable', 'missing_marker', 'wrong_marker_hash', 'writable_latch',
                                         'wrong_backup', 'foreign_readonly', 'wrong_destination', 'wrong_roots',
-                                        'ledger_receipt', 'same_id_receipt', 'raw_legacy_bundle', 'bad_pre_fence'])
+                                        'ledger_receipt', 'same_id_receipt', 'raw_legacy_bundle', 'bad_pre_fence',
+                                        'active_receipt', 'missing_active', 'active_scope', 'active_count',
+                                        'active_identity', 'verification_count', 'verification_archived'])
 def test_guard_tampering_fails_before_prepared_output(tmp_path, alteration):
     restored, _ = guarded_fixture(tmp_path)
     archive = restored / 'vm-snapshot/essential.tar'
@@ -147,6 +153,23 @@ def test_guard_tampering_fails_before_prepared_output(tmp_path, alteration):
         rewrite_member(archive, 'bootstrap/memoryd-transfer.json', mode=0o600)
     elif alteration == 'wrong_backup':
         rewrite_member(archive, f'bootstrap/memoryd-legacy-receipt-{LEGACY_ID}.json', content=b'{}\n')
+    elif alteration == 'active_receipt':
+        rewrite_member(archive, f'bootstrap/memoryd-transfer-{ACTIVE_ID}.json', content=b'{}\n')
+    elif alteration == 'missing_active':
+        rewrite_member(archive, f'bootstrap/memoryd-transfer-{ACTIVE_ID}.json', remove=True)
+    elif alteration in ('active_scope', 'active_count', 'active_identity'):
+        name = f'bootstrap/memoryd-transfer-{ACTIVE_ID}.json'
+        with tarfile.open(archive, 'r:') as source:
+            active = json.load(source.extractfile(name))
+        if alteration == 'active_scope':
+            active['target_workspace'] = 'other'
+        elif alteration == 'active_count':
+            active['imported_record_count'] = 3
+        else:
+            active['destination_instance_id'] = 'cmi_' + '0' * 32
+        raw = encoded(active)
+        rewrite_member(archive, name, content=raw)
+        replace_guard_marker(restored, lambda m: m.update(active_receipt_sha256=digest(raw)))
     elif alteration == 'foreign_readonly':
         rewrite_member(archive, 'bootstrap/codex-integration.json', mode=0o400)
     elif alteration == 'wrong_destination':
@@ -155,6 +178,10 @@ def test_guard_tampering_fails_before_prepared_output(tmp_path, alteration):
         replace_guard_marker(restored, lambda m: m['legacy_bundles'][0].update(root_count=2))
     elif alteration == 'bad_pre_fence':
         replace_guard_marker(restored, lambda m: m.update(pre_fence_backup_size_bytes=0))
+    elif alteration == 'verification_count':
+        replace_guard_marker(restored, lambda m: m.update(verification_active_count=3))
+    elif alteration == 'verification_archived':
+        replace_guard_marker(restored, lambda m: m.update(verification_archived_count=1))
     elif alteration == 'ledger_receipt':
         backup = restored / 'vm-snapshot/memoryd/backup.db'
         with sqlite3.connect(backup) as db:

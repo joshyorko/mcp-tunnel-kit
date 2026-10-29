@@ -694,6 +694,8 @@ def _validate_legacy_guard(guard, receipt, marker, memoryd, database):
             or type(marker.get("pre_fence_backup_size_bytes")) is not int
             or not 0 < marker["pre_fence_backup_size_bytes"] <= MAX_FILE_BYTES
             or marker["legacy_import_receipt_count"] != 0
+            or marker["verification_active_count"] != marker["active_source_record_count"]
+            or marker["verification_archived_count"] != 0
             or marker["legacy_source_record_count"] != marker["source_database_record_count"]
             or marker["active_source_record_count"] + marker["excluded_archived_record_count"] != marker["legacy_source_record_count"]
             or marker["active_transfer_id"] == guard["legacy_transfer_id"]
@@ -749,6 +751,18 @@ def _validate_legacy_guard(guard, receipt, marker, memoryd, database):
         raise _fail("The captured MemoryD import ledger cannot be validated.") from None
 
 
+def _validate_guard_active_receipt(marker, receipt):
+    if (not isinstance(receipt, dict) or type(receipt.get("schema_version")) is not int
+            or receipt["schema_version"] != 1 or receipt.get("status") != "complete"
+            or receipt.get("transfer_manifest_sha256") != marker["active_transfer_id"]
+            or any(receipt.get(key) != marker[key] for key in (
+                "source_database_sha256", "source_instance_id", "source_profile", "source_workspace",
+                "target_profile", "target_workspace", "destination_instance_id"))
+            or type(receipt.get("imported_record_count")) is not int
+            or receipt["imported_record_count"] != marker["active_source_record_count"]):
+        raise _fail("The completed active import receipt does not match the legacy attestation.")
+
+
 def _guard_archive(guard, entries, archive, memoryd, database):
     _validate_guard_descriptor(guard)
     transfer_id = guard["legacy_transfer_id"]
@@ -767,6 +781,10 @@ def _guard_archive(guard, entries, archive, memoryd, database):
         raise _fail("The preserved legacy receipt does not match the latch.")
     marker = _archive_json(archive, attestation)
     _validate_legacy_guard(guard, receipt, marker, memoryd, database)
+    active = entries.get("bootstrap/memoryd-transfer-" + marker["active_transfer_id"] + ".json")
+    if not active or active.kind != "file" or active.mode != 0o600 or active.sha256 != marker["active_receipt_sha256"]:
+        raise _fail("The completed active import receipt is missing or changed.")
+    _validate_guard_active_receipt(marker, _archive_json(archive, active))
     names = {bundle["path"] for bundle in marker["legacy_bundles"]}
     if any(PurePosixPath(name).name in names for name in entries):
         raise _fail("The legacy import guard must not archive staged bundle payloads.")
@@ -798,6 +816,13 @@ def _guard_generation(root, prepared, rows):
     attestation = _read_json(root / marker)
     _validate_legacy_guard(guard, _read_json(root / latch, mode=0o400), attestation,
                            prepared["memoryd"], root / "memoryd/backup.db")
+    active = "state/bootstrap/memoryd-transfer-" + attestation["active_transfer_id"] + ".json"
+    active_row = rows.get(active)
+    if (not isinstance(active_row, dict) or active_row.get("type") != "file"
+            or active_row.get("mode") != 0o600 or active_row.get("sha256") != attestation["active_receipt_sha256"]
+            or _hash_regular_file(root / active, allowed_modes={0o600})[2] != attestation["active_receipt_sha256"]):
+        raise _fail("The prepared active import receipt is missing or changed.")
+    _validate_guard_active_receipt(attestation, _read_json(root / active))
     names = {bundle["path"] for bundle in attestation["legacy_bundles"]}
     if any(PurePosixPath(name).name in names for name in rows):
         raise _fail("The prepared legacy guard contains a staged bundle payload.")
