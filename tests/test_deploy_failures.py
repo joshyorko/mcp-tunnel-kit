@@ -781,14 +781,35 @@ def test_full_backup_captures_recovery_inputs_and_consistent_database_map(tmp_pa
     assert not any("runtime-source.bundle" in name for name in members)
 
     memoryd_state = {"status": "absent"}
+    events.clear()
+    def wait_for_executor(owner, name):
+        assert (owner, name) == ("kamal", "executor")
+        events.append("executor-ready")
+    def capture_after_health(*_args, **_kwargs):
+        events.append("memoryd-capture")
+        return memoryd_state
     with patch.object(h,"inspect",return_value=("kamal",{"kamal":{"executor":{"Id":"executor-id"}}},[])), \
          patch.object(h,"run",side_effect=run), \
          patch.object(h,"subprocess",SimpleNamespace(Popen=lambda *args,**kwargs:Guard(),run=cp,DEVNULL=subprocess.DEVNULL)), \
          patch.object(h,"memoryd_capture_preflight",return_value=memoryd_state), \
-         patch.object(h,"capture_memoryd",return_value=memoryd_state) as capture:
+         patch.object(h,"wait_service",side_effect=wait_for_executor), \
+         patch.object(h,"capture_memoryd",side_effect=capture_after_health) as capture:
         recovery=h.backup(include_memoryd=True)
     assert recovery["memoryd"] == memoryd_state
+    assert events.index("unpause") < events.index("executor-ready") < events.index("memoryd-capture")
     capture.assert_called_once_with(Path(recovery["backup"])/"memoryd", expected=memoryd_state)
+
+    events.clear()
+    with patch.object(h,"inspect",return_value=("kamal",{"kamal":{"executor":{"Id":"executor-id"}}},[])), \
+         patch.object(h,"run",side_effect=run), \
+         patch.object(h,"subprocess",SimpleNamespace(Popen=lambda *args,**kwargs:Guard(),run=cp,DEVNULL=subprocess.DEVNULL)), \
+         patch.object(h,"memoryd_capture_preflight",return_value=memoryd_state), \
+         patch.object(h,"wait_service",side_effect=ValueError("health deadline")), \
+         patch.object(h,"capture_memoryd") as capture:
+        with pytest.raises(ValueError,match="health deadline"):
+            h.backup(include_memoryd=True)
+    assert "unpause" in events
+    capture.assert_not_called()
 
 
 def test_runtime_source_bundle_is_clonable_at_the_recorded_clean_revision(tmp_path):

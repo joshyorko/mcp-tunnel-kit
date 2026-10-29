@@ -3495,6 +3495,7 @@ def backup(*, include_memoryd=False):
     (directory/'essential.tar').chmod(0o600)
     result = {'backup':str(directory),'executor_sha256':hashlib.file_digest(path.open('rb'),'sha256').hexdigest()}
     if include_memoryd:
+        wait_service(owner,'executor')
         result['memoryd'] = capture_memoryd(directory / 'memoryd', expected=memoryd_state)
         if memoryd_state.get('legacy_guard'):
             result['legacy_guard']=memoryd_state['legacy_guard']
