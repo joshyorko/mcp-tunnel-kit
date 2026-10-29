@@ -143,10 +143,15 @@ def ssh_args(command):
     return ['ssh','-F',str(SSH),'-o','BatchMode=yes','-o','StrictHostKeyChecking=yes','-o','ForwardAgent=no',HOST,command]
 
 
+REMOTE_STDIN_BOOTSTRAP="import sys;exec(compile(sys.stdin.buffer.readline().decode('utf-8'),'<mcp-controller>','exec'))"
+
+
 def remote(action,data=None):
     source=remote_source()
-    argv=ssh_args(shlex.join(['python3','-c',source,action,encode_instance_profile(INSTANCE)]))
-    r=subprocess.run(argv,input='' if data is None else json.dumps(data),text=True,capture_output=True,timeout=900)
+    if '\n' in source:raise ValueError('Remote controller source must occupy one line')
+    argv=ssh_args(shlex.join(['python3','-c',REMOTE_STDIN_BOOTSTRAP,action,encode_instance_profile(INSTANCE)]))
+    payload=source+'\n'+('' if data is None else json.dumps(data))
+    r=subprocess.run(argv,input=payload,text=True,capture_output=True,timeout=900)
     if r.returncode:raise RuntimeError('VM '+action+' refused; '+r.stderr.strip()[:300])
     return json.loads(r.stdout)
 
@@ -154,8 +159,10 @@ def remote(action,data=None):
 @contextlib.contextmanager
 def lock():
     source=remote_source()
-    p=subprocess.Popen(ssh_args(shlex.join(['python3','-c',source,'lock',encode_instance_profile(INSTANCE)])),stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+    if '\n' in source:raise ValueError('Remote controller source must occupy one line')
+    p=subprocess.Popen(ssh_args(shlex.join(['python3','-c',REMOTE_STDIN_BOOTSTRAP,'lock',encode_instance_profile(INSTANCE)])),stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
     try:
+        p.stdin.write(source+'\n');p.stdin.flush()
         if not select.select([p.stdout],[],[],15)[0] or p.stdout.readline().strip()!='LOCKED':raise RuntimeError('VM deployment lock unavailable')
         yield
         if p.poll() is not None:raise RuntimeError('VM deployment lock connection was lost')
