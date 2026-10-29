@@ -167,7 +167,7 @@ def activate(args, generation, prepared):
                         or receipt.get("memoryd_restored") is not False):
                     raise ValueError("Recovery receipt did not match MemoryD smoke status")
                 return {
-                    "mode": "ACTIVATED",
+                    "mode": "ACTIVATED_DEGRADED" if smoke["memoryd_discovery"] == "UNAVAILABLE" else "ACTIVATED",
                     "authority": "kamal",
                     "identity_preserved": True,
                     "single_tunnel": True,

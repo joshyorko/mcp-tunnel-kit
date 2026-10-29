@@ -128,7 +128,7 @@ def test_successful_activation_checks_identity_before_tunnel_and_tunnel_is_last(
          patch.object(deploy, "kamal", side_effect=kamal):
         result=activation.execute(cli_args(original_stopped=True,approve_activation=True))
 
-    assert result["mode"]=="ACTIVATED" and result["single_tunnel"] is True
+    assert result["mode"]=="ACTIVATED_DEGRADED" and result["single_tunnel"] is True
     assert result["memoryd_discovery"] == "UNAVAILABLE"
     assert result["memoryd_restored"] is False
     assert booted==[("boot","executor"),("boot","schema-proxy"),("boot","cas"),("boot","tunnel")]
