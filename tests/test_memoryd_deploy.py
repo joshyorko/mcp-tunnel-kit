@@ -25,7 +25,7 @@ def meminfo(*, total_kb, available_kb):
     return f"MemTotal: {total_kb} kB\nMemAvailable: {available_kb} kB\nSwapTotal: 0 kB\n"
 
 
-def write_transfer_fixture(home, source_root, selected_ids):
+def write_transfer_fixture(home, source_root, selected_ids, archived_ids=()):
     home.mkdir(mode=0o700)
     (home / 'exports').mkdir(mode=0o700)
     (home / 'backups').mkdir(mode=0o700)
@@ -37,6 +37,7 @@ def write_transfer_fixture(home, source_root, selected_ids):
     db = sqlite3.connect(home / 'memory.db')
     db.execute('CREATE TABLE memory_records (id TEXT, profile_id TEXT, workspace_id TEXT, archived INTEGER)')
     db.executemany('INSERT INTO memory_records VALUES (?, ?, ?, 0)', [(item, 'personal', 'dakota-codex-only') for item in selected_ids])
+    db.executemany('INSERT INTO memory_records VALUES (?, ?, ?, 1)', [(item, 'personal', 'dakota-codex-only') for item in archived_ids])
     db.commit()
     db.close()
     (home / 'memory.db').chmod(0o600)
@@ -52,7 +53,7 @@ def write_transfer_fixture(home, source_root, selected_ids):
             'source_profile': 'personal', 'source_workspace': 'dakota-codex-only',
             'target_profile': 'personal', 'target_workspace': 'dakota-codex-only',
         },
-        'selection': {'record_ids': [public_memory_id(item) for item in selected_ids], 'include_archived': True},
+        'selection': {'record_ids': [public_memory_id(item) for item in selected_ids], 'include_archived': False},
         'counts': {'root_memories': len(selected_ids)},
     }
     with zipfile.ZipFile(bundle, 'w') as archive:
@@ -64,7 +65,7 @@ def write_transfer_fixture(home, source_root, selected_ids):
         'sha256': f'sha256:{backup_sha}',
         'size_bytes': backup.stat().st_size,
         'integrity_ok': True,
-        'tables': [{'table': 'memory_records', 'rows': len(selected_ids)}],
+        'tables': [{'table': 'memory_records', 'rows': len(selected_ids) + len(archived_ids)}],
     }
     (home / 'backups/pre-transfer.db.manifest.json').write_text(json.dumps(backup_manifest))
     (home / 'backups/pre-transfer.db.manifest.json').chmod(0o600)
@@ -78,7 +79,8 @@ def write_transfer_fixture(home, source_root, selected_ids):
         'source_cutoff_at': '2026-10-29T00:00:00Z',
         'source_database_sha256': backup_sha,
         'source_record_count': len(selected_ids),
-        'source_database_record_count': len(selected_ids),
+        'source_database_record_count': len(selected_ids) + len(archived_ids),
+        'include_archived': False,
         'source_markdown_file_count': 1,
         'source_markdown_manifest_sha256': source_manifest_hash,
         'source_sync_cursor': {
@@ -106,8 +108,8 @@ def write_transfer_fixture(home, source_root, selected_ids):
             'omissions': {'secret_blocked': 0, 'boundary': 0, 'portability': 0},
         }],
     }
-    (home / 'exports/kamal-test-deploy-transfer-manifest.json').write_text(json.dumps(metadata))
-    (home / 'exports/kamal-test-deploy-transfer-manifest.json').chmod(0o600)
+    (home / 'exports/kamal-test-deploy-transfer-manifest-active.json').write_text(json.dumps(metadata))
+    (home / 'exports/kamal-test-deploy-transfer-manifest-active.json').chmod(0o600)
     return metadata
 
 
@@ -146,6 +148,47 @@ def test_memoryd_listener_parser_uses_listening_local_addresses_not_queue_depths
     )
 
     assert addresses == {"127.0.0.1:8787", "172.30.86.1:8090"}
+
+
+def test_memoryd_import_step_failure_reports_safe_phase(monkeypatch):
+    def fail(args, **_kwargs):
+        return vm_deploy_host.subprocess.CompletedProcess(
+            args, 1, b'', b'permission denied at /private/source.bundle')
+
+    monkeypatch.setattr(vm_deploy_host.subprocess, 'run', fail)
+
+    with pytest.raises(ValueError, match=r'^MemoryD import step bundle copy failed \(permission_denied\)$') as error:
+        vm_deploy_host._memoryd_run_step('bundle copy', ['docker', 'cp', 'private.bundle', 'container:/tmp/private.bundle'])
+    assert '/private/source.bundle' not in str(error.value)
+
+
+def test_memoryd_stages_only_hash_verified_bytes_through_container_stdin(tmp_path, monkeypatch):
+    path=tmp_path/'fixture.bundle'
+    path.write_bytes(b'portable fixture');path.chmod(0o600)
+    expected={'size_bytes':path.stat().st_size,'sha256':hashlib.sha256(path.read_bytes()).hexdigest()}
+    calls=[]
+    def stage(label,args,**kwargs):
+        calls.append((label,args,kwargs['stdin'].read()))
+        return b''
+    monkeypatch.setattr(vm_deploy_host,'_memoryd_run_step',stage)
+
+    vm_deploy_host._memoryd_stage_bundle(path,'/tmp/fixture.bundle',expected)
+
+    assert calls[0][0]=='bundle copy'
+    assert calls[0][1][:4]==['docker','exec','-i','--user']
+    assert calls[0][2]==b'portable fixture'
+    path.write_bytes(b'tampered fixture')
+    with pytest.raises(ValueError,match='hash check'):
+        vm_deploy_host._memoryd_stage_bundle(path,'/tmp/fixture.bundle',expected)
+    assert len(calls)==1
+
+
+def test_memoryd_registration_requires_a_completed_matching_transfer(tmp_path, monkeypatch):
+    tmp_path.chmod(0o700)
+    monkeypatch.setattr(vm_deploy_host,'STATE',tmp_path)
+    monkeypatch.setattr(vm_deploy_host,'memoryd_health',lambda:pytest.fail('registration must stay gated'))
+    with pytest.raises(ValueError,match='completed MemoryD transfer'):
+        vm_deploy_host.register_memoryd_app({'transfer_manifest_sha256':'a'*64})
 
 
 def test_memoryd_preflight_is_read_only_and_stops_on_low_available_memory(monkeypatch):
@@ -195,7 +238,7 @@ def test_memoryd_status_reports_absent_without_creating_a_volume_or_marker(tmp_p
 def sample_remote_manifest():
     return {
         'schema_version': 1,
-        'include_archived': True,
+        'include_archived': False,
         'transfer_manifest_sha256': 'a' * 64,
         'source_database_sha256': 'b' * 64,
         'source_record_count': 2,
@@ -293,7 +336,7 @@ def test_memoryd_import_applies_preview_plans_backs_up_checks_replay_and_preserv
         'schema_version':1,'transfer_manifest_sha256':transfer_id,
             'source_database_sha256':'e'*64,'source_record_count':2,
             'source_database_record_count':2,'source_cutoff_at':'2026-10-29T00:00:00Z',
-            'include_archived':True,
+            'include_archived':False,
         'source_instance_id':FIXTURE_INSTANCE,'source_profile':'personal',
         'source_workspace':'dakota-codex-only','target_profile':'personal',
         'target_workspace':'dakota-codex-only','bundles':[{
@@ -303,6 +346,10 @@ def test_memoryd_import_applies_preview_plans_backs_up_checks_replay_and_preserv
         }],
     }
     vm_deploy_host.write(directory/'transfer.json',manifest)
+    legacy=bootstrap/'memoryd-transfer.json'
+    vm_deploy_host.write(legacy,{'status':'in_progress','transfer_manifest_sha256':'a'*64,
+        'source_database_sha256':'e'*64,'bundles':{}})
+    legacy_before=legacy.read_bytes()
     monkeypatch.setattr(vm_deploy_host,'STATE',state)
     monkeypatch.setattr(vm_deploy_host,'memoryd_transfer_preflight',lambda:{'ready':True})
     counts=iter([0,2,2])
@@ -329,13 +376,14 @@ def test_memoryd_import_applies_preview_plans_backs_up_checks_replay_and_preserv
         if args[:2]==['bundle','import'] and '--apply' in args:
             return {'receipt':{'status':'applied','receipt_id':'receipt_fixture'}}
         if args[:1]==['status']:
-            return {'data':{'active_profiles':['personal'],'active_workspaces':['dakota-codex-only']}}
+            return {'active_profiles':['personal'],'active_workspaces':['dakota-codex-only']}
         raise AssertionError(f'unexpected MemoryD CLI command: {args[:2]}')
     monkeypatch.setattr(vm_deploy_host,'_memoryd_cli_json',cli_json)
     monkeypatch.setattr(vm_deploy_host,'_memoryd_cli',lambda _args,**_kwargs:json.dumps({
         'facts':[{},{}],'citations':[{},{}],'policy':{'authority':'recall_not_authority'}
     }).encode())
-    monkeypatch.setattr(vm_deploy_host,'run',lambda _args,**_kwargs:b'')
+    monkeypatch.setattr(vm_deploy_host,'_memoryd_run_step',lambda _label,_args,**_kwargs:b'')
+    monkeypatch.setattr(vm_deploy_host,'_memoryd_stage_bundle',lambda *_args:None)
 
     result=vm_deploy_host.memoryd_import_bundles({'transfer_manifest_sha256':transfer_id})
 
@@ -343,13 +391,14 @@ def test_memoryd_import_applies_preview_plans_backs_up_checks_replay_and_preserv
     assert result['source_record_count']==2
     assert result['idempotency'][0]['creates']==0
     assert result['recall_facts']==2
-    assert json.loads(vm_deploy_host.private(bootstrap/'memoryd-transfer.json'))['status']=='complete'
+    assert json.loads(vm_deploy_host.private(bootstrap/f'memoryd-transfer-{transfer_id}.json'))['status']=='complete'
+    assert legacy.read_bytes()==legacy_before
 
 
 def test_memoryd_transfer_set_checks_database_cursor_bundle_scope_and_integrity(tmp_path):
     home = tmp_path / 'profile'
     source_root = tmp_path / 'codex-memories'
-    expected = write_transfer_fixture(home, source_root, ['mem_one', 'mem_two'])
+    expected = write_transfer_fixture(home, source_root, ['mem_one', 'mem_two'], ['mem_archived'])
 
     (source_root / 'fixture.md').write_text('# Newer live source, beyond the frozen cutoff\n')
     transfer = deploy_control_plane.load_memoryd_transfer_set(home)
@@ -358,9 +407,10 @@ def test_memoryd_transfer_set_checks_database_cursor_bundle_scope_and_integrity(
     assert transfer['manifest']['source_record_count'] == 2
     assert len(transfer['bundle_paths']) == 1
     assert len(transfer['remote_manifest']['bundles']) == 1
-    assert transfer['remote_manifest']['include_archived'] is True
+    assert transfer['remote_manifest']['source_database_record_count'] == 3
+    assert transfer['remote_manifest']['include_archived'] is False
     assert transfer['manifest_sha256'] == hashlib.sha256(
-        (home / 'exports/kamal-test-deploy-transfer-manifest.json').read_bytes()
+        (home / 'exports/kamal-test-deploy-transfer-manifest-active.json').read_bytes()
     ).hexdigest()
 
 
@@ -378,14 +428,30 @@ def test_memoryd_transfer_set_rejects_a_bundle_selection_that_omits_source_recor
                 'source_profile': 'personal', 'source_workspace': 'dakota-codex-only',
                 'target_profile': 'personal', 'target_workspace': 'dakota-codex-only',
             },
-                'selection': {'record_ids': [public_memory_id('mem_one')], 'include_archived': True},
+                'selection': {'record_ids': [public_memory_id('mem_one')], 'include_archived': False},
                 'counts': {'root_memories': 1},
         }))
     metadata['bundles'][0]['sha256'] = hashlib.sha256(bundle_path.read_bytes()).hexdigest()
     metadata['bundles'][0]['size_bytes'] = bundle_path.stat().st_size
-    (home / 'exports/kamal-test-deploy-transfer-manifest.json').write_text(json.dumps(metadata))
+    (home / 'exports/kamal-test-deploy-transfer-manifest-active.json').write_text(json.dumps(metadata))
 
     with pytest.raises(ValueError, match='root selection does not exactly cover'):
+        deploy_control_plane.load_memoryd_transfer_set(home)
+
+
+def test_memoryd_transfer_set_rejects_substitution_of_an_archived_root(tmp_path):
+    home=tmp_path/'profile'
+    metadata=write_transfer_fixture(home,tmp_path/'codex-memories',['active'],['archived'])
+    bundle=home/'exports/one.bundle'
+    with zipfile.ZipFile(bundle) as archive:
+        manifest=json.loads(archive.read('manifest.json'))
+    manifest['selection']['record_ids']=[public_memory_id('archived')]
+    with zipfile.ZipFile(bundle,'w') as archive:
+        archive.writestr('manifest.json',json.dumps(manifest))
+    metadata['bundles'][0]['sha256']=hashlib.sha256(bundle.read_bytes()).hexdigest()
+    metadata['bundles'][0]['size_bytes']=bundle.stat().st_size
+    (home/'exports/kamal-test-deploy-transfer-manifest-active.json').write_text(json.dumps(metadata))
+    with pytest.raises(ValueError,match='root selection does not exactly cover'):
         deploy_control_plane.load_memoryd_transfer_set(home)
 
 

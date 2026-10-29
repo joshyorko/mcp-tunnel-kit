@@ -767,13 +767,14 @@ def load_memoryd_transfer_set(home=None):
     if (export_dir.is_symlink() or not export_dir.is_dir() or export_stat.st_uid!=os.getuid()
             or stat.S_IMODE(export_stat.st_mode)!=0o700):
         raise ValueError('MemoryD export directory must be private')
-    manifest_path=export_dir/'kamal-test-deploy-transfer-manifest.json'
+    manifest_path=export_dir/'kamal-test-deploy-transfer-manifest-active.json'
     manifest_text=_read_private_file(manifest_path,limit=1024*1024)
     manifest=json.loads(manifest_text)
     if (manifest.get('schema_version')!=1 or manifest.get('tool_version')!='0.1.0'
             or manifest.get('source_profile')!='personal'
             or manifest.get('source_workspace')!='dakota-codex-only'
             or manifest.get('source_snapshot_kind')!='codex-memoryd-backup'
+            or manifest.get('include_archived') is not False
             or type(manifest.get('source_record_count')) is not int
             or manifest.get('source_record_count')<1
             or type(manifest.get('source_database_record_count')) is not int
@@ -816,7 +817,7 @@ def load_memoryd_transfer_set(home=None):
     try:
         integrity=conn.execute('PRAGMA integrity_check').fetchone()[0]
         source_ids={row[0] for row in conn.execute(
-            'SELECT id FROM memory_records WHERE profile_id=? AND workspace_id=?',
+            'SELECT id FROM memory_records WHERE profile_id=? AND workspace_id=? AND archived=0',
             ('personal','dakota-codex-only'))}
         total_records=conn.execute(
             'SELECT count(*) FROM memory_records WHERE profile_id=? AND workspace_id=?',
@@ -874,7 +875,7 @@ def load_memoryd_transfer_set(home=None):
                 or bundle_manifest.get('producer',{}).get('instance_id')!=manifest['source_instance_id']
                 or bundle_manifest.get('bundle_id')!=item.get('bundle_id')
                 or bundle_manifest.get('counts',{}).get('root_memories')!=len(selection)
-                or bundle_manifest.get('selection',{}).get('include_archived') is not True
+                or bundle_manifest.get('selection',{}).get('include_archived') is not False
                 or intent.get('source_profile')!='personal'
                 or intent.get('source_workspace')!='dakota-codex-only'
                 or intent.get('target_profile')!='personal'
@@ -896,7 +897,7 @@ def load_memoryd_transfer_set(home=None):
         'source_record_count':len(source_ids),
         'source_database_record_count':total_records,
         'source_cutoff_at':manifest['source_cutoff_at'],
-        'include_archived':True,
+        'include_archived':False,
         'source_instance_id':manifest['source_instance_id'],
         'source_profile':'personal',
         'source_workspace':'dakota-codex-only',
@@ -1080,7 +1081,9 @@ def transfer_memoryd(directory):
           'transfer_manifest_sha256':transfer['manifest_sha256'],
       })
       phase='executor-registration'
-      registration=remote('memoryd-app-register')
+      registration=remote('memoryd-app-register',{
+          'transfer_manifest_sha256':transfer['manifest_sha256'],
+      })
       phase='executor-discovery'
       smoke_result=smoke(None)
       after_status=remote('status')
@@ -1103,8 +1106,15 @@ def transfer_memoryd(directory):
               'executor_discovery':'PASS','existing_identity_preserved':True,
               'existing_inventory_preserved':True,'tunnel_count':after_status['tunnel_count'],
               'preflight':gate}
-    except Exception:
-      raise RuntimeError('MemoryD transfer failed during '+phase+'; verify the persistent transfer receipt before retrying. Existing control-plane services were not restarted.') from None
+    except Exception as error:
+      detail=str(error)
+      safe_markers=('MemoryD CLI ','MemoryD import step ')
+      safe_marker=next((marker for marker in safe_markers if marker in detail),None)
+      if safe_marker:
+          detail=detail[detail.index(safe_marker):].split(';',1)[0]
+      else:
+          detail='remote stage refused'
+      raise RuntimeError('MemoryD transfer failed during '+phase+' ('+detail+'); verify the persistent transfer receipt before retrying. Existing control-plane services were not restarted.') from None
 
 
 def execute(args):

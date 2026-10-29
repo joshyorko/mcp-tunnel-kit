@@ -527,7 +527,7 @@ def _validate_memoryd_transfer_manifest(data):
     database_count=data.get('source_database_record_count')
     if (type(record_count) is not int or record_count<1
             or type(database_count) is not int or database_count<record_count
-            or data.get('include_archived') is not True or record_count!=database_count
+            or data.get('include_archived') is not False
             or not isinstance(data.get('source_cutoff_at'),str) or not data['source_cutoff_at']
             or not isinstance(bundles,list) or not bundles):
         raise ValueError('MemoryD transfer bundle selection is empty')
@@ -599,7 +599,8 @@ def _memoryd_cli(args, *, timeout=300):
     command=['docker','exec','-i','mcp-control-plane-memoryd','/usr/local/bin/codex-memoryd',*args]
     result=subprocess.run(command,input=b'',capture_output=True,timeout=timeout)
     if result.returncode:
-        raise ValueError('MemoryD CLI operation failed; command output withheld')
+        label=' '.join(str(item) for item in args[:2])
+        raise ValueError('MemoryD CLI '+label+' failed; command output withheld')
     return result.stdout
 
 
@@ -607,7 +608,49 @@ def _memoryd_cli_json(args, *, timeout=300):
     try:
         return json.loads(_memoryd_cli(args,timeout=timeout))
     except (json.JSONDecodeError,UnicodeDecodeError):
-        raise ValueError('MemoryD CLI returned invalid JSON') from None
+        label=' '.join(str(item) for item in args[:2])
+        raise ValueError('MemoryD CLI '+label+' returned invalid JSON') from None
+
+
+def _memoryd_run_step(label, args, *, timeout=180, stdin=None):
+    if label not in {'target backup permissions', 'bundle copy', 'bundle permissions', 'bundle cleanup'}:
+        raise ValueError('MemoryD import step label is invalid')
+    try:
+        result=subprocess.run(args,stdin=stdin,capture_output=True,timeout=timeout)
+    except Exception:
+        raise ValueError('MemoryD import step '+label+' failed (docker_unavailable)') from None
+    if result.returncode:
+        diagnostic=result.stderr.decode(errors='replace').lower()
+        categories=(
+            ('no space left on device','destination_capacity'),
+            ('read-only file system','read_only_destination'),
+            ('permission denied','permission_denied'),
+            ('no such file or directory','path_not_found'),
+            ('not a directory','invalid_destination'),
+            ('no such container','container_not_found'),
+            ('is not running','container_not_running'),
+        )
+        reason=next((category for needle,category in categories if needle in diagnostic),'docker_operation_failed')
+        raise ValueError('MemoryD import step '+label+' failed ('+reason+')')
+    return result.stdout
+
+
+def _memoryd_stage_bundle(path, container_path, bundle):
+    info=path.lstat()
+    fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW)
+    with os.fdopen(fd,'rb') as stream:
+        opened=os.fstat(stream.fileno())
+        if (path.is_symlink() or not stat.S_ISREG(opened.st_mode)
+                or opened.st_uid!=os.getuid() or stat.S_IMODE(opened.st_mode)!=0o600
+                or (info.st_dev,info.st_ino)!=(opened.st_dev,opened.st_ino)
+                or opened.st_size!=bundle['size_bytes']
+                or hashlib.file_digest(stream,'sha256').hexdigest()!=bundle['sha256']):
+            raise ValueError('MemoryD bundle transfer file failed its host-side hash check')
+        stream.seek(0)
+        _memoryd_run_step('bundle copy',
+            ['docker','exec','-i','--user','10001:10001','mcp-control-plane-memoryd',
+             'sh','-c','umask 077; set -C; cat > "$1"','sh',container_path],
+            timeout=120,stdin=stream)
 
 
 def _memoryd_record_count():
@@ -628,6 +671,16 @@ def _validate_memoryd_bundle_report(report, manifest, bundle):
         raise ValueError('MemoryD bundle integrity, provenance, or scope check failed')
 
 
+def _memoryd_receipt_path(transfer_id):
+    path=STATE/'bootstrap'/f'memoryd-transfer-{transfer_id}.json'
+    legacy=STATE/'bootstrap/memoryd-transfer.json'
+    if not path.exists() and not path.is_symlink() and (legacy.exists() or legacy.is_symlink()):
+        previous=json.loads(private(legacy))
+        if previous.get('transfer_manifest_sha256')==transfer_id:
+            return legacy
+    return path
+
+
 def memoryd_import_bundles(data):
     if not isinstance(data,dict) or set(data)!={'transfer_manifest_sha256'}:
         raise ValueError('MemoryD import request shape is invalid')
@@ -642,7 +695,7 @@ def memoryd_import_bundles(data):
     _validate_memoryd_transfer_manifest(manifest)
     if manifest['transfer_manifest_sha256']!=transfer_id:
         raise ValueError('MemoryD transfer manifest identity mismatch')
-    receipt_path=STATE/'bootstrap/memoryd-transfer.json'
+    receipt_path=_memoryd_receipt_path(transfer_id)
     receipt=json.loads(private(receipt_path)) if receipt_path.exists() or receipt_path.is_symlink() else None
     if receipt and (receipt.get('transfer_manifest_sha256')!=transfer_id
                     or receipt.get('source_database_sha256')!=manifest['source_database_sha256']):
@@ -650,12 +703,19 @@ def memoryd_import_bundles(data):
     current_records=_memoryd_record_count()
     if receipt is None and current_records!=0:
         raise ValueError('MemoryD target is nonempty without a matching transfer receipt')
+    legacy_path=STATE/'bootstrap/memoryd-transfer.json'
+    if receipt is None and (legacy_path.exists() or legacy_path.is_symlink()):
+        previous=json.loads(private(legacy_path))
+        if (previous.get('status')!='in_progress' or previous.get('bundles')
+                or previous.get('source_database_sha256')!=manifest['source_database_sha256']):
+            raise ValueError('Previous MemoryD transfer requires reconciliation')
     backup_info=receipt.get('target_backup') if receipt else None
     if not backup_info:
         backup_path=f"/data/pre-transfer-{transfer_id[:12]}-{time.time_ns()}.db"
         created=_memoryd_cli_json(['backup','create','--local','--dest',backup_path])
         backup_manifest=created.get('manifest',{})
-        run(['docker','exec','mcp-control-plane-memoryd','chmod','0600',
+        _memoryd_run_step('target backup permissions',
+            ['docker','exec','mcp-control-plane-memoryd','chmod','0600',
              backup_path,backup_path+'.manifest.json'])
         verified=_memoryd_cli_json(['backup','verify','--local','--path',backup_path])
         if verified.get('ok') is not True or backup_manifest.get('sha256')!=verified.get('manifest',{}).get('sha256'):
@@ -672,6 +732,7 @@ def memoryd_import_bundles(data):
         write(receipt_path,receipt)
 
     target_tmp=[];bundle_summaries=[];destination_instance_id=None
+    staging_id=uuid.uuid4().hex
     def preview_apply(bundle,filename,*,idempotency=False):
         nonlocal destination_instance_id
         inspect=_memoryd_cli_json(['bundle','inspect',filename],timeout=180)
@@ -681,7 +742,9 @@ def memoryd_import_bundles(data):
         if (preview.get('safe_to_apply') is not True
                 or preview.get('integrity_status')!='verified'
                 or preview.get('source_instance_id')!=manifest['source_instance_id']
+                or preview.get('source_scope',{}).get('profile')!='personal'
                 or preview.get('source_scope',{}).get('workspace')!='dakota-codex-only'
+                or preview.get('destination_scope',{}).get('profile')!='personal'
                 or preview.get('destination_scope',{}).get('workspace')!='dakota-codex-only'):
             raise ValueError('MemoryD import preview rejected bundle scope or integrity')
         counts=preview.get('counts',{})
@@ -704,15 +767,9 @@ def memoryd_import_bundles(data):
     try:
         for index,bundle in enumerate(manifest['bundles'],1):
             name=bundle['path'];host_path=directory/name
-            info=host_path.lstat()
-            if (host_path.is_symlink() or not host_path.is_file() or info.st_uid!=os.getuid()
-                    or stat.S_IMODE(info.st_mode)!=0o600 or info.st_size!=bundle['size_bytes']
-                    or file_sha256(host_path)!=bundle['sha256']):
-                raise ValueError('MemoryD bundle transfer file failed its host-side hash check')
-            container_path=f"/tmp/memoryd-transfer-{transfer_id[:12]}-{index:02d}.bundle"
-            run(['docker','cp',str(host_path),f'mcp-control-plane-memoryd:{container_path}'],timeout=120)
-            run(['docker','exec','--user','0','mcp-control-plane-memoryd','chmod','0444',container_path])
+            container_path=f"/tmp/memoryd-transfer-{transfer_id[:12]}-{staging_id}-{index:02d}.bundle"
             target_tmp.append(container_path)
+            _memoryd_stage_bundle(host_path,container_path,bundle)
             applied=preview_apply(bundle,container_path)
             receipt['bundles'][name]={'sha256':bundle['sha256'],'manifest_digest':bundle['manifest_digest'],
                                       'counts':applied['counts'],'receipt_id':applied['receipt_id']}
@@ -720,13 +777,12 @@ def memoryd_import_bundles(data):
             bundle_summaries.append({'path':name,'counts':applied['counts']})
         if _memoryd_record_count()!=manifest['source_record_count']:
             raise ValueError('MemoryD target record count does not match Dakota source')
-        status_data=_memoryd_cli_json(['status','--local']).get('data',{})
+        status_data=_memoryd_cli_json(['status','--local'])
         if (status_data.get('active_profiles')!=['personal']
                 or status_data.get('active_workspaces')!=['dakota-codex-only']):
             raise ValueError('MemoryD target profile/workspace boundary does not match source')
         idempotency=[]
-        for index,bundle in enumerate(manifest['bundles'],1):
-            container_path=f"/tmp/memoryd-transfer-{transfer_id[:12]}-{index:02d}.bundle"
+        for bundle,container_path in zip(manifest['bundles'],target_tmp):
             replay=preview_apply(bundle,container_path,idempotency=True)
             idempotency.append({'path':bundle['path'],'creates':replay['counts'].get('create',0),
                                 'identity_reuses':replay['counts'].get('reuse_identity_exact',0),
@@ -754,10 +810,27 @@ def memoryd_import_bundles(data):
                 'recall_citations':recall_citations}
     finally:
         if target_tmp:
-            run(['docker','exec','--user','0','mcp-control-plane-memoryd','rm','-f',*target_tmp],timeout=60)
+            _memoryd_run_step('bundle cleanup',
+                ['docker','exec','--user','10001:10001','mcp-control-plane-memoryd','rm','-f',*target_tmp],timeout=60)
 
 
-def register_memoryd_app():
+def register_memoryd_app(data):
+    if not isinstance(data,dict) or set(data)!={'transfer_manifest_sha256'}:
+        raise ValueError('MemoryD registration request shape is invalid')
+    transfer_id=data['transfer_manifest_sha256']
+    if not isinstance(transfer_id,str) or not re.fullmatch(r'[a-f0-9]{64}',transfer_id):
+        raise ValueError('MemoryD registration transfer identity is invalid')
+    receipt_path=_memoryd_receipt_path(transfer_id)
+    if not receipt_path.exists() or receipt_path.is_symlink():
+        raise ValueError('A completed MemoryD transfer is required for registration')
+    receipt=json.loads(private(receipt_path))
+    if (receipt.get('status')!='complete' or receipt.get('transfer_manifest_sha256')!=transfer_id
+            or receipt.get('source_profile')!='personal' or receipt.get('source_workspace')!='dakota-codex-only'
+            or receipt.get('target_profile')!='personal' or receipt.get('target_workspace')!='dakota-codex-only'
+            or type(receipt.get('imported_record_count')) is not int
+            or receipt['imported_record_count']<1
+            or _memoryd_record_count()!=receipt['imported_record_count']):
+        raise ValueError('A completed MemoryD transfer is required for registration')
     memoryd_health()
     sys.path.insert(0, str(ROOT / 'scripts'))
     import compose_control as c
@@ -1499,7 +1572,7 @@ def main():
                         'devsy-tap-reconcile-plan','devsy-tap-reconcile',
                         'devsy-tap-rollback-plan','devsy-tap-rollback'):
         STORE.mkdir(mode=0o700,exist_ok=True)
-    data=json.load(sys.stdin) if action in ('images','image-check','network','network-check','wait','commit','baseline','set-current','rollback-commit','restart-local','activation-plan','activation-preflight','activation-begin','activation-pull-images','activation-install','activation-track','activation-seed','activation-network','activation-identity','activation-cleanup','activation-record','smoke','memoryd-adapter-prepare','memoryd-adapter-finalize','memoryd-transfer-prepare','memoryd-import-bundles','devsy-plan','devsy-check','devsy-rollback-plan','devsy-apply','devsy-rollback','devsy-scope-rebind-check','devsy-scope-rebind','devsy-bridge-path-check','devsy-bridge-path-apply','devsy-tap-reconcile-plan','devsy-tap-reconcile','devsy-tap-rollback-plan','devsy-tap-rollback') else {}
+    data=json.load(sys.stdin) if action in ('images','image-check','network','network-check','wait','commit','baseline','set-current','rollback-commit','restart-local','activation-plan','activation-preflight','activation-begin','activation-pull-images','activation-install','activation-track','activation-seed','activation-network','activation-identity','activation-cleanup','activation-record','smoke','memoryd-adapter-prepare','memoryd-adapter-finalize','memoryd-transfer-prepare','memoryd-import-bundles','memoryd-app-register','devsy-plan','devsy-check','devsy-rollback-plan','devsy-apply','devsy-rollback','devsy-scope-rebind-check','devsy-scope-rebind','devsy-bridge-path-check','devsy-bridge-path-apply','devsy-tap-reconcile-plan','devsy-tap-reconcile','devsy-tap-rollback-plan','devsy-tap-rollback') else {}
     if action=='activation-plan':result=activation_plan(data['generation_dir'])
     elif action=='activation-preflight':
         info=_ensure_empty_activation_target(data['generation_dir'],allow_lock=True)
@@ -1544,7 +1617,7 @@ def main():
     elif action=='memoryd-transfer-preflight':result=memoryd_transfer_preflight()
     elif action=='memoryd-transfer-prepare':result=memoryd_transfer_prepare(data)
     elif action=='memoryd-import-bundles':result=memoryd_import_bundles(data)
-    elif action=='memoryd-app-register':result=register_memoryd_app()
+    elif action=='memoryd-app-register':result=register_memoryd_app(data)
     elif action=='lifecycle-check':result=lifecycle_check()
     elif action=='identity-check':
         if identity(NAMES['kamal']['executor'])!=json.loads(private(STORE/'current.json'))['identity']:

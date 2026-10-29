@@ -29,9 +29,10 @@ supported HTTP MCP transport is added upstream.
 
 ## Adapter runtime requirement
 
-The currently pinned CAS image is
+The opt-in Compose example pins the CAS image
 `ghcr.io/joshyorko/codex-action-server@sha256:bda7ef55e9d31574aefbd650ec38bfbe993b5adbbfffc15a49a7ca83e6ba26ca`.
-Its Python runtime has an `mcp` distribution but does not provide
+The Kamal deployment uses the CAS image recorded for the existing control
+plane. The example image's Python runtime has an `mcp` distribution but does not provide
 `mcp.server.fastmcp`. Do not install packages ad hoc on the VM. Any adapter
 must use APIs verified in that pinned image or add a reproducible, pinned
 dependency and deployment artifact to this repository.
@@ -76,15 +77,26 @@ integrity and source/destination scopes, then apply with that import preview's
 plan ID. Transfer the bundle bytes over the pinned SSH path and verify their
 SHA-256 before import. Preserve the source instance ID and bundle manifest
 digests; a repeated import should plan zero creates and exact identity reuse.
-Treat the bundle's archived-record selection as explicit provenance; this
-snapshot includes the one archived MemoryD record and contains no ChatGPT
-conversation archive.
+This transfer selects active records only. It excludes archived MemoryD records
+and ChatGPT conversation archives.
 
 Freeze one source cutoff with the official verified backup before chunking.
 Export every chunk from that backup, and validate the bundle selections against
 its active record IDs. If native files change afterward, keep this snapshot
 consistent or create a new backup and regenerate every chunk; do not mix live
 source generations in one transfer.
+
+The active manifest is `exports/kamal-test-deploy-transfer-manifest-active.json`
+under the isolated MemoryD home. The VM keeps a separate receipt for each
+transfer manifest and retains any earlier incomplete receipt. The managed
+import streams verified bundles into the container's writable temporary
+filesystem; the container root filesystem remains read-only.
+
+For rollback, disable the MemoryD app in Executor and run
+`bin/kamal accessory stop memoryd`. This retains the named volume and the
+verified pre-transfer backup. Restoring that backup replaces the target database;
+first back up and verify the current database, then use the released backup
+restore command with an explicit operator decision.
 
 ## Activation envelope
 
