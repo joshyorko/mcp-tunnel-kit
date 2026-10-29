@@ -51,10 +51,12 @@ def test_memoryd_rollback_stops_only_its_accessories_and_preserves_volume(tmp_pa
             status_reads += 1
             if status_reads == 1:
                 return {'status': 'HEALTHY', 'volume_exists': True, 'services': {
-                    'memoryd': {'state': 'running'}, 'memoryd-mcp': {'state': 'running'},
+                    'mcp-control-plane-memoryd': {'state': 'running'},
+                    'mcp-control-plane-memoryd-mcp': {'state': 'running'},
                 }}
             return {'status': 'STOPPED', 'volume_exists': True, 'services': {
-                'memoryd': {'state': 'exited'}, 'memoryd-mcp': {'state': 'exited'},
+                'mcp-control-plane-memoryd': {'state': 'exited'},
+                'mcp-control-plane-memoryd-mcp': {'state': 'exited'},
             }}
         raise AssertionError(f'unexpected remote action: {action}')
 

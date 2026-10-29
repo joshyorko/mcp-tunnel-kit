@@ -84,7 +84,7 @@ def lifecycle(operation, target):
                 if state['status'] not in ('HEALTHY', 'UNHEALTHY', 'PARTIAL'):
                     raise ValueError('MemoryD state requires inspection before stop')
                 for name in reversed(deploy.MEMORYD_ORDER):
-                    if name in state.get('services', {}):
+                    if 'mcp-control-plane-' + name in state.get('services', {}):
                         deploy.kamal(config, 'stop', name)
                 after = deploy.remote('memoryd-status')
                 if after['status'] not in ('ABSENT', 'VOLUME_ONLY', 'STOPPED'):
