@@ -6,7 +6,6 @@ import os
 from pathlib import Path
 import shutil
 import sqlite3
-import subprocess
 import time
 import zipfile
 
@@ -350,7 +349,7 @@ def test_abandon_refuses_a_legacy_bundle_receipt(legacy):
 
 def test_fenced_receipt_is_rejected_by_the_historical_importer(legacy):
     host.memoryd_abandon_legacy_transfer(legacy['payload'])
-    source = subprocess.check_output(['git', 'show', '6aca9c4:scripts/vm_deploy_host.py'], text=True)
+    source = (Path(__file__).parent / 'fixtures/legacy_memoryd_importer_6aca9c4.py').read_text()
     tree = ast.parse(source)
     nodes = [node for node in tree.body if isinstance(node, ast.FunctionDef)
              and node.name in ('private', 'memoryd_import_bundles')]
