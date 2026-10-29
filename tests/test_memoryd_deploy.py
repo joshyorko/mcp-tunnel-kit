@@ -469,6 +469,31 @@ def test_memoryd_adapter_image_remains_pinned_when_cas_is_upgraded():
         vm_deploy_host._memoryd_adapter_image(current,{**receipt,'image':'docker.io/foreign:latest'})
 
 
+@pytest.mark.parametrize('marker', [
+    {}, None, [],
+    {'organization': 'org', 'id': '', 'url': 'http://172.30.86.1:8090/mcp'},
+    {'organization': 'org', 'id': 'app'},
+    {'organization': 'org', 'id': 'app', 'url': 'http://172.30.86.1:8090/mcp', 'extra': True},
+])
+def test_invalid_memoryd_registration_receipt_refuses_without_executor_access(tmp_path, monkeypatch, marker):
+    tmp_path.chmod(0o700)
+    monkeypatch.setattr(vm_deploy_host, 'STATE', tmp_path)
+    vm_deploy_host.write(tmp_path/'bootstrap/memoryd-integration.json', marker)
+    calls = []
+
+    def forbidden(*_args, **_kwargs):
+        calls.append('executor access')
+        raise AssertionError('Invalid receipt reached Executor')
+
+    monkeypatch.setattr(compose_control, 'executor_session', forbidden)
+    monkeypatch.setattr(compose_control, 'ensure_memoryd_app', forbidden)
+    monkeypatch.setenv('EXECUTOR_URL', 'fixture')
+    monkeypatch.setenv('EXECUTOR_PAT_FILE', 'fixture')
+    with pytest.raises(ValueError, match='MemoryD app receipt is invalid'):
+        vm_deploy_host._verify_registered_memoryd_app()
+    assert calls == []
+
+
 def test_memoryd_adapter_image_pin_is_private_and_idempotent(tmp_path,monkeypatch):
     tmp_path.chmod(0o700)
     monkeypatch.setattr(vm_deploy_host,'STATE',tmp_path)

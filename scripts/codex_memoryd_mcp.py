@@ -147,12 +147,12 @@ def _call_tool(request_id, params: object, backend) -> dict:
                     tokens = arguments["maxTokens"]
                     if type(tokens) is not int or not 1 <= tokens <= 4000:
                         raise ValueError("Invalid maxTokens")
-                    payload["maxTokens"] = tokens
+                    payload["max_tokens"] = tokens
                 if "packMode" in arguments:
                     mode = arguments["packMode"]
                     if mode not in PACK_MODES:
                         raise ValueError("Invalid packMode")
-                    payload["packMode"] = mode
+                    payload["pack_mode"] = mode
                 response = backend.request("POST", "/v1/recall", payload)
             else:
                 if "type" in arguments:
@@ -165,7 +165,7 @@ def _call_tool(request_id, params: object, backend) -> dict:
                     if type(limit) is not int or not 1 <= limit <= 50:
                         raise ValueError("Invalid limit")
                     payload["limit"] = limit
-                payload["includeArchived"] = False
+                payload["include_archived"] = False
                 response = backend.request("POST", "/v1/search", payload)
         else:
             raise ValueError("Unsupported read-only tool")
