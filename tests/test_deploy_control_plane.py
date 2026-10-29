@@ -174,7 +174,8 @@ def test_remote_source_receives_only_validated_profile_over_pinned_alias():
 
 
 def test_remote_source_injects_stdlib_generation_validator_without_target_install():
-    names=("instance_profile","prepare_recovery_generation","devsy_vm_bootstrap")
+    names=("instance_profile","prepare_recovery_generation","devsy_vm_bootstrap",
+           "scope_binding_rebind","bridge_kubectl_path","compose_control")
     previous={name:sys.modules.get(name) for name in names}
     try:
         namespace={"__name__":"remote_source_test"}
@@ -250,6 +251,7 @@ def test_failed_kamal_health_rolls_back_before_accepting():
     calls=[]
     def remote(action,data=None):
         calls.append(action)
+        if action=='memoryd-inventory':return {'status':'ABSENT'}
         if action=='snapshot':return before
         if action=='current':return current
         if action=='image-check':return {'image_ids':{key:'image' for key in ('cas','executor','schema_proxy','tunnel')}}

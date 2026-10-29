@@ -124,10 +124,14 @@ def file_sha256(path):
 def write(path, value):
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     if path.parent.stat().st_mode & 0o077: raise ValueError('Deployment directory is not private')
-    temp = path.with_suffix('.new')
-    fd = os.open(temp, os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW, 0o600)
-    with os.fdopen(fd, 'w') as f: json.dump(value,f); f.write('\n'); f.flush(); os.fsync(f.fileno())
-    os.replace(temp,path)
+    fd,tempname=tempfile.mkstemp(prefix='.'+path.name+'.',dir=path.parent)
+    try:
+        os.fchmod(fd,0o600)
+        with os.fdopen(fd,'w') as f:
+            json.dump(value,f);f.write('\n');f.flush();os.fsync(f.fileno())
+        os.replace(tempname,path)
+    finally:
+        if os.path.exists(tempname):os.unlink(tempname)
 
 
 def inspect():
@@ -459,6 +463,33 @@ def memoryd_pin_adapter_image():
         return {'adapter_image_pinned':True,'created':False}
     write(path,expected)
     return {'adapter_image_pinned':True,'created':True}
+
+
+def memoryd_adapter_pin_check():
+    path=STATE/'bootstrap/memoryd-adapter-image.json'
+    if not path.exists() and not path.is_symlink():return {'pinned':False}
+    receipt=json.loads(private(path))
+    image=_memoryd_adapter_image(None,receipt)
+    rows=json.loads(run(['docker','inspect','mcp-control-plane-memoryd-mcp']))
+    if len(rows)!=1:
+        raise ValueError('MemoryD adapter container identity is ambiguous')
+    row=rows[0]
+    artifact=STATE/'memoryd-adapter'/receipt['adapter_sha256']/'codex_memoryd_mcp.py'
+    for directory in (artifact.parent.parent,artifact.parent):
+        info=directory.lstat()
+        if (directory.is_symlink() or not stat.S_ISDIR(info.st_mode) or info.st_uid!=os.getuid()
+                or stat.S_IMODE(info.st_mode)!=0o700):
+            raise ValueError('MemoryD adapter artifact directory is unsafe')
+    mounts=[item for item in row.get('Mounts',[]) if item.get('Destination')=='/opt/tunnel-kit/codex_memoryd_mcp.py'
+            and item.get('Source')==str(artifact) and item.get('RW') is False]
+    info=artifact.lstat()
+    if (row.get('Name','').lstrip('/')!='mcp-control-plane-memoryd-mcp'
+            or (row.get('Config',{}).get('Labels') or {}).get('service')!='mcp-control-plane-memoryd-mcp'
+            or row.get('Config',{}).get('Image')!=image or len(mounts)!=1
+            or artifact.is_symlink() or not stat.S_ISREG(info.st_mode) or info.st_uid!=os.getuid()
+            or stat.S_IMODE(info.st_mode)!=0o600 or file_sha256(artifact)!=receipt['adapter_sha256']):
+        raise ValueError('MemoryD adapter does not match its pinned image and artifact')
+    return {'pinned':True}
 
 
 def memoryd_executor_origin_check():
@@ -797,6 +828,62 @@ def _memoryd_tmp_available():
     return int(fields[-3])*1024
 
 
+def _memoryd_process_start_ticks(pid):
+    raw=(Path('/proc')/str(pid)/'stat').read_text()
+    fields=raw.rsplit(')',1)[1].split()
+    return int(fields[19])
+
+
+def _memoryd_staging_owner():
+    return {'pid':os.getpid(),'start_ticks':_memoryd_process_start_ticks(os.getpid()),
+            'boot_id':Path('/proc/sys/kernel/random/boot_id').read_text().strip()}
+
+
+def _memoryd_staging_owner_alive(owner):
+    if Path('/proc/sys/kernel/random/boot_id').read_text().strip()!=owner['boot_id']:
+        return False
+    try:
+        return _memoryd_process_start_ticks(owner['pid'])==owner['start_ticks']
+    except FileNotFoundError:
+        return False
+    except (OSError,ValueError,IndexError):
+        raise ValueError('MemoryD staging owner cannot be verified') from None
+
+
+def _memoryd_staging_in_use(path):
+    target=path.encode()
+    if target in run(['docker','top','mcp-control-plane-memoryd','-eo','pid,args'],timeout=15):
+        return True
+    for process in Path('/proc').iterdir():
+        if not process.name.isdigit() or int(process.name)==os.getpid():continue
+        try:
+            if process.stat().st_uid==os.getuid() and target in (process/'cmdline').read_bytes():
+                return True
+        except FileNotFoundError:
+            continue
+        except OSError:
+            raise ValueError('MemoryD staging use cannot be verified') from None
+    return False
+
+
+def _memoryd_reconcile_staging(receipt,receipt_path,transfer_id):
+    owner=receipt.get('staging')
+    if owner is None:return
+    if (not isinstance(owner,dict) or set(owner)!={'path','pid','start_ticks','boot_id'}
+            or type(owner.get('pid')) is not int or owner['pid']<1
+            or type(owner.get('start_ticks')) is not int or owner['start_ticks']<1
+            or not isinstance(owner.get('boot_id'),str)
+            or not re.fullmatch(r'[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}',owner['boot_id'])
+            or not isinstance(owner.get('path'),str)
+            or not re.fullmatch(r'/tmp/memoryd-transfer-'+transfer_id[:12]+r'-[a-f0-9]{32}-[0-9]{2,6}-(?:apply|replay)\.bundle',owner['path'])):
+        raise ValueError('MemoryD staging receipt is invalid')
+    if _memoryd_staging_owner_alive(owner) or _memoryd_staging_in_use(owner['path']):
+        raise ValueError('MemoryD staging is still active; retry refused')
+    _memoryd_run_step('bundle cleanup',
+        ['docker','exec','--user','10001:10001','mcp-control-plane-memoryd','rm','-f',owner['path']],timeout=60)
+    receipt.pop('staging');write(receipt_path,receipt)
+
+
 def _validate_memoryd_bundle_report(report, manifest, bundle):
     if (not isinstance(report,dict) or report.get('integrity_status')!='verified'
             or report.get('bundle_id')!=bundle['bundle_id']
@@ -866,6 +953,7 @@ def memoryd_import_bundles(data):
                  'target_profile':manifest['target_profile'],'target_workspace':manifest['target_workspace'],
                  'target_backup':backup_info,'bundles':{}}
         write(receipt_path,receipt)
+    _memoryd_reconcile_staging(receipt,receipt_path,transfer_id)
 
     target_tmp=[];bundle_summaries=[];destination_instance_id=None
     staging_id=uuid.uuid4().hex
@@ -905,6 +993,8 @@ def memoryd_import_bundles(data):
             raise ValueError('MemoryD temporary storage is insufficient for the next bundle')
         suffix='replay' if idempotency else 'apply'
         container_path=f"/tmp/memoryd-transfer-{transfer_id[:12]}-{staging_id}-{index:02d}-{suffix}.bundle"
+        receipt['staging']={'path':container_path,**_memoryd_staging_owner()}
+        write(receipt_path,receipt)
         target_tmp.append(container_path)
         try:
             _memoryd_stage_bundle(directory/bundle['path'],container_path,bundle)
@@ -913,6 +1003,7 @@ def memoryd_import_bundles(data):
             _memoryd_run_step('bundle cleanup',
                 ['docker','exec','--user','10001:10001','mcp-control-plane-memoryd','rm','-f',container_path],timeout=60)
             target_tmp.remove(container_path)
+            receipt.pop('staging');write(receipt_path,receipt)
 
     try:
         for index,bundle in enumerate(manifest['bundles'],1):
@@ -1991,6 +2082,7 @@ def main():
     elif action=='memoryd-preflight':result=memoryd_preflight()
     elif action=='memoryd-health':result=memoryd_health()
     elif action=='memoryd-pin-adapter-image':result=memoryd_pin_adapter_image()
+    elif action=='memoryd-adapter-pin-check':result=memoryd_adapter_pin_check()
     elif action=='memoryd-executor-origin-check':result=memoryd_executor_origin_check()
     elif action=='memoryd-wait':result=memoryd_wait()
     elif action=='memoryd-status':result=memoryd_status()

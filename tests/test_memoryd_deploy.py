@@ -162,6 +162,63 @@ def test_memoryd_import_step_failure_reports_safe_phase(monkeypatch):
     assert '/private/source.bundle' not in str(error.value)
 
 
+def test_memoryd_receipt_write_survives_an_orphaned_old_temp_file(tmp_path):
+    tmp_path.chmod(0o700)
+    receipt=tmp_path/'memoryd-transfer-fixture.json'
+    orphan=receipt.with_suffix('.new')
+    orphan.write_text('previous interrupted write');orphan.chmod(0o600)
+    vm_deploy_host.write(receipt,{'status':'in_progress'})
+    assert json.loads(vm_deploy_host.private(receipt))=={'status':'in_progress'}
+    assert orphan.read_text()=='previous interrupted write'
+
+
+def test_memoryd_reconciles_only_a_dead_imports_owned_staging_file(tmp_path,monkeypatch):
+    tmp_path.chmod(0o700)
+    transfer_id='a'*64
+    target='/tmp/memoryd-transfer-'+transfer_id[:12]+'-'+'b'*32+'-01-apply.bundle'
+    receipt={'status':'in_progress','staging':{'path':target,'pid':123,'start_ticks':456,
+        'boot_id':'12345678-1234-1234-1234-123456789abc'}}
+    path=tmp_path/'transfer.json';vm_deploy_host.write(path,receipt)
+    calls=[]
+    monkeypatch.setattr(vm_deploy_host,'_memoryd_staging_owner_alive',lambda _owner:False,raising=False)
+    monkeypatch.setattr(vm_deploy_host,'_memoryd_staging_in_use',lambda _path:False,raising=False)
+    monkeypatch.setattr(vm_deploy_host,'_memoryd_run_step',lambda label,args,**kwargs:calls.append((label,args)))
+    vm_deploy_host._memoryd_reconcile_staging(receipt,path,transfer_id)
+    assert 'staging' not in json.loads(vm_deploy_host.private(path))
+    assert calls[0][1][-1]==target
+
+
+@pytest.mark.parametrize('alive,in_use',[(True,False),(False,True)])
+def test_memoryd_never_cleans_staging_owned_by_a_live_import(tmp_path,monkeypatch,alive,in_use):
+    tmp_path.chmod(0o700)
+    transfer_id='a'*64
+    target='/tmp/memoryd-transfer-'+transfer_id[:12]+'-'+'b'*32+'-01-apply.bundle'
+    receipt={'staging':{'path':target,'pid':123,'start_ticks':456,
+        'boot_id':'12345678-1234-1234-1234-123456789abc'}}
+    path=tmp_path/'transfer.json';vm_deploy_host.write(path,receipt)
+    monkeypatch.setattr(vm_deploy_host,'_memoryd_staging_owner_alive',lambda _owner:alive,raising=False)
+    monkeypatch.setattr(vm_deploy_host,'_memoryd_staging_in_use',lambda _path:in_use,raising=False)
+    monkeypatch.setattr(vm_deploy_host,'_memoryd_run_step',lambda *_args,**_kwargs:pytest.fail('live staging must remain'))
+    with pytest.raises(ValueError,match='still active'):
+        vm_deploy_host._memoryd_reconcile_staging(receipt,path,transfer_id)
+
+
+def test_memoryd_rejects_an_unowned_staging_path(tmp_path,monkeypatch):
+    tmp_path.chmod(0o700)
+    receipt={'staging':{'path':'/data/memory.db','pid':123,'start_ticks':456,
+        'boot_id':'12345678-1234-1234-1234-123456789abc'}}
+    path=tmp_path/'transfer.json';vm_deploy_host.write(path,receipt)
+    monkeypatch.setattr(vm_deploy_host,'_memoryd_run_step',lambda *_args,**_kwargs:pytest.fail('unowned path must remain'))
+    with pytest.raises(ValueError,match='staging receipt is invalid'):
+        vm_deploy_host._memoryd_reconcile_staging(receipt,path,'a'*64)
+
+
+def test_memoryd_detects_a_container_process_using_staging(monkeypatch):
+    target='/tmp/memoryd-transfer-fixture.bundle'
+    monkeypatch.setattr(vm_deploy_host,'run',lambda args,**kwargs:('PID COMMAND\n123 import '+target).encode())
+    assert vm_deploy_host._memoryd_staging_in_use(target) is True
+
+
 def test_memoryd_stages_only_hash_verified_bytes_through_container_stdin(tmp_path, monkeypatch):
     path=tmp_path/'fixture.bundle'
     path.write_bytes(b'portable fixture');path.chmod(0o600)
@@ -404,6 +461,57 @@ def test_memoryd_adapter_image_pin_is_private_and_idempotent(tmp_path,monkeypatc
     assert first['created'] is True and second['created'] is False
     assert receipt.stat().st_mode&0o777==0o600
     assert json.loads(vm_deploy_host.private(receipt))['image']==image
+
+
+def test_core_upgrade_pins_existing_memoryd_before_changing_cas(monkeypatch):
+    calls=[]
+    def remote(action,data=None):
+        calls.append(action)
+        if action=='memoryd-inventory':return {'status':'UNVERIFIED'}
+        if action=='memoryd-adapter-pin-check':return {'pinned':False}
+        if action=='memoryd-status':return {'status':'HEALTHY'}
+        if action=='memoryd-pin-adapter-image':return {'adapter_image_pinned':True}
+        raise AssertionError(action)
+    monkeypatch.setattr(deploy_control_plane,'remote',remote)
+    deploy_control_plane._pin_memoryd_before_core_change()
+    assert calls==['memoryd-inventory','memoryd-adapter-pin-check','memoryd-status','memoryd-pin-adapter-image']
+
+
+def test_core_rollback_accepts_an_already_pinned_stopped_memoryd(monkeypatch):
+    calls=[]
+    def remote(action,data=None):
+        calls.append(action)
+        if action=='memoryd-inventory':return {'status':'STOPPED'}
+        if action=='memoryd-adapter-pin-check':return {'pinned':True}
+        raise AssertionError(action)
+    monkeypatch.setattr(deploy_control_plane,'remote',remote)
+    deploy_control_plane._pin_memoryd_before_core_change()
+    assert calls==['memoryd-inventory','memoryd-adapter-pin-check']
+
+
+def test_stopped_adapter_pin_check_verifies_its_own_image_and_artifact(tmp_path,monkeypatch):
+    tmp_path.chmod(0o700)
+    artifact_bytes=b'fixture adapter';digest=hashlib.sha256(artifact_bytes).hexdigest()
+    directory=tmp_path/'memoryd-adapter'/digest;directory.mkdir(mode=0o700,parents=True);directory.parent.chmod(0o700)
+    artifact=directory/'codex_memoryd_mcp.py';artifact.write_bytes(artifact_bytes);artifact.chmod(0o600)
+    image='ghcr.io/joshyorko/codex-action-server@sha256:'+'a'*64
+    vm_deploy_host.write(tmp_path/'bootstrap/memoryd-adapter-image.json',
+        {'schema_version':1,'image':image,'adapter_sha256':digest})
+    row={'Name':'/mcp-control-plane-memoryd-mcp','Config':{'Image':image,
+         'Labels':{'service':'mcp-control-plane-memoryd-mcp'}},'Mounts':[
+         {'Destination':'/opt/tunnel-kit/codex_memoryd_mcp.py','Source':str(artifact),'RW':False}]}
+    monkeypatch.setattr(vm_deploy_host,'STATE',tmp_path)
+    monkeypatch.setattr(vm_deploy_host,'run',lambda args,**kwargs:json.dumps([row]).encode())
+    assert vm_deploy_host.memoryd_adapter_pin_check()=={'pinned':True}
+    row['Config']['Image']='ghcr.io/joshyorko/codex-action-server@sha256:'+'b'*64
+    with pytest.raises(ValueError,match='pinned image'):
+        vm_deploy_host.memoryd_adapter_pin_check()
+
+
+def test_core_upgrade_refuses_unverified_stopped_memoryd(monkeypatch):
+    monkeypatch.setattr(deploy_control_plane,'remote',lambda action,data=None:{'status':'STOPPED'})
+    with pytest.raises(ValueError,match='Start and verify MemoryD'):
+        deploy_control_plane._pin_memoryd_before_core_change()
 
 
 @pytest.mark.parametrize('name,label', [
@@ -716,6 +824,20 @@ def test_frozen_bundle_comparison_rejects_changed_content_with_same_record_ids()
     changed={**original,'descriptors':[{'path':'objects/memory.jsonl','digest':'sha256:new'}]}
     with pytest.raises(ValueError,match='frozen backup'):
         deploy_control_plane._verify_frozen_manifest(original,changed)
+
+
+def test_frozen_proof_accepts_an_explicit_verified_release_binary(tmp_path,monkeypatch):
+    binary=tmp_path/'released-codex-memoryd'
+    binary.write_bytes(b'published release fixture')
+    digest=hashlib.sha256(binary.read_bytes()).hexdigest()
+    monkeypatch.setenv('CODEX_MEMORYD_RELEASE_BIN',str(binary))
+    monkeypatch.setattr(deploy_control_plane,'MEMORYD_RELEASE_BINARY_SHA256',{digest},raising=False)
+    monkeypatch.setattr(deploy_control_plane.subprocess,'run',
+        lambda args,**kwargs:deploy_control_plane.subprocess.CompletedProcess(args,0,'codex-memoryd 0.1.0\n',''))
+    assert deploy_control_plane._memoryd_release_binary()==binary
+    binary.write_bytes(b'tampered release fixture')
+    with pytest.raises(ValueError,match='codex-memoryd v0.1.0'):
+        deploy_control_plane._memoryd_release_binary()
 
 
 def test_memoryd_deploy_returns_blocked_without_sync_or_kamal_when_capacity_is_low(tmp_path, monkeypatch):

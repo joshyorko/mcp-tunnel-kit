@@ -97,11 +97,16 @@ import streams one verified bundle at a time into the container's writable
 temporary filesystem; the container root filesystem remains read-only. Each
 bundle must be at most 24 MiB, and temporary free space is checked before each
 stage. Before upload, the controller re-exports each selection from a verified
-scratch copy of the frozen backup using the pinned x86-64 v0.1.0 release binary
-and compares the content descriptors and policy metadata.
+scratch copy of the frozen backup using a pinned Linux v0.1.0 release binary
+and compares the content descriptors and policy metadata. Install the official
+x86-64 or arm64 release binary, or set `CODEX_MEMORYD_RELEASE_BIN` to its
+absolute path; the controller verifies its published-artifact-derived digest.
 
 The adapter's immutable image digest is recorded separately from the CAS
 deployment receipt, so a later CAS upgrade does not change the adapter's pin.
+Core upgrades first pin a healthy existing adapter. A stopped adapter with a
+verified pin can remain stopped. If the pin is missing or the accessories are
+partially present, start and verify MemoryD before changing the core deployment.
 
 After import, the managed transfer permits TCP port 8090 only from the owned
 private bridge subnet to its gateway, on that bridge interface. It requires an

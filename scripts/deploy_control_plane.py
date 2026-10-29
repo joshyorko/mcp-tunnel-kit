@@ -37,6 +37,10 @@ LOCAL_CONFIGURED=False
 HOST=None
 ORDER=('executor','schema-proxy','cas','tunnel')
 MEMORYD_ORDER=('memoryd','memoryd-mcp')
+MEMORYD_RELEASE_BINARY_SHA256={
+    '6bd47e96dc225b88e5bf4eb0d45ef68eaec4df0e1582a0ad62b1930c459110e6',
+    'e6030a46216ab0c811a0d8fd937fa54132891469a60300ec64bc07f36996eb3f',
+}
 VMROOT=None
 VM_HOST_PIN=None
 INSTANCE=None
@@ -921,14 +925,24 @@ def _verify_frozen_manifest(original, regenerated):
         raise ValueError('Portable bundle contents differ from the frozen backup')
 
 
-def _verify_frozen_bundle_payloads(transfer):
-    binary=Path.home()/'.local/opt/codex-memoryd/v0.1.0/bin/codex-memoryd'
-    if (not binary.is_file() or binary.is_symlink()
-            or _sha256_file(binary)!='6bd47e96dc225b88e5bf4eb0d45ef68eaec4df0e1582a0ad62b1930c459110e6'):
+def _memoryd_release_binary():
+    selected=os.environ.get('CODEX_MEMORYD_RELEASE_BIN')
+    default=Path.home()/'.local/opt/codex-memoryd/v0.1.0/bin/codex-memoryd'
+    candidate=Path(selected) if selected else (default if default.exists() else Path(shutil.which('codex-memoryd') or ''))
+    try:
+        if not candidate.is_absolute():raise ValueError
+        binary=candidate.resolve(strict=True)
+        if not binary.is_file() or _sha256_file(binary) not in MEMORYD_RELEASE_BINARY_SHA256:raise ValueError
+        version=subprocess.run([str(binary),'--version'],capture_output=True,text=True,timeout=15)
+    except (OSError,ValueError,subprocess.SubprocessError):
         raise ValueError('Released codex-memoryd v0.1.0 binary is unavailable')
-    version=subprocess.run([str(binary),'--version'],capture_output=True,text=True,timeout=15)
     if version.returncode or version.stdout.strip()!='codex-memoryd 0.1.0':
         raise ValueError('Frozen bundle verification requires released codex-memoryd v0.1.0')
+    return binary
+
+
+def _verify_frozen_bundle_payloads(transfer):
+    binary=_memoryd_release_binary()
     expected=transfer['manifest']['source_database_sha256']
     with tempfile.TemporaryDirectory(prefix='memoryd-frozen-proof-') as directory:
         scratch=Path(directory);snapshot=scratch/'snapshot.db'
@@ -1222,6 +1236,18 @@ def finish_memoryd(operation):
             'tunnel_count':after_status['tunnel_count'],'services':health}
 
 
+def _pin_memoryd_before_core_change():
+    inventory=remote('memoryd-inventory')
+    if inventory.get('status') in ('ABSENT','VOLUME_ONLY'):
+        return
+    if inventory.get('status') in ('UNVERIFIED','STOPPED') and remote('memoryd-adapter-pin-check').get('pinned') is True:
+        return
+    if inventory.get('status')!='UNVERIFIED' or remote('memoryd-status').get('status')!='HEALTHY':
+        raise ValueError('Start and verify MemoryD before changing the core deployment')
+    if remote('memoryd-pin-adapter-image').get('adapter_image_pinned') is not True:
+        raise ValueError('MemoryD adapter image could not be pinned before the core deployment')
+
+
 def execute(args):
     host_tap_operations = (
         'devsy-tap-reconcile-check', 'devsy-tap-reconcile',
@@ -1307,6 +1333,7 @@ def execute(args):
         if args.operation=='rollback':
             current=remote('current');previous=remote('rollback-target')
             if current is None:raise ValueError('No recorded deployment generation exists')
+            _pin_memoryd_before_core_change()
             remote('profile')
             previous['publication_proof']=prove_images(previous['manifest'],previous)
             remote('images',previous['manifest'])
@@ -1340,6 +1367,7 @@ def execute(args):
         if args.operation=='deploy' and before['authority']!='kamal':raise ValueError('Use explicit adoption first')
         remote('devsy-check',devsy_payload())
         smoke(native_tuple, require_native=True)
+        _pin_memoryd_before_core_change()
         remote('images',manifest)
         if needs_baseline:remote('baseline',current)
         backup=remote('backup-cas' if args.operation=='cas' else 'backup')
