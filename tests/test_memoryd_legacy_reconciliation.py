@@ -8,6 +8,7 @@ import shutil
 import sqlite3
 import subprocess
 import time
+import zipfile
 
 import pytest
 
@@ -178,6 +179,24 @@ def test_abandon_detects_a_late_worker_replacing_the_fence(legacy, monkeypatch):
     assert legacy['receipt'].stat().st_mode & 0o777 == 0o600
 
 
+def test_first_abandon_rejects_postpublication_count_drift_but_retry_allows_it(legacy, monkeypatch):
+    real_snapshot = host._memoryd_legacy_snapshot
+    calls = []
+    def snapshot(*args):
+        calls.append(1)
+        if len(calls) == 3:
+            with sqlite3.connect(legacy['database']) as db:
+                db.execute("INSERT INTO memory_records VALUES ('personal', 'dakota-codex-only', 0)")
+        return real_snapshot(*args)
+    monkeypatch.setattr(host, '_memoryd_legacy_snapshot', snapshot)
+    with pytest.raises(ValueError):
+        host.memoryd_abandon_legacy_transfer(legacy['payload'])
+    assert legacy['receipt'].stat().st_mode & 0o777 == 0o400
+    assert len(list(legacy['bootstrap'].glob('memoryd-abandonment-*'))) == 1
+    monkeypatch.setattr(host, '_memoryd_legacy_snapshot', real_snapshot)
+    assert host.memoryd_abandon_legacy_transfer(legacy['payload'])['mutated'] is False
+
+
 @pytest.mark.parametrize('change', ['same_id_receipt', 'staged_bundle', 'active_receipt', 'source_proof', 'active_import'])
 def test_abandon_refuses_ambiguous_evidence_without_fencing(legacy, monkeypatch, change):
     before = legacy['receipt'].read_bytes()
@@ -207,6 +226,117 @@ def test_abandon_retains_fence_if_an_import_appears_after_chmod(legacy, monkeypa
         host.memoryd_abandon_legacy_transfer(legacy['payload'])
     assert legacy['receipt'].stat().st_mode & 0o777 == 0o400
     assert not list(legacy['bootstrap'].glob('memoryd-abandonment-*'))
+
+
+def test_abandon_refuses_legacy_bundle_over_recovery_limit_before_fencing(legacy):
+    old = legacy['old']['manifest_sha256']
+    stage = legacy['state'] / 'memoryd-transfer' / old[:16]
+    bundle = stage / 'legacy.bundle'
+    with zipfile.ZipFile(bundle) as archive:
+        manifest = archive.read('manifest.json')
+    with zipfile.ZipFile(bundle, 'w', compression=zipfile.ZIP_STORED) as archive:
+        archive.writestr('manifest.json', manifest)
+        archive.writestr('fixture-padding', b'x' * (24 * 1024 * 1024 + 1))
+    digest = hashlib.sha256(bundle.read_bytes()).hexdigest()
+    source = json.loads(legacy['payload']['legacy_manifest'])
+    source['bundles'][0].update(size_bytes=bundle.stat().st_size, sha256=digest)
+    source_text = json.dumps(source)
+    new_id = hashlib.sha256(source_text.encode()).hexdigest()
+    legacy['payload']['legacy_manifest'] = source_text
+    staged = json.loads((stage / 'transfer.json').read_bytes())
+    staged['transfer_manifest_sha256'] = new_id
+    staged['bundles'][0].update(size_bytes=bundle.stat().st_size, sha256=digest)
+    host.write(stage / 'transfer.json', staged)
+    stage.rename(stage.parent / new_id[:16])
+    receipt = json.loads(legacy['receipt'].read_bytes())
+    receipt['transfer_manifest_sha256'] = new_id
+    host.write(legacy['receipt'], receipt)
+    before = legacy['receipt'].read_bytes()
+    with pytest.raises(ValueError):
+        host.memoryd_abandon_legacy_transfer(legacy['payload'])
+    assert legacy['receipt'].read_bytes() == before
+    assert legacy['receipt'].stat().st_mode & 0o777 == 0o600
+    assert not list(legacy['bootstrap'].glob('memoryd-abandonment-*'))
+
+
+@pytest.mark.parametrize('invalid', ['malformed_id', 'duplicate_id'])
+def test_legacy_stage_validation_requires_recoverable_bundle_ids(legacy, invalid):
+    manifest = json.loads(json.dumps(legacy['old']['remote_manifest']))
+    bundle = manifest['bundles'][0]
+    if invalid == 'malformed_id':
+        bundle['bundle_id'] = 'sha256:malformed'
+    else:
+        bundle['root_count'] = 1
+        manifest['bundles'].append({**bundle, 'path': 'another.bundle'})
+    with pytest.raises(ValueError):
+        host._validate_memoryd_transfer_manifest(manifest, include_archived=True)
+
+
+@pytest.mark.parametrize('receipt_name,key,value', [
+    ('legacy', 'schema_version', True), ('active', 'schema_version', True),
+    ('active', 'imported_record_count', True),
+])
+def test_abandon_refuses_boolean_receipt_fields_before_fencing(legacy, receipt_name, key, value):
+    path = legacy['receipt'] if receipt_name == 'legacy' else legacy['bootstrap'] / (
+        'memoryd-transfer-' + legacy['new']['manifest_sha256'] + '.json')
+    receipt = json.loads(path.read_bytes())
+    receipt[key] = value
+    host.write(path, receipt)
+    before = legacy['receipt'].read_bytes()
+    with pytest.raises(ValueError):
+        host.memoryd_abandon_legacy_transfer(legacy['payload'])
+    assert legacy['receipt'].read_bytes() == before
+    assert legacy['receipt'].stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize('key,value', [
+    ('schema_version', True), ('imported_record_count', True),
+    ('source_database_sha256', 'f' * 64), ('source_instance_id', 'cmi_' + 'f' * 32),
+    ('source_profile', 'other'), ('source_workspace', 'other'),
+    ('target_profile', 'other'), ('target_workspace', 'other'),
+    ('destination_instance_id', 'cmi_' + 'f' * 32),
+])
+def test_guard_rejects_completed_receipt_inconsistent_with_attestation(legacy, key, value):
+    guard = host.memoryd_abandon_legacy_transfer(legacy['payload'])['legacy_guard']
+    marker_path = legacy['bootstrap'] / ('memoryd-abandonment-' + guard['legacy_transfer_id'] + '.json')
+    marker = json.loads(marker_path.read_bytes())
+    active_path = legacy['bootstrap'] / ('memoryd-transfer-' + marker['active_transfer_id'] + '.json')
+    active = json.loads(active_path.read_bytes())
+    active[key] = value
+    host.write(active_path, active)
+    marker['active_receipt_sha256'] = hashlib.sha256(active_path.read_bytes()).hexdigest()
+    host.write(marker_path, marker)
+    with pytest.raises(ValueError):
+        host._memoryd_verify_abandonment(guard['legacy_transfer_id'])
+
+
+def test_guard_rejects_boolean_legacy_receipt_schema(legacy):
+    guard = host.memoryd_abandon_legacy_transfer(legacy['payload'])['legacy_guard']
+    marker_path = legacy['bootstrap'] / ('memoryd-abandonment-' + guard['legacy_transfer_id'] + '.json')
+    marker = json.loads(marker_path.read_bytes())
+    receipt = json.loads(legacy['receipt'].read_bytes())
+    receipt['schema_version'] = True
+    host.write(legacy['receipt'], receipt)
+    legacy['receipt'].chmod(0o400)
+    backup = legacy['bootstrap'] / ('memoryd-legacy-receipt-' + guard['legacy_transfer_id'] + '.json')
+    host.write(backup, receipt)
+    digest = hashlib.sha256(legacy['receipt'].read_bytes()).hexdigest()
+    marker.update(legacy_receipt_sha256=digest, legacy_receipt_backup_sha256=digest)
+    host.write(marker_path, marker)
+    with pytest.raises(ValueError):
+        host._memoryd_verify_abandonment(guard['legacy_transfer_id'])
+
+
+def test_guard_refuses_oversized_legacy_bundle_even_without_local_stage(legacy, tmp_path):
+    guard = host.memoryd_abandon_legacy_transfer(legacy['payload'])['legacy_guard']
+    stage = legacy['state'] / 'memoryd-transfer' / guard['legacy_transfer_id'][:16]
+    stage.rename(tmp_path / 'retained-stage')
+    marker_path = legacy['bootstrap'] / ('memoryd-abandonment-' + guard['legacy_transfer_id'] + '.json')
+    marker = json.loads(marker_path.read_bytes())
+    marker['legacy_bundles'][0]['size_bytes'] = 24 * 1024 * 1024 + 1
+    host.write(marker_path, marker)
+    with pytest.raises(ValueError):
+        host._memoryd_verify_abandonment(guard['legacy_transfer_id'])
 
 
 def test_abandon_refuses_a_legacy_bundle_receipt(legacy):

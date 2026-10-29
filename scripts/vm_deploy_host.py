@@ -1179,7 +1179,8 @@ def _validate_memoryd_transfer_manifest(data, *, include_archived=False):
                 'include_archived',
                 'source_instance_id','source_profile','source_workspace',
                 'target_profile','target_workspace','bundles'}
-    if not isinstance(data,dict) or set(data)!=expected or data.get('schema_version')!=1:
+    if (not isinstance(data,dict) or set(data)!=expected
+            or type(data.get('schema_version')) is not int or data['schema_version']!=1):
         raise ValueError('MemoryD transfer manifest shape is invalid')
     digest=data.get('transfer_manifest_sha256')
     source_db=data.get('source_database_sha256')
@@ -1203,7 +1204,7 @@ def _validate_memoryd_transfer_manifest(data, *, include_archived=False):
             or not isinstance(data.get('source_cutoff_at'),str) or not data['source_cutoff_at']
             or not isinstance(bundles,list) or not bundles):
         raise ValueError('MemoryD transfer bundle selection is empty')
-    names=set();roots=0;total=0
+    names=set();bundle_ids=set();roots=0;total=0
     for bundle in bundles:
         if not isinstance(bundle,dict) or set(bundle)!={'path','sha256','size_bytes','bundle_id','manifest_digest','root_count'}:
             raise ValueError('MemoryD bundle descriptor shape is invalid')
@@ -1218,10 +1219,13 @@ def _validate_memoryd_transfer_manifest(data, *, include_archived=False):
                 or not re.fullmatch(r'sha256:[a-f0-9]{64}',bundle['manifest_digest'])):
             raise ValueError('MemoryD bundle digest is invalid')
         size=bundle['size_bytes'];root_count=bundle['root_count']
-        if type(size) is not int or not 0<size<=(64 if include_archived else 24)*1024*1024 or type(root_count) is not int or not 0<root_count<=5000:
+        if type(size) is not int or not 0<size<=24*1024*1024 or type(root_count) is not int or not 0<root_count<=5000:
             raise ValueError('MemoryD bundle exceeds the released size or root limit')
-        if not isinstance(bundle['bundle_id'],str) or not bundle['bundle_id'].startswith('sha256:'):
+        if (not isinstance(bundle['bundle_id'],str) or not bundle['bundle_id'].startswith('sha256:')
+                or (include_archived and (not re.fullmatch(r'sha256:[a-f0-9]{64}',bundle['bundle_id'])
+                                         or bundle['bundle_id'] in bundle_ids))):
             raise ValueError('MemoryD bundle identity is invalid')
+        bundle_ids.add(bundle['bundle_id'])
         total+=size;roots+=root_count
     if total>128*1024*1024 or roots!=record_count:
         raise ValueError('MemoryD bundle set does not exactly cover the source record count')
@@ -1370,7 +1374,7 @@ def _memoryd_reconciliation_stage(transfer_id, source, *, include_archived):
         if not item or any(item.get(key)!=bundle[key] for key in
                            ('path','size_bytes','sha256','bundle_id','manifest_digest')):
             raise ValueError('MemoryD staged bundle descriptor differs from source')
-        payload=_memoryd_read_owned(directory/bundle['path'],limit=(64 if include_archived else 24)*1024*1024)
+        payload=_memoryd_read_owned(directory/bundle['path'],limit=24*1024*1024)
         if len(payload)!=bundle['size_bytes'] or hashlib.sha256(payload).hexdigest()!=bundle['sha256']:
             raise ValueError('MemoryD staged bundle hash changed')
         try:
@@ -1512,14 +1516,17 @@ def _memoryd_legacy_evidence(data):
         raise ValueError('MemoryD legacy per-transfer receipt blocks abandonment')
     scope=('source_database_sha256','source_instance_id','source_profile','source_workspace',
            'target_profile','target_workspace')
-    if (receipt.get('schema_version')!=1 or receipt.get('status')!='in_progress'
+    if (type(receipt.get('schema_version')) is not int or receipt['schema_version']!=1
+            or receipt.get('status')!='in_progress'
             or receipt.get('transfer_manifest_sha256')!=old_id or receipt.get('bundles')!={}
             or 'staging' in receipt or not isinstance(receipt.get('target_backup'),dict)
             or any(receipt.get(key)!=old[key] for key in scope)
-            or completed.get('schema_version')!=1 or completed.get('status')!='complete'
+            or type(completed.get('schema_version')) is not int or completed['schema_version']!=1
+            or completed.get('status')!='complete'
             or completed.get('transfer_manifest_sha256')!=active_id or 'staging' in completed
             or any(completed.get(key)!=active[key] for key in scope)
-            or completed.get('imported_record_count')!=proof['active_source_record_count']
+            or type(completed.get('imported_record_count')) is not int
+            or completed['imported_record_count']!=proof['active_source_record_count']
             or type(completed.get('completed_at_ns')) is not int
             or completed['completed_at_ns']<=0
             or not isinstance(completed.get('destination_instance_id'),str)
@@ -1553,6 +1560,7 @@ def _memoryd_verify_abandonment(legacy_id):
             or marker['schema_version']!=1
             or marker.get('status')!='abandoned' or marker.get('policy')!='active_only'
             or marker.get('legacy_transfer_id')!=legacy_id
+            or type(receipt.get('schema_version')) is not int or receipt['schema_version']!=1
             or receipt.get('transfer_manifest_sha256')!=legacy_id or receipt.get('status')!='in_progress'
             or receipt.get('bundles')!={} or 'staging' in receipt
             or marker.get('legacy_receipt_sha256')!=hashlib.sha256(raw).hexdigest()
@@ -1590,8 +1598,13 @@ def _memoryd_verify_abandonment(legacy_id):
     active_path=bootstrap/('memoryd-transfer-'+marker['active_transfer_id']+'.json')
     active_raw=_memoryd_read_owned(active_path);active=_memoryd_json(active_raw)
     if (hashlib.sha256(active_raw).hexdigest()!=marker['active_receipt_sha256']
-            or active.get('status')!='complete' or active.get('destination_instance_id')!=marker['destination_instance_id']
-            or active.get('transfer_manifest_sha256')!=marker['active_transfer_id']):
+            or type(active.get('schema_version')) is not int or active['schema_version']!=1
+            or active.get('status')!='complete'
+            or active.get('transfer_manifest_sha256')!=marker['active_transfer_id']
+            or any(active.get(key)!=marker[key] for key in ('source_database_sha256','source_instance_id',
+                       'source_profile','source_workspace','target_profile','target_workspace','destination_instance_id'))
+            or type(active.get('imported_record_count')) is not int
+            or active['imported_record_count']!=marker['active_source_record_count']):
         raise ValueError('MemoryD completed transfer evidence changed')
     bundles=marker.get('legacy_bundles')
     fields={'path','size_bytes','sha256','bundle_id','manifest_digest','root_count'}
@@ -1599,7 +1612,7 @@ def _memoryd_verify_abandonment(legacy_id):
             or any(not isinstance(b['path'],str) or Path(b['path']).name!=b['path'] for b in bundles)
             or any(not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.bundle',b['path']) for b in bundles)
             or [b['path'] for b in bundles]!=sorted({b['path'] for b in bundles})
-            or any(type(b['size_bytes']) is not int or not 0<b['size_bytes']<=64*1024*1024
+            or any(type(b['size_bytes']) is not int or not 0<b['size_bytes']<=24*1024*1024
                    or type(b['root_count']) is not int or not 0<b['root_count']<=5000
                    or not isinstance(b['sha256'],str) or not re.fullmatch(r'[a-f0-9]{64}',b['sha256'])
                    or not isinstance(b['bundle_id'],str) or not re.fullmatch(r'sha256:[a-f0-9]{64}',b['bundle_id'])
@@ -1622,7 +1635,7 @@ def _memoryd_verify_abandonment(legacy_id):
                 or {p.name for p in directory.iterdir()}!={'transfer.json',*(b['path'] for b in bundles)}):
             raise ValueError('MemoryD abandoned staging changed')
         for bundle in bundles:
-            content=_memoryd_read_owned(directory/bundle['path'],limit=64*1024*1024)
+            content=_memoryd_read_owned(directory/bundle['path'],limit=24*1024*1024)
             if len(content)!=bundle['size_bytes'] or hashlib.sha256(content).hexdigest()!=bundle['sha256']:
                 raise ValueError('MemoryD abandoned bundle changed')
     guard={'legacy_transfer_id':legacy_id,'receipt_sha256':marker['legacy_receipt_sha256'],
@@ -1747,8 +1760,10 @@ def memoryd_abandon_legacy_transfer(data):
     _memoryd_publish_once(marker_path,(json.dumps(marker,sort_keys=True,separators=(',',':'))+'\n').encode())
     guard,_=_memoryd_verify_abandonment(legacy_id)
     if not _memoryd_capture_import_quiescent():raise ValueError('MemoryD import is still active')
-    _memoryd_legacy_snapshot(health['adapter_image'],bundle_ids,destination)
-    if _memoryd_verify_abandonment(legacy_id)[0]!=guard:
+    final_snapshot=_memoryd_legacy_snapshot(health['adapter_image'],bundle_ids,destination)
+    if (final_snapshot['verification_active_count']!=marker['active_source_record_count']
+            or final_snapshot['verification_archived_count']!=0
+            or _memoryd_verify_abandonment(legacy_id)[0]!=guard):
         raise ValueError('MemoryD abandonment evidence changed')
     return {'status':'abandoned','legacy_guard':guard,'mutated':True}
 def _memoryd_cli(args, *, timeout=300):
