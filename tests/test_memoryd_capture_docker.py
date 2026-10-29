@@ -104,6 +104,23 @@ while True: time.sleep(1)
             assert database.execute('SELECT count(*) FROM synthetic').fetchone() == (1,)
         docker('exec', '--user', '10001:10001', writer, 'python3', '-c',
                "import os; assert os.path.getsize('/data/memory.db-wal') > 0")
+        docker('exec', '--detach', '--user', '10001:10001', writer, 'python3', '-c',
+               "import os,sys; os.execv(sys.executable, ['codex-memoryd', '-c', "
+               "\"import pathlib,time; pathlib.Path('/data/import-ready').touch(); time.sleep(60)\", "
+               "'bundle', 'import'])")
+        docker('exec', '--user', '10001:10001', writer, 'python3', '-c',
+               "import pathlib,time; p=pathlib.Path('/data/import-ready'); "
+               "deadline=time.monotonic()+10; "
+               "exec('while not p.exists() and time.monotonic() < deadline: time.sleep(0.05)'); assert p.exists()")
+        def fixture_top(command, **_kwargs):
+            assert command == ['docker', 'top', 'mcp-control-plane-memoryd', '-eo', 'pid,args']
+            result = real_run(['docker', 'top', writer, '-eo', 'pid,args'], capture_output=True, timeout=15)
+            if result.returncode:
+                raise ValueError('Synthetic container process inventory is unavailable')
+            return result.stdout
+        with monkeypatch.context() as context:
+            context.setattr(host, 'run', fixture_top)
+            assert host._memoryd_capture_import_quiescent(proc=tmp_path) is False
     finally:
         for container in (helper, writer, init):
             if owned('container', container):

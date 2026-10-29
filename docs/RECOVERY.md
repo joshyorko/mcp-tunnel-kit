@@ -73,6 +73,8 @@ Capture rejects a NULL or different value in any database table's `profile_id` o
 
 Capture refuses a database with any `sessions` or `visible_turns` rows. This excludes raw session and conversation history from recovery captures.
 
+A preserved legacy transfer receipt with zero bundles is accepted only when it has no staging record or directory and exactly one later completed receipt matches its source and destination identity. Capture checks for active imports and leaves both receipts unchanged. Ambiguous or active transfers block capture.
+
 ## Configure private MinIO storage and age identities
 
 Use two age identities. Identity A decrypts one bundle. Identity B decrypts the wrapped copy of identity A on the removable drive. Store identity B as a private MinIO object, separate from that drive. Keep MinIO account access available through a separate recovery channel.

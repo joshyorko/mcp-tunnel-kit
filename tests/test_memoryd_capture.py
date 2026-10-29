@@ -8,6 +8,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 
 import pytest
 
@@ -105,6 +106,120 @@ def test_capture_accepts_exactly_one_active_memoryd_app():
     host._memoryd_require_active_app([
         {'slug': 'memoryd', 'name': 'MemoryD', 'activeDeployment': {'id': 'fixture'}},
     ])
+
+
+def setup_superseded_transfer(tmp_path, monkeypatch):
+    bootstrap = tmp_path / 'bootstrap'
+    bootstrap.mkdir(mode=0o700)
+    marker = bootstrap / 'memoryd-integration.json'
+    marker.write_text(json.dumps({'organization': 'fixture', 'id': 'fixture', 'url': 'fixture'}))
+    marker.chmod(0o600)
+    legacy = {
+        'schema_version': 1, 'status': 'in_progress', 'transfer_manifest_sha256': 'a' * 64,
+        'source_database_sha256': 'b' * 64, 'source_instance_id': 'cmi_' + 'c' * 32,
+        'source_profile': 'personal', 'source_workspace': 'dakota-codex-only',
+        'target_profile': 'personal', 'target_workspace': 'dakota-codex-only',
+        'target_backup': {'path': 'synthetic'}, 'bundles': {},
+    }
+    complete = {**legacy, 'status': 'complete', 'transfer_manifest_sha256': 'd' * 64,
+                'bundles': {'fixture': {'status': 'complete'}}, 'completed_at_ns': time.time_ns(),
+                'imported_record_count': 1}
+    legacy_path = bootstrap / 'memoryd-transfer.json'
+    complete_path = bootstrap / ('memoryd-transfer-' + 'd' * 64 + '.json')
+    def write(path, value):
+        path.write_text(json.dumps(value))
+        path.chmod(0o600)
+    write(legacy_path, legacy)
+    os.utime(legacy_path, ns=(1_000_000_000, 1_000_000_000))
+    write(complete_path, complete)
+    monkeypatch.setattr(host, 'STATE', tmp_path)
+    monkeypatch.setattr(host, 'memoryd_status', lambda: {
+        'status': 'HEALTHY', 'volume_exists': True, 'app_registered': True, 'adapter_sha256': 'e' * 64,
+    })
+    monkeypatch.setattr(host, 'memoryd_health', lambda: {
+        'status': 'PASS', 'persistent_volume': host.MEMORYD_VOLUME, 'adapter_sha256': 'e' * 64,
+    })
+    monkeypatch.setattr(host, 'identity', lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(host, 'run', lambda *_args, **_kwargs: b'mcp-control-plane-memoryd\n')
+    monkeypatch.setattr(host, '_memoryd_capture_import_quiescent', lambda: True, raising=False)
+    return legacy_path, complete_path, legacy, complete, write
+
+
+def test_capture_accepts_only_a_proven_superseded_legacy_receipt(tmp_path, monkeypatch):
+    legacy_path, complete_path, _, _, _ = setup_superseded_transfer(tmp_path, monkeypatch)
+    before = (legacy_path.read_bytes(), legacy_path.stat().st_mtime_ns, complete_path.read_bytes())
+    assert host.memoryd_capture_preflight()['status'] == 'healthy'
+    assert (legacy_path.read_bytes(), legacy_path.stat().st_mtime_ns, complete_path.read_bytes()) == before
+
+
+def test_capture_allows_unrelated_completed_history(tmp_path, monkeypatch):
+    _, complete_path, _, complete, write = setup_superseded_transfer(tmp_path, monkeypatch)
+    write(complete_path.parent / ('memoryd-transfer-' + 'e' * 64 + '.json'),
+          {**complete, 'transfer_manifest_sha256': 'e' * 64, 'source_database_sha256': 'f' * 64})
+    assert host.memoryd_capture_preflight()['status'] == 'healthy'
+
+
+@pytest.mark.parametrize('conflict', ['missing_complete', 'different_source', 'different_instance',
+                                      'different_source_scope', 'different_target_scope',
+                                      'legacy_staging', 'legacy_bundles', 'legacy_directory',
+                                      'active_import', 'older_complete', 'ambiguous_complete',
+                                      'malformed_duplicate'])
+def test_capture_refuses_ambiguous_superseded_legacy_receipt(tmp_path, monkeypatch, conflict):
+    legacy_path, complete_path, legacy, complete, write = setup_superseded_transfer(tmp_path, monkeypatch)
+    if conflict == 'missing_complete':
+        complete_path.unlink()
+    elif conflict == 'different_source':
+        write(complete_path, {**complete, 'source_database_sha256': 'f' * 64})
+    elif conflict == 'different_instance':
+        write(complete_path, {**complete, 'source_instance_id': 'cmi_' + 'f' * 32})
+    elif conflict == 'different_source_scope':
+        write(complete_path, {**complete, 'source_workspace': 'other'})
+    elif conflict == 'different_target_scope':
+        write(complete_path, {**complete, 'target_workspace': 'other'})
+    elif conflict == 'legacy_staging':
+        write(legacy_path, {**legacy, 'staging': {'path': 'synthetic'}})
+    elif conflict == 'legacy_bundles':
+        write(legacy_path, {**legacy, 'bundles': {'fixture': {}}})
+    elif conflict == 'legacy_directory':
+        (tmp_path / 'memoryd-transfer' / ('a' * 16)).mkdir(parents=True)
+    elif conflict == 'active_import':
+        monkeypatch.setattr(host, '_memoryd_capture_import_quiescent', lambda: False, raising=False)
+    elif conflict == 'older_complete':
+        write(complete_path, {**complete, 'completed_at_ns': 1})
+    elif conflict == 'ambiguous_complete':
+        write(complete_path.parent / ('memoryd-transfer-' + 'e' * 64 + '.json'),
+              {**complete, 'transfer_manifest_sha256': 'e' * 64})
+    else:
+        write(complete_path.parent / ('memoryd-transfer-' + 'e' * 64 + '.json'),
+              {**complete, 'transfer_manifest_sha256': 'e' * 64, 'completed_at_ns': None})
+    with pytest.raises((ValueError, OSError)):
+        host.memoryd_capture_preflight()
+
+
+@pytest.mark.parametrize('command,expected', [
+    (b'/usr/local/bin/codex-memoryd\0serve\0', False),
+    (b'/usr/local/bin/codex-memoryd\0--local\0bundle\0import\0--apply\0', True),
+    (b'python3\0-c\0fixture\0memoryd-import-bundles\0', True),
+    (b'docker\0exec\0memoryd\0/usr/local/bin/codex-memoryd\0bundle\0import\0', True),
+])
+def test_capture_recognizes_active_import_commands(command, expected):
+    assert host._memoryd_import_process_active(command.split(b'\0')) is expected
+
+
+def test_capture_proves_import_quiescence_in_host_and_container(tmp_path, monkeypatch):
+    process = tmp_path / '123'
+    process.mkdir()
+    (process / 'cmdline').write_bytes(b'python3\0-c\0fixture\0memoryd-import-bundles\0')
+    monkeypatch.setattr(host, 'run', lambda *_args, **_kwargs: b'PID COMMAND\n1 codex-memoryd serve\n')
+    assert host._memoryd_capture_import_quiescent(proc=tmp_path) is False
+    (process / 'cmdline').write_bytes(b'python3\0-c\0fixture\0other\0')
+    assert host._memoryd_capture_import_quiescent(proc=tmp_path) is True
+    monkeypatch.setattr(host, 'run', lambda *_args, **_kwargs:
+                        b'PID COMMAND\n1 codex-memoryd serve\n2 codex-memoryd --local bundle import --apply\n')
+    assert host._memoryd_capture_import_quiescent(proc=tmp_path) is False
+    monkeypatch.setattr(host, 'run', lambda *_args, **_kwargs: b'not a process listing')
+    with pytest.raises(ValueError):
+        host._memoryd_capture_import_quiescent(proc=tmp_path)
 
 
 def synthetic_snapshot(root):
