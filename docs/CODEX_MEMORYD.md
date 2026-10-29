@@ -64,12 +64,23 @@ retains the named `codex-memoryd-data` volume. Starting it again requires both
 accessories and that volume to exist. The existing Executor identity and tunnel
 are checked before and after deployment.
 
+## Portable transfer
+
+Use codex-memoryd's v1 portable bundle format for instance replication; never
+copy the SQLite database. The released v0.1.0 exporter caps a selection at
+5,000 root memories, so larger corpora must be split into explicit `--record-id`
+chunks. Preview each export and each destination import, verify the bundle
+integrity and source/destination scopes, then apply with that import preview's
+plan ID. Transfer the bundle bytes over the pinned SSH path and verify their
+SHA-256 before import. Preserve the source instance ID and bundle manifest
+digests; a repeated import should plan zero creates and exact identity reuse.
+
 ## Activation envelope
 
-The current VM baseline has six vCPUs and 1,226,960 kB `MemAvailable`, with no
-swap. Keep the planned memory limits at 256 MiB for codex-memoryd and 128 MiB
-for the adapter, with CPU limits of 0.5 and 0.25 respectively. Require at
-least 1.5 GiB `MemAvailable` immediately before activation; this preserves a
-1 GiB reserve after both services reach their memory limits. Recheck the
-existing Executor, CAS, schema proxy, tunnel, and Fizzy containers before and
-after any activation.
+Keep the planned memory limits at 256 MiB for codex-memoryd and 128 MiB for the
+adapter, with CPU limits of 0.5 and 0.25 respectively. The managed deployment
+preflight reads live `MemAvailable` and requires at least 1.5 GiB immediately
+before activation; this leaves more than a 1 GiB reserve after both services
+reach their memory limits. A failed gate reports the current RAM floor and
+performs no source sync or accessory boot. Recheck the existing Executor, CAS,
+schema proxy, tunnel, and Fizzy containers before and after activation.
