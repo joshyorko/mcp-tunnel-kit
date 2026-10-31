@@ -11,6 +11,17 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
+PINNED_PRODUCER_SHA = "b95b1ba7d0d0e5bf8ee361ec7b28185c7bda3691"
+PRODUCER_RECEIPT_BLOB_SHA = "60335e8b6d63baccd6a98df6b969e6878e2ceedd"
+PRODUCER_SCHEMA_BLOB_SHA = "ba72720b346a90ef7facd689852da498cfe32115"
+PRODUCER_CATALOG_BLOB_SHA = "22af4675d1fc36ebcdffaaebd146bf7760360823"
+PRODUCER_RECEIPT_SHA256 = "ce24db707c451fb98a9c367b382220a02c004c7c22f4deab48e7b79cd521c838"
+
+
+def git_blob_sha(path):
+    raw = path.read_bytes()
+    header = f"blob {len(raw)}\0".encode()
+    return hashlib.sha1(header + raw).hexdigest()
 
 
 def seal(value):
@@ -33,7 +44,9 @@ def helper():
 
 
 def catalog_fixture():
-    return json.loads((ROOT / "tests/fixtures/cas-native-methods-pr26.json").read_text())
+    value = json.loads((ROOT / "tests/fixtures/cas-native-methods-pr26.json").read_text())
+    value["source_revision"] = PINNED_PRODUCER_SHA
+    return value
 
 
 def catalog_payload(fixture):
@@ -45,7 +58,7 @@ def producer_receipt_fixture():
 
 
 def current_producer_contract_fixture():
-    return json.loads((ROOT / "tests/fixtures/cas-qualified-release-v1-producer-220079044.json").read_text())
+    return json.loads((ROOT / "tests/fixtures/cas-qualified-release-v1-producer-b95b1ba7.json").read_text())
 
 
 def receipt(method_names=None, *, revision="a" * 40):
@@ -224,9 +237,11 @@ def proof(_manifest):
 def test_schema_is_a_strict_json_schema_contract():
     schema = json.loads((ROOT / ".github/schemas/cas-qualified-release-v1.schema.json").read_text())
     producer_schema = json.loads((ROOT / "tests/fixtures/cas-qualified-release-v1-producer-schema-361eb0b.json").read_text())
-    current_producer_schema = json.loads((ROOT / "tests/fixtures/cas-qualified-release-v1-producer-schema-220079044.json").read_text())
+    current_schema_path = ROOT / "tests/fixtures/cas-qualified-release-v1-producer-schema-b95b1ba7.json"
+    current_producer_schema = json.loads(current_schema_path.read_text())
     assert schema == producer_schema
     assert schema == current_producer_schema
+    assert git_blob_sha(current_schema_path) == PRODUCER_SCHEMA_BLOB_SHA
     assert schema["properties"]["source"]["properties"]["merged"] == {"const": True}
     assert schema["properties"]["qualification"]["properties"]["withheld_methods"]["maxItems"] == 0
     assert schema["properties"]["publication"]["properties"]["platform"] == {"const": "linux/amd64"}
@@ -253,15 +268,20 @@ def test_pinned_producer_generator_receipt_fixture_validates_against_the_consume
     assert module._publisher_artifact_name(source_sha, run_id) == f"cas-qualified-release-{source_sha}-{run_id}"
 
 
-def test_current_pr26_generated_contract_fixture_covers_the_source_pinned_catalog():
+def test_current_pr26_generated_fixture_matches_pinned_producer_and_catalog_contract():
     import jsonschema
     module = helper()
+    receipt_path = ROOT / "tests/fixtures/cas-qualified-release-v1-producer-b95b1ba7.json"
+    catalog_path = ROOT / "tests/fixtures/cas-native-methods-pr26.json"
     candidate = current_producer_contract_fixture()
     catalog = catalog_fixture()
     schema = json.loads((ROOT / ".github/schemas/cas-qualified-release-v1.schema.json").read_text())
     jsonschema.Draft202012Validator(schema, format_checker=jsonschema.FormatChecker()).validate(candidate)
     assert module.validate_handoff(candidate) == candidate
     module.validate_handoff_surface_against_catalog(candidate, catalog_payload(catalog))
+    assert git_blob_sha(receipt_path) == PRODUCER_RECEIPT_BLOB_SHA
+    assert git_blob_sha(catalog_path) == PRODUCER_CATALOG_BLOB_SHA
+    assert candidate["receipt_sha256"] == PRODUCER_RECEIPT_SHA256
     assert candidate["source"]["revision"] == "e" * 40
     assert len(candidate["qualification"]["surface"]["methods"]) == 58
     assert module._publisher_artifact_name(candidate["source"]["revision"], "125") == (
@@ -493,7 +513,7 @@ def test_fetch_handoff_returns_no_candidate_when_current_main_has_no_publisher_r
 
 def test_fetch_handoff_reads_only_the_current_main_publisher_artifact():
     module = helper()
-    candidate = producer_receipt_fixture()
+    candidate = current_producer_contract_fixture()
     commit_sha = candidate["source"]["revision"]
     run_id = int(candidate["publication"]["run_url"].rsplit("/", 1)[-1])
     archive = receipt_archive(candidate)
@@ -580,7 +600,7 @@ def test_surface_digest_rejects_a_changed_native_method_owner():
 def test_actual_pr26_catalog_of_58_slash_delimited_methods_is_accepted():
     module = helper()
     catalog = catalog_fixture()
-    assert catalog["source_revision"] == "220079044461a50ba4cc557cf962801a04dd2f07"
+    assert catalog["source_revision"] == PINNED_PRODUCER_SHA
     candidate = receipt([row["method"] for row in catalog["methods"]],
                         revision=catalog["source_revision"])
     source_qualification_fixture(candidate, catalog_payload(catalog))
