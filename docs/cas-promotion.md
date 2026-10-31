@@ -9,7 +9,7 @@ The scheduled promotion lane consumes one v1 receipt from `joshyorko/codex-actio
 - The consumer checks the artifact metadata against the run, hashes the downloaded archive against GitHub's artifact digest, and requires the embedded receipt to equal the pinned source file.
 - The consumer fetches `ci/codex_qualification/native_methods.json` at the receipt's exact source revision and requires the receipt matrix to cover that catalog exactly.
 
-Downloading a CAS workflow artifact requires a cross-repository credential with read-only `Actions` access to `joshyorko/codex-action-server`. The scheduled workflow reads it from the `CAS_ARTIFACTS_READ_TOKEN` secret and fails closed when it is unavailable. This checkout has no such credential or CAS App installation; none was created for this change.
+Downloading a CAS workflow artifact requires a cross-repository credential with read-only `Actions` access to `joshyorko/codex-action-server`. The promotion workflow reads it from the `CAS_ARTIFACTS_READ_TOKEN` secret. The protected deploy workflow exposes it only for the explicit `cas` operation, then revalidates the publisher artifact before any CAS mutation. Both workflows fail closed when it is unavailable. This checkout has no such credential or CAS App installation; none was created for this change.
 
 The receipt's own `receipt_sha256` covers canonical compact JSON without that field. It detects accidental edits; it is not treated as provenance. Provenance comes from the pinned CAS source and publisher commits, successful workflow records, the authenticated run artifact and the independently verified OCI image digest/platform/revision.
 

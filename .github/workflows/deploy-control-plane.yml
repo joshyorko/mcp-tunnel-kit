@@ -119,6 +119,7 @@ jobs:
           HOST_TAP_ROLLBACK_APPROVAL: ${{ inputs.approve_host_tap_rollback }}
           TAP_RECONCILIATION_RUN_ID: ${{ inputs.tap_reconciliation_run_id }}
           TAP_RECONCILIATION_RUN_ATTEMPT: ${{ inputs.tap_reconciliation_run_attempt }}
+          CAS_ARTIFACTS_READ_TOKEN: ${{ inputs.operation == 'cas' && secrets.CAS_ARTIFACTS_READ_TOKEN || '' }}
         run: |
           set -euo pipefail
           args=("$OPERATION")

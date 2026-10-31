@@ -82,6 +82,7 @@ def test_production_workflow_remains_manual_approval_gated_and_does_not_auto_dep
     assert "refs/heads/main" in workflow
     assert "cas_digest:" not in workflow and "cas_revision:" not in workflow
     assert "push:" not in workflow and "workflow_run:" not in workflow
+    assert "CAS_ARTIFACTS_READ_TOKEN: ${{ inputs.operation == 'cas' && secrets.CAS_ARTIFACTS_READ_TOKEN || '' }}" in workflow
 
 
 def test_local_patchraptor_policy_inherits_central_rules_and_excludes_cas_pair():
