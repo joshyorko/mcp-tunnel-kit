@@ -148,8 +148,11 @@ def test_deployment_candidate_rechecks_receipt_provenance_and_rejects_unrelated_
               for key in ("cas","schema_proxy")}
     with patch.object(d.cas_promotion,"verify_handoff_source") as source, \
          patch.object(d.cas_promotion,"verify_candidate_is_current_or_newer") as ancestry, \
-         patch.object(d.cas_promotion,"verify_action_runs",return_value={}) as runs, \
+         patch.object(d.cas_promotion,"verify_action_runs",return_value={
+             "publication_artifact": evidence["handoff_source"]["artifact"]
+         }) as runs, \
          patch.object(d.cas_promotion,"verify_publisher",return_value=verified) as publisher:
+        source.return_value={"artifact":evidence["handoff_source"]["artifact"]}
         assert d._verified_cas_candidate(current,manifest,evidence)==evidence
         source.assert_called_once()
     ancestry.assert_called_once()

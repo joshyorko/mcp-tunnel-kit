@@ -40,6 +40,10 @@ def catalog_payload(fixture):
     return {"schema_version": fixture["schema_version"], "methods": fixture["methods"]}
 
 
+def producer_receipt_fixture():
+    return json.loads((ROOT / "tests/fixtures/cas-qualified-release-v1-producer-361eb0b.json").read_text())
+
+
 def receipt(method_names=None, *, revision="a" * 40):
     methods = method_names or ["codex.list_targets", "codex.list_models", "codex.start_turn"]
     value={
@@ -55,6 +59,17 @@ def receipt(method_names=None, *, revision="a" * 40):
             "run_url": "https://github.com/joshyorko/codex-action-server/actions/runs/1001",
             "required_ci_url": "https://github.com/joshyorko/codex-action-server/actions/runs/1002",
             "comparison_url": "https://github.com/joshyorko/codex-action-server/compare/b...a",
+            "native_release": {
+                "version": "0.166.0",
+                "tag": "rust-v0.166.0",
+                "asset_url": "https://github.com/openai/codex/releases/download/rust-v0.166.0/codex-x86_64-unknown-linux-musl.tar.gz",
+                "asset_id": "42",
+                "asset_sha256": "a" * 64,
+                "binary_sha256": "b" * 64,
+                "fixture_path": "tests/fixtures/protocol/codex_0.166.0_native_methods.json",
+                "fixture_sha256": "2baee7386cb82cd620bf3bee6e8e5cefbb7675ebcd0e71a0e8f0bafd7502ad18",
+                "qualification_run_url": "https://github.com/joshyorko/codex-action-server/actions/runs/123",
+            },
             "surface": {
                 "complete": True,
                 "sha256": "0" * 64,
@@ -83,11 +98,21 @@ def receipt(method_names=None, *, revision="a" * 40):
     return seal(value)
 
 
-def locator():
+def locator(value=None):
     module = helper()
-    commit_sha = "d" * 40
-    return {"repository": module.CAS_REPOSITORY, "path": module.HANDOFF_PATH,
-            "commit_sha": commit_sha, "url": module._handoff_url(commit_sha)}
+    candidate = value or receipt()
+    archive = receipt_archive(candidate)
+    run_id = candidate["publication"]["run_url"].rsplit("/", 1)[-1]
+    contents = json.dumps(candidate, sort_keys=True, separators=(",", ":")).encode()
+    return {"repository": module.CAS_REPOSITORY, "source_sha": candidate["source"]["revision"],
+            "publisher_run_id": run_id, "artifact": {
+                "run_id": run_id, "artifact_id": 9001,
+                "name": module._publisher_artifact_name(candidate["source"]["revision"], run_id),
+                "digest": "sha256:" + hashlib.sha256(archive).hexdigest(),
+                "file": module.RECEIPT_ARTIFACT_FILE,
+                "content_sha256": hashlib.sha256(contents).hexdigest(),
+                "receipt_sha256": candidate["receipt_sha256"],
+            }}
 
 
 def receipt_archive(value, *, contents=None):
@@ -99,8 +124,63 @@ def receipt_archive(value, *, contents=None):
     return archive.getvalue()
 
 
-def artifact_listing(archive, *, artifact_id=9001, name="qualified-cas-release-v1", expired=False):
+def source_qualification_fixture(candidate, catalog):
+    """Build deterministic source fixtures for consumer-only adversarial tests."""
+    if len(catalog["methods"]) == 1 and catalog["methods"][0]["method"] == "app/read":
+        path = ROOT / "tests/fixtures/cas-native-qualification-v1-fixture.json"
+        raw = path.read_bytes()
+        fixture = json.loads(raw)
+    else:
+        native = candidate["qualification"]["native_release"]
+        methods = []
+        for row in catalog["methods"]:
+            method = row["method"]
+            strategy = row["smoke_strategy"]
+            methods.append({
+                "method": method,
+                "classification": row["classification"],
+                "request_schema": row["request_schema"],
+                "response_schema": row["response_schema"],
+                "status": "compatible_pending_review",
+                "smoke_strategy": strategy,
+                "owning_typed_actions": row["owning_typed_actions"],
+                "typed_regressions": "passed",
+                "smoke": {"status": "passed" if strategy == "disposable_protocol_smoke"
+                          else "typed_action_regressions_passed"},
+                "regression_tests": ["tests/test_contract.py"],
+                "schema_fingerprint": {"request_sha256": "c" * 64, "response_sha256": "d" * 64},
+                "schemas": {row["request_schema"]: {"type": "object"},
+                            row["response_schema"]: {"type": "object"}},
+            })
+        fixture = {
+            "schema_version": 1,
+            "native_version": native["version"],
+            "source_tag": native["tag"],
+            "source_url": native["asset_url"],
+            "source_asset_sha256": native["asset_sha256"],
+            "source_asset_id": native["asset_id"],
+            "binary_sha256": native["binary_sha256"],
+            "qualification_run": native["qualification_run_url"],
+            "typed_regression_status": "passed",
+            "methods": methods,
+        }
+        raw = json.dumps(fixture, sort_keys=True, separators=(",", ":")).encode()
+        candidate["qualification"]["native_release"]["fixture_sha256"] = hashlib.sha256(raw).hexdigest()
+        for row in catalog["methods"]:
+            method = row["method"]
+            candidate["qualification"]["behavior_coverage"][method]["strategy"] = (
+                "native_read_smoke" if row["smoke_strategy"] == "disposable_protocol_smoke"
+                else "isolated_fixture"
+            )
+        seal(candidate)
+    return raw, fixture
+
+
+def artifact_listing(archive, *, artifact_id=9001, name=None, expired=False,
+                     revision="a" * 40, run_id=1003):
     module = helper()
+    if name is None:
+        name = module._publisher_artifact_name(revision, str(run_id))
     return {"total_count": 1, "artifacts": [{
         "id": artifact_id, "name": name, "expired": expired,
         "size_in_bytes": len(archive),
@@ -108,8 +188,8 @@ def artifact_listing(archive, *, artifact_id=9001, name="qualified-cas-release-v
         "archive_download_url": (
             f"https://api.github.com/repos/{module.CAS_REPOSITORY}/actions/artifacts/{artifact_id}/zip"
         ),
-        "workflow_run": {"id": 1003, "repository_id": 42, "head_repository_id": 42,
-                         "head_branch": "main", "head_sha": "a" * 40},
+        "workflow_run": {"id": run_id, "repository_id": 42, "head_repository_id": 42,
+                         "head_branch": "main", "head_sha": revision},
     }]}
 
 
@@ -118,7 +198,8 @@ def run_proof(value):
     contents = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
     run_id = value["publication"]["run_url"].rsplit("/", 1)[-1]
     return {"publication_artifact": {
-        "run_id": run_id, "artifact_id": 9001, "name": "qualified-cas-release-v1",
+        "run_id": run_id, "artifact_id": 9001,
+        "name": helper()._publisher_artifact_name(value["source"]["revision"], run_id),
         "digest": "sha256:" + hashlib.sha256(archive).hexdigest(),
         "file": "qualified-release.json", "content_sha256": hashlib.sha256(contents).hexdigest(),
         "receipt_sha256": value["receipt_sha256"],
@@ -138,13 +219,32 @@ def proof(_manifest):
 
 def test_schema_is_a_strict_json_schema_contract():
     schema = json.loads((ROOT / ".github/schemas/cas-qualified-release-v1.schema.json").read_text())
+    producer_schema = json.loads((ROOT / "tests/fixtures/cas-qualified-release-v1-producer-schema-361eb0b.json").read_text())
+    assert schema == producer_schema
     assert schema["properties"]["source"]["properties"]["merged"] == {"const": True}
     assert schema["properties"]["qualification"]["properties"]["withheld_methods"]["maxItems"] == 0
     assert schema["properties"]["publication"]["properties"]["platform"] == {"const": "linux/amd64"}
     assert "receipt_sha256" in schema["required"]
     name = schema["properties"]["qualification"]["properties"]["surface"]["properties"]["methods"]["items"]["properties"]["name"]
-    assert name["maxLength"] == 128
     assert "/" in name["pattern"]
+
+
+def test_pinned_producer_generator_receipt_fixture_validates_against_the_consumer_schema():
+    import jsonschema
+    module = helper()
+    candidate = producer_receipt_fixture()
+    schema = json.loads((ROOT / ".github/schemas/cas-qualified-release-v1.schema.json").read_text())
+    jsonschema.Draft202012Validator(schema, format_checker=jsonschema.FormatChecker()).validate(candidate)
+    assert module.validate_handoff(candidate) == candidate
+    assert candidate["qualification"]["native_release"]["version"] == "0.166.0"
+    fixture_path = ROOT / "tests/fixtures/cas-native-qualification-v1-fixture.json"
+    catalog = json.loads((ROOT / "tests/fixtures/cas-native-qualification-v1-catalog.json").read_text())
+    module.validate_handoff_surface_against_catalog(candidate, catalog)
+    module.validate_handoff_native_fixture(candidate, catalog, fixture_path.read_bytes(),
+                                           json.loads(fixture_path.read_text()))
+    source_sha = candidate["source"]["revision"]
+    run_id = candidate["publication"]["run_url"].rsplit("/", 1)[-1]
+    assert module._publisher_artifact_name(source_sha, run_id) == f"cas-qualified-release-{source_sha}-{run_id}"
 
 
 def test_valid_handoff_updates_only_the_cas_schema_proxy_pair_and_has_rollback_proof():
@@ -356,29 +456,77 @@ def test_action_run_verification_rejects_untrusted_or_non_green_runs(field, valu
         module.verify_action_runs(candidate, reader=reader)
 
 
-def test_handoff_404_is_a_no_candidate_state_not_a_fake_ready_receipt(monkeypatch):
+def test_fetch_handoff_returns_no_candidate_when_current_main_has_no_publisher_run():
     module = helper()
+    candidate = producer_receipt_fixture()
+    source_sha = candidate["source"]["revision"]
 
-    def missing(url):
-        raise module.HTTPError(url, 404, "not found", None, None)
+    def reader(url):
+        if url.endswith("/commits/main"):
+            return {"sha": source_sha}
+        return {"total_count": 0, "workflow_runs": []}
 
-    fetched = module.fetch_handoff(reader=lambda _url: {"sha": "b" * 40}, raw_reader=missing)
-    assert fetched is None
+    assert module.fetch_handoff(reader=reader, artifact_bytes_reader=lambda _url: b"") is None
 
 
-def test_fetch_handoff_resolves_main_and_fetches_only_at_immutable_sha():
+def test_fetch_handoff_reads_only_the_current_main_publisher_artifact():
     module = helper()
-    commit_sha = "b" * 40
+    candidate = producer_receipt_fixture()
+    commit_sha = candidate["source"]["revision"]
+    run_id = int(candidate["publication"]["run_url"].rsplit("/", 1)[-1])
+    archive = receipt_archive(candidate)
+    listing = artifact_listing(archive, revision=commit_sha, run_id=run_id)
     calls = []
 
-    def raw_reader(url):
-        calls.append(url)
-        return receipt()
+    summary = {"id": run_id, "head_sha": commit_sha, "head_branch": "main",
+               "path": ".github/workflows/container.yml", "event": "push",
+               "status": "completed", "conclusion": "success"}
+    detail = {**summary, "repository": {"full_name": module.CAS_REPOSITORY},
+              "head_repository": {"full_name": module.CAS_REPOSITORY},
+              "html_url": candidate["publication"]["run_url"]}
 
-    fetched = module.fetch_handoff(reader=lambda _url: {"sha": commit_sha}, raw_reader=raw_reader)
-    assert fetched == (receipt(), locator() | {"commit_sha": commit_sha,
-                                              "url": module._handoff_url(commit_sha)})
-    assert calls == [module._handoff_url(commit_sha)]
+    def reader(url):
+        calls.append(url)
+        if url.endswith("/commits/main"):
+            return {"sha": commit_sha}
+        if "/actions/workflows/container.yml/runs?" in url:
+            return {"total_count": 1, "workflow_runs": [summary]}
+        if url.endswith(f"/actions/runs/{run_id}"):
+            return detail
+        if url.endswith("/artifacts?per_page=100"):
+            return listing
+        raise AssertionError(f"unexpected GitHub API path: {url}")
+
+    fetched = module.fetch_handoff(reader=reader, artifact_bytes_reader=lambda _url: archive)
+    assert fetched is not None
+    handoff, binding = fetched
+    assert handoff == candidate
+    assert binding == locator(candidate)
+    assert len(calls) == 4
+    assert all("qualified-release.json" not in url for url in calls)
+
+
+def test_fetch_handoff_rejects_non_green_or_wrong_source_publisher_runs():
+    module = helper()
+    candidate = producer_receipt_fixture()
+    source_sha = candidate["source"]["revision"]
+    run_id = int(candidate["publication"]["run_url"].rsplit("/", 1)[-1])
+    summary = {"id": run_id, "head_sha": source_sha, "head_branch": "main",
+               "path": ".github/workflows/container.yml", "event": "push",
+               "status": "completed", "conclusion": "failure"}
+    detail = {**summary, "repository": {"full_name": module.CAS_REPOSITORY},
+              "head_repository": {"full_name": module.CAS_REPOSITORY},
+              "html_url": candidate["publication"]["run_url"]}
+
+    def reader(url):
+        if url.endswith("/commits/main"):
+            return {"sha": source_sha}
+        if "/actions/workflows/container.yml/runs?" in url:
+            return {"total_count": 1, "workflow_runs": [summary]}
+        return detail
+
+    with pytest.raises(module.PromotionError, match="successful main push"):
+        module.fetch_handoff(reader=reader, artifact_bytes_reader=lambda _url: b"")
 
 
 def test_no_new_or_unmerged_receipt_is_not_reported_as_ready():
@@ -410,9 +558,10 @@ def test_surface_digest_rejects_a_changed_native_method_owner():
 def test_actual_pr26_catalog_of_58_slash_delimited_methods_is_accepted():
     module = helper()
     catalog = catalog_fixture()
-    assert catalog["source_revision"] == "ea1ec468027d20b511d059248335f36fd64e473b"
+    assert catalog["source_revision"] == "361eb0b3aa7a47b6b92963294876bc4dc3b25f7d"
     candidate = receipt([row["method"] for row in catalog["methods"]],
                         revision=catalog["source_revision"])
+    source_qualification_fixture(candidate, catalog_payload(catalog))
     module.validate_handoff_surface_against_catalog(candidate, catalog_payload(catalog))
     assert len(candidate["qualification"]["surface"]["methods"]) == 58
     assert "thread/start" in candidate["qualification"]["method_verdicts"]
@@ -451,7 +600,8 @@ def test_handoff_source_verification_rechecks_receipt_ancestry_and_source_catalo
     catalog = catalog_fixture()
     candidate = receipt([row["method"] for row in catalog["methods"]],
                         revision=catalog["source_revision"])
-    binding = module.handoff_source_evidence(candidate, locator())
+    fixture_bytes, fixture = source_qualification_fixture(candidate, catalog_payload(catalog))
+    binding = module.handoff_source_evidence(candidate, locator(candidate))
     main_sha = "e" * 40
     api_calls = []
 
@@ -464,24 +614,26 @@ def test_handoff_source_verification_rechecks_receipt_ancestry_and_source_catalo
                 "merge_base_commit": {"sha": base}}
 
     def raw_reader(url):
-        if url == binding["url"] or url == module._handoff_url(main_sha):
-            return candidate
         if url == module._method_catalog_url(candidate["source"]["revision"]):
             return catalog_payload(catalog)
         raise AssertionError("unexpected immutable source URL")
 
-    verified = module.verify_handoff_source(candidate, binding, reader=reader, raw_reader=raw_reader)
-    assert verified["commit_sha"] == binding["commit_sha"]
+    verified = module.verify_handoff_source(
+        candidate, binding, reader=reader, raw_reader=raw_reader,
+        raw_bytes_reader=lambda url: fixture_bytes,
+    )
+    assert verified["source_sha"] == binding["source_sha"]
     assert verified["main_sha"] == main_sha
-    assert len(api_calls) == 3
+    assert len(api_calls) == 2
 
 
 def test_handoff_source_verification_rejects_rechecksummed_false_surface_and_changed_bytes():
     module = helper()
     catalog = catalog_fixture()
     methods = [row["method"] for row in catalog["methods"]]
-    candidate = receipt(methods)
-    binding = module.handoff_source_evidence(candidate, locator())
+    candidate = receipt(methods, revision=catalog["source_revision"])
+    fixture_bytes, _fixture = source_qualification_fixture(candidate, catalog_payload(catalog))
+    binding = module.handoff_source_evidence(candidate, locator(candidate))
     main_sha = "e" * 40
 
     def reader(url):
@@ -491,26 +643,42 @@ def test_handoff_source_verification_rejects_rechecksummed_false_surface_and_cha
         return {"status": "ahead", "base_commit": {"sha": base},
                 "merge_base_commit": {"sha": base}}
 
-    forged = receipt(methods[:-1] + ["thread/forged"])
+    forged = copy.deepcopy(candidate)
+    removed = methods[-1]
+    forged["qualification"]["surface"]["methods"] = [
+        row for row in forged["qualification"]["surface"]["methods"] if row["name"] != removed
+    ] + [{"name": "thread/forged", "owner": "typed_action"}]
+    forged["qualification"]["method_verdicts"].pop(removed)
+    forged["qualification"]["method_verdicts"]["thread/forged"] = "qualified"
+    forged["qualification"]["behavior_coverage"].pop(removed)
+    forged["qualification"]["behavior_coverage"]["thread/forged"] = {
+        "result": "passed", "strategy": "isolated_fixture"
+    }
+    surface_rows = sorted(forged["qualification"]["surface"]["methods"], key=lambda row: row["name"])
+    forged["qualification"]["surface"]["sha256"] = hashlib.sha256(
+        json.dumps(surface_rows, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    seal(forged)
     def raw_reader(url):
         if url == module._method_catalog_url(candidate["source"]["revision"]):
-            return catalog
-        return forged
+            return catalog_payload(catalog)
+        raise AssertionError("unexpected source-pinned JSON URL")
 
-    with pytest.raises(module.PromotionError, match="bytes differ"):
-        module.verify_handoff_source(candidate, binding, reader=reader, raw_reader=raw_reader)
-
-    def changed_catalog(url):
-        if url == module._method_catalog_url(candidate["source"]["revision"]):
-            return catalog
-        return candidate
+    forged_binding = module.handoff_source_evidence(forged, locator(forged))
+    with pytest.raises(module.PromotionError, match="source-pinned native method catalog"):
+        module.verify_handoff_source(forged, forged_binding, reader=reader, raw_reader=raw_reader,
+                                     raw_bytes_reader=lambda _url: fixture_bytes)
 
     tampered = copy.deepcopy(candidate)
     tampered["qualification"]["method_verdicts"][methods[-1]] = "already_approved"
     seal(tampered)
-    tampered_binding = module.handoff_source_evidence(tampered, locator())
-    with pytest.raises(module.PromotionError, match="bytes differ"):
-        module.verify_handoff_source(tampered, tampered_binding, reader=reader, raw_reader=changed_catalog)
+    with pytest.raises(module.PromotionError, match="does not match the handoff"):
+        module._validate_handoff_source_binding(tampered, binding)
+
+    bad_fixture = fixture_bytes + b" "
+    with pytest.raises(module.PromotionError, match="fixture digest"):
+        module.verify_handoff_source(candidate, binding, reader=reader, raw_reader=raw_reader,
+                                     raw_bytes_reader=lambda _url: bad_fixture)
 
 
 def test_handoff_source_verification_rejects_catalog_omission_and_nonancestor():
@@ -518,7 +686,8 @@ def test_handoff_source_verification_rejects_catalog_omission_and_nonancestor():
     catalog = catalog_fixture()
     candidate = receipt([row["method"] for row in catalog["methods"]],
                         revision=catalog["source_revision"])
-    binding = module.handoff_source_evidence(candidate, locator())
+    fixture_bytes, _fixture = source_qualification_fixture(candidate, catalog_payload(catalog))
+    binding = module.handoff_source_evidence(candidate, locator(candidate))
     main_sha = "e" * 40
 
     def reader(url):
@@ -544,9 +713,10 @@ def test_handoff_source_verification_rejects_catalog_omission_and_nonancestor():
     def raw_reader(url):
         if url == module._method_catalog_url(candidate["source"]["revision"]):
             return catalog_payload(incomplete)
-        return candidate
+        raise AssertionError("unexpected source-pinned JSON URL")
     with pytest.raises(module.PromotionError, match="source-pinned native method catalog"):
-        module.verify_handoff_source(candidate, binding, reader=valid_reader, raw_reader=raw_reader)
+        module.verify_handoff_source(candidate, binding, reader=valid_reader, raw_reader=raw_reader,
+                                     raw_bytes_reader=lambda _url: fixture_bytes)
 
 
 def test_publisher_run_artifact_binds_receipt_bytes_to_authenticated_run_content():
@@ -619,7 +789,7 @@ def test_publisher_artifact_refuses_digest_mismatch_and_false_rechecksummed_rece
     false_receipt["qualification"]["method_verdicts"]["codex.start_turn"] = "already_approved"
     seal(false_receipt)
     false_archive = receipt_archive(false_receipt)
-    with pytest.raises(module.PromotionError, match="differs from the pinned main receipt"):
+    with pytest.raises(module.PromotionError, match="differs from the reviewed receipt"):
         module.verify_publisher_artifact(
             candidate, run_id="1003", reader=lambda _url: artifact_listing(false_archive),
             bytes_reader=lambda _url: false_archive,

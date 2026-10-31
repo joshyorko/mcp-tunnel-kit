@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/joshyorko/mcp-tunnel-kit/blob/main/.github/schemas/cas-qualified-release-v1.schema.json",
+  "$id": "https://github.com/joshyorko/codex-action-server/blob/main/.github/schemas/cas-qualified-release-v1.schema.json",
   "title": "Qualified CAS release handoff v1",
-  "description": "CAS-owned evidence consumed by mcp-tunnel-kit before opening a production image promotion PR. The publication run also uploads exactly one qualified-cas-release-v1 artifact containing qualified-release.json; the consumer verifies that run-bound archive digest and requires its receipt content to equal the pinned main file.",
+  "description": "CAS-owned evidence consumed by mcp-tunnel-kit before opening a production image promotion PR.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "source", "qualification", "publication", "receipt_sha256"],
@@ -27,12 +27,28 @@
     "qualification": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["status", "run_url", "required_ci_url", "comparison_url", "surface", "method_verdicts", "behavior_coverage", "withheld_methods"],
+        "required": ["status", "run_url", "required_ci_url", "comparison_url", "native_release", "surface", "method_verdicts", "behavior_coverage", "withheld_methods"],
       "properties": {
         "status": {"const": "qualified"},
         "run_url": {"$ref": "#/$defs/runUrl"},
         "required_ci_url": {"$ref": "#/$defs/runUrl"},
         "comparison_url": {"type": "string", "format": "uri", "pattern": "^https://github\\.com/joshyorko/codex-action-server/compare/[A-Za-z0-9._/-]+$"},
+          "native_release": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["version", "tag", "asset_url", "asset_id", "asset_sha256", "binary_sha256", "fixture_path", "fixture_sha256", "qualification_run_url"],
+            "properties": {
+              "version": {"type": "string", "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"},
+              "tag": {"type": "string", "pattern": "^rust-v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"},
+              "asset_url": {"type": "string", "format": "uri", "pattern": "^https://github\\.com/openai/codex/releases/download/rust-v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)/codex-x86_64-unknown-linux-musl\\.tar\\.gz$"},
+              "asset_id": {"type": "string", "pattern": "^[1-9][0-9]*$"},
+              "asset_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "binary_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "fixture_path": {"type": "string", "pattern": "^tests/fixtures/protocol/[A-Za-z0-9._-]+\\.json$"},
+              "fixture_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "qualification_run_url": {"$ref": "#/$defs/runUrl"}
+            }
+          },
         "surface": {
           "type": "object",
           "additionalProperties": false,
@@ -53,7 +69,7 @@
                 "additionalProperties": false,
                 "required": ["name", "owner"],
                 "properties": {
-                  "name": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z][A-Za-z0-9_.-]*(/[A-Za-z][A-Za-z0-9_.-]*)*$"},
+                  "name": {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_./-]{0,127}$"},
                   "owner": {"enum": ["typed_action", "shared_helper"]}
                 }
               }

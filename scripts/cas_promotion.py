@@ -25,15 +25,18 @@ from kamal_model import validate_manifest
 
 CAS_REPOSITORY = "joshyorko/codex-action-server"
 CAS_IMAGE_REPOSITORY = "ghcr.io/joshyorko/codex-action-server"
-HANDOFF_PATH = "ci/codex_qualification/qualified-release.json"
 METHOD_CATALOG_PATH = "ci/codex_qualification/native_methods.json"
-RECEIPT_ARTIFACT_NAME = "qualified-cas-release-v1"
+RECEIPT_ARTIFACT_PREFIX = "cas-qualified-release-"
 RECEIPT_ARTIFACT_FILE = "qualified-release.json"
 HANDOFF_MAX_BYTES = 512 * 1024
 ARTIFACT_MAX_BYTES = 8 * 1024 * 1024
+SOURCE_MAX_BYTES = 16 * 1024 * 1024
 SHA_RE = re.compile(r"[0-9a-f]{40}\Z")
 DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}\Z")
+HEX_RE = re.compile(r"[0-9a-f]{64}\Z")
+VERSION_RE = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\Z")
 METHOD_RE = re.compile(r"(?=.{1,128}\Z)[A-Za-z][A-Za-z0-9_.-]*(?:/[A-Za-z][A-Za-z0-9_.-]*)*\Z")
+FIXTURE_PATH_RE = re.compile(r"tests/fixtures/protocol/[A-Za-z0-9._-]+\.json\Z")
 RUN_URL_RE = re.compile(
     r"https://github\.com/joshyorko/codex-action-server/actions/runs/[1-9][0-9]*\Z"
 )
@@ -63,38 +66,58 @@ def _load_json(raw):
     return json.loads(raw, object_pairs_hook=_unique_json_object)
 
 
-def _handoff_url(commit_sha: str) -> str:
-    _required_text(commit_sha, SHA_RE, "CAS handoff commit is invalid")
-    return f"https://raw.githubusercontent.com/{CAS_REPOSITORY}/{commit_sha}/{HANDOFF_PATH}"
-
-
 def _method_catalog_url(source_sha: str) -> str:
     _required_text(source_sha, SHA_RE, "CAS source revision is invalid")
     return f"https://raw.githubusercontent.com/{CAS_REPOSITORY}/{source_sha}/{METHOD_CATALOG_PATH}"
 
 
-def fetch_handoff(*, reader=None, raw_reader=None) -> tuple[dict, dict] | None:
-    """Resolve trusted CAS main, then read its receipt at an immutable commit URL."""
+def _publisher_artifact_name(source_sha: str, run_id: str) -> str:
+    _required_text(source_sha, SHA_RE, "CAS publisher source revision is invalid")
+    if not isinstance(run_id, str) or not re.fullmatch(r"[1-9][0-9]*", run_id):
+        raise PromotionError("CAS publisher run ID is invalid")
+    return f"{RECEIPT_ARTIFACT_PREFIX}{source_sha}-{run_id}"
+
+
+def fetch_handoff(*, reader=None, artifact_bytes_reader=None) -> tuple[dict, dict] | None:
+    """Read the qualified receipt from the artifact of the current main publish run."""
     reader = reader or _github_json
-    raw_reader = raw_reader or _github_raw_json
+    artifact_bytes_reader = artifact_bytes_reader or _github_bytes
     main = reader(f"https://api.github.com/repos/{CAS_REPOSITORY}/commits/main")
     if not isinstance(main, dict):
         raise PromotionError("CAS main commit could not be verified")
     commit_sha = _required_text(main.get("sha"), SHA_RE, "CAS main commit is invalid")
-    url = _handoff_url(commit_sha)
-    try:
-        value = raw_reader(url)
-    except HTTPError as exc:
-        if exc.code == 404:
-            return None
-        raise PromotionError("CAS qualification handoff could not be read") from None
-    except (URLError, TimeoutError, OSError, ValueError):
-        raise PromotionError("CAS qualification handoff is unavailable") from None
-    if not isinstance(value, dict):
-        raise PromotionError("CAS qualification handoff is invalid")
-    locator = {"repository": CAS_REPOSITORY, "path": HANDOFF_PATH,
-               "commit_sha": commit_sha, "url": url}
-    return value, locator
+    runs = reader(
+        f"https://api.github.com/repos/{CAS_REPOSITORY}/actions/workflows/container.yml/runs"
+        f"?head_sha={commit_sha}&event=push&per_page=100"
+    )
+    rows = runs.get("workflow_runs") if isinstance(runs, dict) else None
+    if (not isinstance(rows, list) or type(runs.get("total_count")) is not int
+            or runs["total_count"] != len(rows)):
+        raise PromotionError("CAS current-main publisher run listing is incomplete")
+    matching = [row for row in rows if isinstance(row, dict) and row.get("head_sha") == commit_sha]
+    if not matching:
+        return None
+    if len(matching) != 1:
+        raise PromotionError("CAS current-main publisher run is ambiguous")
+    summary = matching[0]
+    run_id = summary.get("id")
+    if type(run_id) is not int or run_id < 1:
+        raise PromotionError("CAS current-main publisher run identity is invalid")
+    run_id_text = str(run_id)
+    run = reader(f"https://api.github.com/repos/{CAS_REPOSITORY}/actions/runs/{run_id_text}")
+    _validate_publisher_run(run, run_id_text, commit_sha)
+    listing = reader(
+        f"https://api.github.com/repos/{CAS_REPOSITORY}/actions/runs/{run_id_text}/artifacts?per_page=100"
+    )
+    handoff, artifact = _read_publisher_artifact(
+        None, run_id=run_id_text, source_sha=commit_sha, listing=listing,
+        bytes_reader=artifact_bytes_reader, allow_missing=True,
+    )
+    if handoff is None:
+        return None
+    locator = {"repository": CAS_REPOSITORY, "source_sha": commit_sha,
+               "publisher_run_id": run_id_text, "artifact": artifact}
+    return handoff, locator
 
 
 def _required_text(value, pattern, error):
@@ -133,14 +156,33 @@ def validate_handoff(value: dict) -> dict:
 
     qualification = value["qualification"]
     if (not isinstance(qualification, dict) or set(qualification) != {
-        "status", "run_url", "required_ci_url", "comparison_url", "surface", "method_verdicts",
-        "behavior_coverage", "withheld_methods",
+        "status", "run_url", "required_ci_url", "comparison_url", "native_release", "surface",
+        "method_verdicts", "behavior_coverage", "withheld_methods",
     } or qualification.get("status") != "qualified"):
         raise PromotionError("CAS qualification evidence is missing or not qualified")
     for field in ("run_url", "required_ci_url"):
         _required_text(qualification.get(field), RUN_URL_RE, "CAS qualification or CI run URL is invalid")
     _required_text(qualification.get("comparison_url"), COMPARE_URL_RE,
                    "CAS qualification comparison URL is invalid")
+    native = qualification.get("native_release")
+    native_fields = {"version", "tag", "asset_url", "asset_id", "asset_sha256", "binary_sha256",
+                     "fixture_path", "fixture_sha256", "qualification_run_url"}
+    if not isinstance(native, dict) or set(native) != native_fields:
+        raise PromotionError("CAS upstream native release evidence is missing or unsupported")
+    version = _required_text(native.get("version"), VERSION_RE, "CAS upstream native version is invalid")
+    tag = f"rust-v{version}"
+    asset_url = (f"https://github.com/openai/codex/releases/download/{tag}/"
+                 "codex-x86_64-unknown-linux-musl.tar.gz")
+    if native.get("tag") != tag or native.get("asset_url") != asset_url:
+        raise PromotionError("CAS upstream native release tag or asset URL is invalid")
+    _required_text(native.get("asset_id"), re.compile(r"[1-9][0-9]*\Z"),
+                   "CAS upstream native asset ID is invalid")
+    for field in ("asset_sha256", "binary_sha256", "fixture_sha256"):
+        _required_text(native.get(field), HEX_RE, "CAS upstream native release digest is invalid")
+    _required_text(native.get("fixture_path"), FIXTURE_PATH_RE,
+                   "CAS upstream native qualification fixture path is invalid")
+    _required_text(native.get("qualification_run_url"), RUN_URL_RE,
+                   "CAS upstream native qualification run URL is invalid")
     surface = qualification.get("surface")
     if (not isinstance(surface, dict) or set(surface) != {"complete", "sha256", "methods"}
             or surface.get("complete") is not True
@@ -210,14 +252,22 @@ def validate_handoff_surface_against_catalog(handoff: dict, catalog: dict) -> No
         raise PromotionError("CAS source method catalog is missing or unsupported")
 
     expected = []
+    catalog_by_name = {}
     seen = set()
     for row in catalog["methods"]:
         if (not isinstance(row, dict) or not isinstance(row.get("method"), str)
                 or not METHOD_RE.fullmatch(row["method"])
+                or row.get("classification") not in {"stable", "experimental"}
+                or not isinstance(row.get("request_schema"), str) or not row["request_schema"]
+                or not isinstance(row.get("response_schema"), str) or not row["response_schema"]
+                or row.get("smoke_strategy") not in {
+                    "disposable_protocol_smoke", "typed_read_fixture", "disposable_mutation_fixture",
+                }
                 or not isinstance(row.get("owning_typed_actions"), list)
                 or any(not isinstance(owner, str) or not owner for owner in row["owning_typed_actions"])):
             raise PromotionError("CAS source method catalog entry is invalid")
         name = row["method"]
+        catalog_by_name[name] = row
         if name in seen:
             raise PromotionError("CAS source method catalog contains duplicates")
         seen.add(name)
@@ -234,6 +284,63 @@ def validate_handoff_surface_against_catalog(handoff: dict, catalog: dict) -> No
     ).hexdigest()
     if surface["sha256"] != expected_digest:
         raise PromotionError("CAS qualification catalog checksum is invalid")
+    for method in seen:
+        expected_strategy = ("native_read_smoke"
+                             if catalog_by_name[method]["smoke_strategy"] == "disposable_protocol_smoke"
+                             else "isolated_fixture")
+        if receipt["qualification"]["behavior_coverage"][method]["strategy"] != expected_strategy:
+            raise PromotionError("CAS behavior evidence does not match the source-pinned method strategy")
+
+
+def validate_handoff_native_fixture(handoff: dict, catalog: dict, raw_fixture: bytes,
+                                    fixture: dict) -> None:
+    """Match native release claims to the exact fixture stored at the source commit."""
+    receipt = validate_handoff(handoff)
+    native = receipt["qualification"]["native_release"]
+    if (not isinstance(raw_fixture, bytes)
+            or hashlib.sha256(raw_fixture).hexdigest() != native["fixture_sha256"]
+            or not isinstance(fixture, dict)):
+        raise PromotionError("CAS native qualification fixture digest or content is invalid")
+    if (fixture.get("native_version") != native["version"]
+            or fixture.get("source_tag") != native["tag"]
+            or fixture.get("source_url") != native["asset_url"]
+            or fixture.get("source_asset_id") != native["asset_id"]
+            or fixture.get("source_asset_sha256") != native["asset_sha256"]
+            or fixture.get("binary_sha256") != native["binary_sha256"]
+            or fixture.get("qualification_run") != native["qualification_run_url"]
+            or fixture.get("typed_regression_status") != "passed"):
+        raise PromotionError("CAS native release evidence differs from the source-pinned fixture")
+    catalog_methods = {row["method"]: row for row in catalog.get("methods", [])
+                       if isinstance(row, dict) and isinstance(row.get("method"), str)}
+    methods = fixture.get("methods")
+    if (not isinstance(methods, list) or len(methods) != len(catalog_methods)
+            or not catalog_methods):
+        raise PromotionError("CAS native qualification fixture does not cover its source catalog")
+    fixture_by_method = {row.get("method"): row for row in methods if isinstance(row, dict)}
+    if len(fixture_by_method) != len(methods) or set(fixture_by_method) != set(catalog_methods):
+        raise PromotionError("CAS native qualification fixture method set differs from its catalog")
+    for method, row in fixture_by_method.items():
+        source = catalog_methods[method]
+        fingerprint = row.get("schema_fingerprint")
+        schemas = row.get("schemas")
+        strategy = source.get("smoke_strategy")
+        smoke = row.get("smoke")
+        expected_smoke = ("passed" if strategy == "disposable_protocol_smoke"
+                          else "typed_action_regressions_passed")
+        if (row.get("classification") != source.get("classification")
+                or row.get("request_schema") != source.get("request_schema")
+                or row.get("response_schema") != source.get("response_schema")
+                or row.get("status") != "compatible_pending_review"
+                or row.get("typed_regressions") != "passed"
+                or not isinstance(fingerprint, dict)
+                or any(not isinstance(fingerprint.get(key), str)
+                       or not HEX_RE.fullmatch(fingerprint[key])
+                       for key in ("request_sha256", "response_sha256"))
+                or not isinstance(schemas, dict)
+                or not isinstance(schemas.get(row.get("request_schema")), dict)
+                or not isinstance(schemas.get(row.get("response_schema")), dict)
+                or not isinstance(smoke, dict) or smoke.get("status") != expected_smoke):
+            raise PromotionError("CAS native qualification fixture contains incomplete method evidence")
 
 
 def verify_publisher(handoff: dict, *, verifier=verify_image_provenance) -> dict:
@@ -278,30 +385,41 @@ def _github_json(url: str) -> dict:
     return value
 
 
-def _github_raw_json(url: str) -> dict:
-    """Read a bounded public JSON file at a full commit SHA, never a moving ref."""
+def _approved_source_url(url: str) -> bool:
     expected_prefix = "https://raw.githubusercontent.com/" + CAS_REPOSITORY + "/"
-    allowed_paths = "|".join(re.escape(path) for path in (HANDOFF_PATH, METHOD_CATALOG_PATH))
-    if (not isinstance(url, str)
-            or not re.fullmatch(re.escape(expected_prefix) + r"[0-9a-f]{40}/(?:" + allowed_paths + r")", url)):
-        raise PromotionError("CAS handoff URL is not from the approved source")
+    match = (re.fullmatch(re.escape(expected_prefix) + r"([0-9a-f]{40})/(.+)", url)
+             if isinstance(url, str) else None)
+    if match is None:
+        return False
+    path = match.group(2)
+    return path == METHOD_CATALOG_PATH or bool(FIXTURE_PATH_RE.fullmatch(path))
+
+
+def _github_raw_bytes(url: str) -> bytes:
+    """Read bounded qualification inputs from immutable CAS commit paths only."""
+    if not _approved_source_url(url):
+        raise PromotionError("CAS qualification input URL is not from the approved source")
     request = Request(url, headers={"Accept": "application/json",
                                     "User-Agent": "mcp-tunnel-kit-cas-promotion"})
     try:
         with urlopen(request, timeout=15) as response:
-            raw = response.read(HANDOFF_MAX_BYTES + 1)
-    except HTTPError:
-        raise
-    except (URLError, TimeoutError, OSError):
-        raise PromotionError("CAS handoff source could not be read") from None
-    if len(raw) > HANDOFF_MAX_BYTES:
-        raise PromotionError("CAS handoff source is too large")
+            raw = response.read(SOURCE_MAX_BYTES + 1)
+    except (HTTPError, URLError, TimeoutError, OSError):
+        raise PromotionError("CAS source-pinned qualification input could not be read") from None
+    if len(raw) > SOURCE_MAX_BYTES:
+        raise PromotionError("CAS source-pinned qualification input is too large")
+    return raw
+
+
+def _github_raw_json(url: str) -> dict:
+    """Read and parse an approved source-pinned CAS JSON file."""
+    raw = _github_raw_bytes(url)
     try:
         value = _load_json(raw)
     except (UnicodeDecodeError, ValueError):
-        raise PromotionError("CAS handoff source is invalid JSON") from None
+        raise PromotionError("CAS source-pinned qualification input is invalid JSON") from None
     if not isinstance(value, dict):
-        raise PromotionError("CAS handoff source is invalid")
+        raise PromotionError("CAS source-pinned qualification input is invalid")
     return value
 
 
@@ -369,6 +487,96 @@ def _github_bytes(url: str) -> bytes:
     return raw
 
 
+def _validate_publisher_run(run: dict, run_id: str, source_sha: str) -> dict:
+    """Require the exact successful main push publisher run."""
+    _required_text(run_id, re.compile(r"[1-9][0-9]*\Z"), "CAS publisher run ID is invalid")
+    _required_text(source_sha, SHA_RE, "CAS publisher source revision is invalid")
+    repository = run.get("repository") if isinstance(run, dict) else None
+    head_repository = run.get("head_repository") if isinstance(run, dict) else None
+    expected_url = f"https://github.com/{CAS_REPOSITORY}/actions/runs/{run_id}"
+    if (not isinstance(run, dict) or run.get("id") != int(run_id)
+            or not isinstance(repository, dict) or repository.get("full_name") != CAS_REPOSITORY
+            or not isinstance(head_repository, dict) or head_repository.get("full_name") != CAS_REPOSITORY
+            or run.get("path") != ".github/workflows/container.yml"
+            or run.get("event") != "push" or run.get("head_branch") != "main"
+            or run.get("head_sha") != source_sha or run.get("status") != "completed"
+            or run.get("conclusion") != "success" or run.get("html_url") != expected_url):
+        raise PromotionError("CAS publisher run is not a successful main push for the current source")
+    return run
+
+
+def _read_publisher_artifact(handoff: dict | None, *, run_id: str, source_sha: str,
+                             listing: dict, bytes_reader, allow_missing: bool = False):
+    """Read one run/SHA-named artifact and verify its GitHub archive digest."""
+    expected_name = _publisher_artifact_name(source_sha, run_id)
+    artifacts = listing.get("artifacts") if isinstance(listing, dict) else None
+    if (not isinstance(artifacts, list) or type(listing.get("total_count")) is not int
+            or listing["total_count"] != len(artifacts)):
+        raise PromotionError("CAS publisher artifact listing is incomplete")
+    matches = [row for row in artifacts if isinstance(row, dict) and row.get("name") == expected_name]
+    if not matches and allow_missing:
+        return None, None
+    if len(matches) != 1:
+        raise PromotionError("CAS publisher run does not contain one exact source-bound receipt artifact")
+    artifact = matches[0]
+    artifact_id = artifact.get("id")
+    digest = artifact.get("digest")
+    workflow_run = artifact.get("workflow_run")
+    size = artifact.get("size_in_bytes")
+    expected_url = (f"https://api.github.com/repos/{CAS_REPOSITORY}/actions/artifacts/"
+                    f"{artifact_id}/zip") if type(artifact_id) is int and artifact_id > 0 else ""
+    if (type(artifact_id) is not int or artifact_id < 1 or artifact.get("expired") is not False
+            or not isinstance(digest, str) or not DIGEST_RE.fullmatch(digest)
+            or artifact.get("archive_download_url") != expected_url
+            or type(size) is not int or size < 1 or size > ARTIFACT_MAX_BYTES
+            or not isinstance(workflow_run, dict)
+            or workflow_run.get("id") != int(run_id)
+            or workflow_run.get("head_branch") != "main"
+            or workflow_run.get("head_sha") != source_sha
+            or type(workflow_run.get("repository_id")) is not int
+            or workflow_run.get("repository_id") < 1
+            or workflow_run.get("repository_id") != workflow_run.get("head_repository_id")):
+        raise PromotionError("CAS publisher artifact identity or digest is invalid")
+    archive = bytes_reader(expected_url)
+    if not isinstance(archive, bytes) or len(archive) > ARTIFACT_MAX_BYTES:
+        raise PromotionError("CAS publication artifact is too large or invalid")
+    actual_digest = "sha256:" + hashlib.sha256(archive).hexdigest()
+    if actual_digest != digest:
+        raise PromotionError("CAS publisher artifact archive digest does not match GitHub metadata")
+    try:
+        with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
+            infos = bundle.infolist()
+            entries = [info for info in infos if info.filename == RECEIPT_ARTIFACT_FILE]
+            names = [info.filename for info in infos]
+            if (len(infos) != 1 or len(entries) != 1 or len(names) != len(set(names))
+                    or entries[0].file_size > HANDOFF_MAX_BYTES
+                    or entries[0].flag_bits & 0x1
+                    or stat.S_ISLNK(entries[0].external_attr >> 16)):
+                raise PromotionError("CAS publisher artifact receipt entry is unsafe")
+            contents = bundle.read(entries[0])
+    except PromotionError:
+        raise
+    except (zipfile.BadZipFile, EOFError, OSError, RuntimeError):
+        raise PromotionError("CAS publisher artifact is not a valid receipt archive") from None
+    if len(contents) > HANDOFF_MAX_BYTES:
+        raise PromotionError("CAS publisher artifact receipt is too large")
+    try:
+        artifact_handoff = _load_json(contents)
+    except (UnicodeDecodeError, ValueError):
+        raise PromotionError("CAS publisher artifact receipt is invalid JSON") from None
+    artifact_handoff = validate_handoff(artifact_handoff)
+    if (artifact_handoff["source"]["revision"] != source_sha
+            or artifact_handoff["publication"]["run_url"].rsplit("/", 1)[-1] != run_id):
+        raise PromotionError("CAS publisher artifact receipt is not bound to its workflow run")
+    if handoff is not None and artifact_handoff != handoff:
+        raise PromotionError("CAS publisher artifact receipt differs from the reviewed receipt")
+    evidence = {"run_id": run_id, "artifact_id": artifact_id, "name": expected_name,
+                "digest": digest, "file": RECEIPT_ARTIFACT_FILE,
+                "content_sha256": hashlib.sha256(contents).hexdigest(),
+                "receipt_sha256": artifact_handoff["receipt_sha256"]}
+    return artifact_handoff, evidence
+
+
 def _require_ancestor(reader, base_sha: str, head_sha: str, message: str) -> None:
     comparison = reader(
         f"https://api.github.com/repos/{CAS_REPOSITORY}/compare/{base_sha}...{head_sha}"
@@ -383,57 +591,65 @@ def _require_ancestor(reader, base_sha: str, head_sha: str, message: str) -> Non
         raise PromotionError(message)
 
 
+def _native_fixture_url(source_sha: str, fixture_path: str) -> str:
+    _required_text(source_sha, SHA_RE, "CAS source revision is invalid")
+    _required_text(fixture_path, FIXTURE_PATH_RE, "CAS native fixture path is invalid")
+    return f"https://raw.githubusercontent.com/{CAS_REPOSITORY}/{source_sha}/{fixture_path}"
+
+
 def _validate_handoff_source_binding(handoff: dict, binding: dict) -> dict:
     receipt = validate_handoff(handoff)
     if (not isinstance(binding, dict)
-            or set(binding) != {"repository", "path", "commit_sha", "url", "receipt_sha256"}
+            or set(binding) != {"repository", "source_sha", "publisher_run_id", "artifact"}
             or binding.get("repository") != CAS_REPOSITORY
-            or binding.get("path") != HANDOFF_PATH
-            or binding.get("receipt_sha256") != receipt["receipt_sha256"]):
+            or binding.get("source_sha") != receipt["source"]["revision"]):
         raise PromotionError("CAS handoff source binding is invalid")
-    commit_sha = _required_text(binding.get("commit_sha"), SHA_RE, "CAS handoff commit is invalid")
-    if binding.get("url") != _handoff_url(commit_sha):
-        raise PromotionError("CAS handoff source URL is not commit-pinned")
+    run_id = _required_text(binding.get("publisher_run_id"), re.compile(r"[1-9][0-9]*\Z"),
+                            "CAS publisher run ID is invalid")
+    if receipt["publication"]["run_url"].rsplit("/", 1)[-1] != run_id:
+        raise PromotionError("CAS handoff source run does not match its receipt")
+    artifact = _validate_publisher_artifact_evidence(binding.get("artifact"), receipt)
+    if artifact["run_id"] != run_id:
+        raise PromotionError("CAS handoff source artifact is bound to a different publisher run")
     return copy.deepcopy(binding)
 
 
 def handoff_source_evidence(handoff: dict, locator: dict) -> dict:
-    """Bind the reviewed receipt to its immutable source commit and payload hash."""
+    """Bind the receipt to the exact run/SHA-derived publisher artifact."""
     if (not isinstance(locator, dict)
-            or set(locator) != {"repository", "path", "commit_sha", "url"}):
+            or set(locator) != {"repository", "source_sha", "publisher_run_id", "artifact"}):
         raise PromotionError("CAS handoff locator is invalid")
-    result = dict(locator)
-    result["receipt_sha256"] = validate_handoff(handoff)["receipt_sha256"]
-    return _validate_handoff_source_binding(handoff, result)
+    return _validate_handoff_source_binding(handoff, locator)
 
 
-def verify_handoff_source(handoff: dict, binding: dict, *, reader=None, raw_reader=None) -> dict:
-    """Prove the exact receipt commit is still on main and unchanged at that commit."""
+def verify_handoff_source(handoff: dict, binding: dict, *, reader=None, raw_reader=None,
+                          raw_bytes_reader=None) -> dict:
+    """Recheck publisher ancestry and native qualification inputs at source SHA."""
     reader = reader or _github_json
     raw_reader = raw_reader or _github_raw_json
+    raw_bytes_reader = raw_bytes_reader or _github_raw_bytes
     receipt = validate_handoff(handoff)
     checked_binding = _validate_handoff_source_binding(receipt, binding)
     latest = reader(f"https://api.github.com/repos/{CAS_REPOSITORY}/commits/main")
     if not isinstance(latest, dict):
         raise PromotionError("CAS current main commit could not be verified")
     main_sha = _required_text(latest.get("sha"), SHA_RE, "CAS current main commit is invalid")
-    handoff_sha = checked_binding["commit_sha"]
-    _require_ancestor(reader, handoff_sha, main_sha,
-                      "CAS handoff commit is not an ancestor of current main")
     source_sha = receipt["source"]["revision"]
-    _require_ancestor(reader, source_sha, handoff_sha,
-                      "CAS handoff commit does not descend from the qualified source")
+    _require_ancestor(reader, source_sha, main_sha,
+                      "CAS publisher source is not an ancestor of current main")
     try:
-        pinned = raw_reader(checked_binding["url"])
-        latest_receipt = raw_reader(_handoff_url(main_sha))
         source_catalog = raw_reader(_method_catalog_url(source_sha))
+        fixture_bytes = raw_bytes_reader(_native_fixture_url(
+            source_sha, receipt["qualification"]["native_release"]["fixture_path"]
+        ))
+        fixture = _load_json(fixture_bytes)
     except (HTTPError, URLError, TimeoutError, OSError, ValueError):
-        raise PromotionError("CAS immutable handoff source could not be re-read") from None
-    if pinned != receipt or latest_receipt != receipt:
-        raise PromotionError("CAS handoff bytes differ from the immutable reviewed receipt")
+        raise PromotionError("CAS source-pinned qualification inputs could not be re-read") from None
     validate_handoff_surface_against_catalog(receipt, source_catalog)
-    return {"commit_sha": handoff_sha, "main_sha": main_sha,
-            "url": checked_binding["url"], "receipt_sha256": receipt["receipt_sha256"]}
+    validate_handoff_native_fixture(receipt, source_catalog, fixture_bytes, fixture)
+    return {"source_sha": source_sha, "main_sha": main_sha,
+            "publisher_run_id": checked_binding["publisher_run_id"],
+            "artifact": copy.deepcopy(checked_binding["artifact"])}
 
 
 def verify_action_runs(handoff: dict, *, reader=_github_json,
@@ -485,68 +701,14 @@ def verify_publisher_artifact(handoff: dict, *, run_id: str, reader=_github_json
                               bytes_reader=_github_bytes) -> dict:
     """Bind the handoff bytes to the publisher's immutable Actions run artifact."""
     receipt = validate_handoff(handoff)
-    if not re.fullmatch(r"[1-9][0-9]*", run_id):
-        raise PromotionError("CAS publisher run ID is invalid")
     listing = reader(
         f"https://api.github.com/repos/{CAS_REPOSITORY}/actions/runs/{run_id}/artifacts?per_page=100"
     )
-    if (not isinstance(listing, dict) or not isinstance(listing.get("artifacts"), list)
-            or type(listing.get("total_count")) is not int
-            or listing["total_count"] != len(listing["artifacts"])):
-        raise PromotionError("CAS publisher artifact listing is incomplete")
-    artifacts = [row for row in listing["artifacts"]
-                 if isinstance(row, dict) and row.get("name") == RECEIPT_ARTIFACT_NAME]
-    if len(artifacts) != 1:
-        raise PromotionError("CAS publisher run does not contain one qualified-release artifact")
-    artifact = artifacts[0]
-    artifact_id = artifact.get("id")
-    digest = artifact.get("digest")
-    workflow_run = artifact.get("workflow_run")
-    size = artifact.get("size_in_bytes")
-    expected_url = (f"https://api.github.com/repos/{CAS_REPOSITORY}/actions/artifacts/"
-                    f"{artifact_id}/zip") if type(artifact_id) is int and artifact_id > 0 else ""
-    if (type(artifact_id) is not int or artifact_id < 1 or artifact.get("expired") is not False
-            or not isinstance(digest, str) or not DIGEST_RE.fullmatch(digest)
-            or artifact.get("archive_download_url") != expected_url
-            or type(size) is not int or size < 1 or size > ARTIFACT_MAX_BYTES
-            or not isinstance(workflow_run, dict)
-            or workflow_run.get("id") != int(run_id)
-            or workflow_run.get("head_branch") != "main"
-            or workflow_run.get("head_sha") != receipt["source"]["revision"]
-            or workflow_run.get("repository_id") != workflow_run.get("head_repository_id")):
-        raise PromotionError("CAS publisher artifact identity or digest is invalid")
-    archive = bytes_reader(expected_url)
-    actual_digest = "sha256:" + hashlib.sha256(archive).hexdigest()
-    if actual_digest != digest:
-        raise PromotionError("CAS publisher artifact archive digest does not match GitHub metadata")
-    try:
-        with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
-            infos = bundle.infolist()
-            entries = [info for info in infos
-                       if info.filename == RECEIPT_ARTIFACT_FILE]
-            names = [info.filename for info in infos]
-            if (len(infos) > 32 or len(entries) != 1 or len(names) != len(set(names))
-                    or entries[0].file_size > HANDOFF_MAX_BYTES
-                    or entries[0].flag_bits & 0x1
-                    or stat.S_ISLNK(entries[0].external_attr >> 16)):
-                raise PromotionError("CAS publisher artifact receipt entry is unsafe")
-            contents = bundle.read(entries[0])
-    except PromotionError:
-        raise
-    except (zipfile.BadZipFile, EOFError, OSError, RuntimeError):
-        raise PromotionError("CAS publisher artifact is not a valid receipt archive") from None
-    if len(contents) > HANDOFF_MAX_BYTES:
-        raise PromotionError("CAS publisher artifact receipt is too large")
-    try:
-        artifact_receipt = _load_json(contents)
-    except (UnicodeDecodeError, ValueError):
-        raise PromotionError("CAS publisher artifact receipt is invalid JSON") from None
-    if artifact_receipt != receipt:
-        raise PromotionError("CAS publisher artifact receipt differs from the pinned main receipt")
-    return {"run_id": run_id, "artifact_id": artifact_id, "name": RECEIPT_ARTIFACT_NAME,
-            "digest": digest, "file": RECEIPT_ARTIFACT_FILE,
-            "content_sha256": hashlib.sha256(contents).hexdigest(),
-            "receipt_sha256": receipt["receipt_sha256"]}
+    _, evidence = _read_publisher_artifact(
+        receipt, run_id=run_id, source_sha=receipt["source"]["revision"],
+        listing=listing, bytes_reader=bytes_reader,
+    )
+    return evidence
 
 
 def verify_candidate_is_current_or_newer(current_revision: str, candidate_revision: str,
@@ -573,8 +735,9 @@ def _validate_publisher_artifact_evidence(value: dict, handoff: dict) -> dict:
     if not isinstance(value, dict) or set(value) != expected_fields:
         raise PromotionError("CAS publisher artifact evidence is missing or unsupported")
     run_id = handoff["publication"]["run_url"].rsplit("/", 1)[-1]
+    expected_name = _publisher_artifact_name(handoff["source"]["revision"], run_id)
     if (value.get("run_id") != run_id or type(value.get("artifact_id")) is not int
-            or value["artifact_id"] < 1 or value.get("name") != RECEIPT_ARTIFACT_NAME
+            or value["artifact_id"] < 1 or value.get("name") != expected_name
             or not isinstance(value.get("digest"), str) or not DIGEST_RE.fullmatch(value["digest"])
             or value.get("file") != RECEIPT_ARTIFACT_FILE
             or not isinstance(value.get("content_sha256"), str)
@@ -687,12 +850,14 @@ def validate_deployment_evidence(value: dict, manifest: dict) -> dict:
     # Revalidate the full producer contract; the PR itself is not an authority
     # to convert an unqualified method into a qualified one.
     handoff = validate_handoff(value.get("handoff"))
-    _validate_handoff_source_binding(handoff, value.get("handoff_source"))
+    source_binding = _validate_handoff_source_binding(handoff, value.get("handoff_source"))
     publisher = value.get("publisher")
     if (not isinstance(publisher, dict)
             or set(publisher) != {"run_url", "tag", "verified_digest", "trusted_ancestor", "artifact"}):
         raise PromotionError("CAS publisher evidence is missing or unsupported")
-    _validate_publisher_artifact_evidence(publisher.get("artifact"), handoff)
+    publisher_artifact = _validate_publisher_artifact_evidence(publisher.get("artifact"), handoff)
+    if publisher_artifact != source_binding["artifact"]:
+        raise PromotionError("CAS handoff and publisher artifact evidence differ")
     if (value.get("source_revision") != handoff["source"]["revision"]
             or value.get("qualification") != handoff["qualification"]
             or publisher.get("run_url") != handoff["publication"]["run_url"]

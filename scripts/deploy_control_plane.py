@@ -890,7 +890,7 @@ def _verified_cas_candidate(current_manifest,manifest,evidence):
             raise ValueError('CAS promotion changed unrelated production image: '+name)
     validated=cas_promotion.validate_deployment_evidence(evidence,manifest)
     handoff=validated['handoff']
-    cas_promotion.verify_handoff_source(handoff,validated['handoff_source'])
+    source_proof=cas_promotion.verify_handoff_source(handoff,validated['handoff_source'])
     if evidence.get('comparison',{}).get('schema_proxy_promoted_together') is not True:
         raise ValueError('CAS promotion evidence does not record the paired image update')
     cas_promotion.verify_candidate_is_current_or_newer(
@@ -898,7 +898,11 @@ def _verified_cas_candidate(current_manifest,manifest,evidence):
     if (manifest['images']['cas']['revision']==current_manifest['images']['cas']['revision']
             and manifest['images']['cas']['digest']!=current_manifest['images']['cas']['digest']):
         raise ValueError('CAS source revision was republished with a different image digest')
-    cas_promotion.verify_action_runs(handoff)
+    run_proof=cas_promotion.verify_action_runs(handoff)
+    if (not isinstance(source_proof,dict) or not isinstance(run_proof,dict)
+            or source_proof.get('artifact')!=validated['handoff_source'].get('artifact')
+            or run_proof.get('publication_artifact')!=validated['handoff_source'].get('artifact')):
+        raise ValueError('CAS publisher artifact no longer matches the reviewed handoff evidence')
     platform_proof=cas_promotion.verify_publisher(handoff)
     for key in ('cas','schema_proxy'):
         if (platform_proof[key].get('digest')!=manifest['images']['cas']['digest']
