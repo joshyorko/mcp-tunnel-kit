@@ -121,8 +121,9 @@ and unrecognized states remain blocked.
   evidence attached to the deployed CAS generation. It sends only the two
   exact version commands over the existing pinned read-only SSH endpoint.
   Results distinguish CLI version, daemon version, and CAS method qualification.
-  Unavailable devices remain individually marked unknown; this operation never
-  installs, starts, or restarts a native daemon.
+  Unavailable devices or an older forced-command helper remain individually
+  marked unknown; this operation never updates an endpoint or installs, starts,
+  or restarts a native daemon.
 - `cas`: read the merged `config/deploy-images.json` pair and its matching
   `config/cas-promotion.json` receipt. The controller independently checks the
   complete consumed-method matrix, successful qualification/CI/publisher runs,

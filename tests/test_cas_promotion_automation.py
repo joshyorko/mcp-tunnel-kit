@@ -61,6 +61,9 @@ def test_pr_lane_is_daily_and_deduplicates_only_a_draft_automation_branch():
     workflow=(ROOT/".github/workflows/cas-promotion.yml").read_text()
     assert "schedule:" in workflow and "17 7 * * *" in workflow
     assert "workflow_dispatch:" in workflow
+    assert "github.ref == 'refs/heads/main'" in workflow
+    assert "actions/checkout@11d5960a326750d5838078e36cf38b85af677262" in workflow
+    assert "actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065" in workflow
     assert "contents: write" in workflow and "pull-requests: write" in workflow
     assert "PROMOTION_BRANCH: automation/cas-promotion" in workflow
     assert "cas_promotion_branch.py" in workflow
@@ -76,3 +79,19 @@ def test_production_workflow_remains_manual_approval_gated_and_does_not_auto_dep
     assert "refs/heads/main" in workflow
     assert "cas_digest:" not in workflow and "cas_revision:" not in workflow
     assert "push:" not in workflow and "workflow_run:" not in workflow
+
+
+def test_local_patchraptor_policy_inherits_central_rules_and_excludes_cas_pair():
+    config=json.loads((ROOT/".github/renovate.json5").read_text())
+    assert config["extends"]==["github>joshyorko/renovate-config:org-inherited-config"]
+    assert config["automerge"] is False
+    assert config["platformAutomerge"] is False
+    assert config["dependencyDashboardApproval"] is True
+    rules=config["packageRules"]
+    cas=next(rule for rule in rules if "ghcr.io/joshyorko/codex-action-server" in rule.get("matchPackageNames",[]))
+    assert cas["enabled"] is False
+    assert "config/deploy-images.json" in cas["matchFileNames"]
+    assert cas["automerge"] is False and cas["platformAutomerge"] is False
+    images=next(rule for rule in rules if "ghcr.io/usefulsoftwareco/executor-selfhost" in rule.get("matchPackageNames",[]))
+    assert images["groupName"]=="Tunnel-kit deployment images"
+    assert images["dependencyDashboardApproval"] is True

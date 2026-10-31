@@ -11,15 +11,18 @@ concurrency:
   cancel-in-progress: false
 jobs:
   propose:
-    if: github.repository == 'joshyorko/mcp-tunnel-kit'
+    # workflow_dispatch executes the workflow definition from the selected
+    # ref. This job receives write permission, so only the reviewed main
+    # workflow may run it.
+    if: github.repository == 'joshyorko/mcp-tunnel-kit' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: main
           persist-credentials: true
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.12'
       - name: Validate promotion and rollback contracts

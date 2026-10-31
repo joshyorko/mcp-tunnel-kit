@@ -23,7 +23,7 @@ import zipfile
 import zlib
 import uuid
 
-from kamal_model import render
+from kamal_model import render,validate_manifest
 from image_provenance import verify as verify_provenance
 import cas_promotion
 from instance_profile import DEFAULT_PATH as DEFAULT_INSTANCE_PROFILE, encode as encode_instance_profile, load as load_instance_profile

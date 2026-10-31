@@ -130,20 +130,25 @@ These operations use the same protected runner and transaction as the local CLI.
 
 ## Deploy an updated CAS image
 
-The scheduled **Propose qualified CAS image** workflow resolves the versioned
-qualification handoff and opens a draft image-update PR when it passes the
-method, CI, source, digest and platform checks. Review the paired CAS and
-schema-proxy manifest update and its `config/cas-promotion.json` evidence.
-Merging the PR does not deploy production. Dispatch **Deploy VM control plane**
-with operation `cas` to consume the merged manifest and receipt through the
-existing production environment approval. The deployment controller resolves
-the current rollback generation itself; do not enter an image digest or source
-revision manually.
+The scheduled **Propose qualified CAS image** workflow is gated on the
+CAS-owned immutable qualification handoff and opens a draft image-update PR
+only after its method, CI, source, digest and platform checks pass. The CAS #25
+producer has not yet published the handoff contract, so this lane remains
+blocked until its immutable source and schema are confirmed. Review the paired
+CAS and schema-proxy manifest update and its `config/cas-promotion.json`
+evidence. Merging the PR does not deploy production. Dispatch **Deploy VM
+control plane** with operation `cas` to consume the merged manifest and receipt
+through the existing production environment approval. The deployment
+controller resolves the current rollback generation itself; do not enter an
+image digest or source revision manually.
 
 Native Codex reconciliation is a separate read-only operation. It reports the
 installed CLI version, running daemon version and deployed CAS method
-qualification as independent facts. The CAS image lane does not install or
-restart native daemons.
+qualification as independent facts. If an existing endpoint's forced-command
+helper does not yet allow the exact read-only CLI version command, that CLI
+field remains unavailable; this lane does not replace endpoint helpers or
+restart native services. The CAS image lane does not install or restart native
+daemons.
 
 ## Transaction and recovery
 
