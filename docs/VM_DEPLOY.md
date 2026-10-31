@@ -25,8 +25,22 @@ bin/kamal accessory deploy cas   # CAS only
 bin/kamal accessory stop         # stop this stack; retain containers/data
 bin/kamal accessory start        # health-ordered start of existing containers
 bin/kamal accessory details      # VM service status
+bin/kamal native help
+bin/kamal native accessory logs cas --since 6h --lines 200 --grep InvalidMessage
+bin/kamal native accessory details cas
+bin/kamal native accessory logs executor --follow
 bin/kamal rollback              # previous recorded generation
 ```
+
+`native` invokes the pinned upstream Kamal CLI for accessory `logs`, `details`,
+and `help`, with Kamal's own option syntax and exit status. Local `help`, `tree`,
+and `version` work without VM access. `accessory logs` is also a direct alias.
+The native adapter supplies the recorded private instance config; config,
+destination, host and role overrides are refused. Logs default to the four core
+accessories; follow requires one named accessory. Schema-proxy and tunnel logging
+are deliberately disabled, so log reads report those services as skipped.
+Use the managed commands below for lifecycle changes: native mutation commands
+are refused to preserve ordering, image pins, identity and health checks.
 
 The equivalent shortcuts are `make deploy`, `make cas`, `make down`, `make up`,
 `make status`, and `make rollback`. Stop disconnects the production tool connection;

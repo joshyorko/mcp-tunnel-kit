@@ -21,6 +21,10 @@ HELP = '''Usage:
   bin/kamal accessory start [NAME|all]   Start existing containers in health order
   bin/kamal accessory stop [NAME|all]    Stop containers, tunnel first
   bin/kamal accessory details [NAME|all] Show current service health
+  bin/kamal native COMMAND             Standard Kamal diagnostics and native options
+  bin/kamal accessory logs [NAME|all]  Alias for native accessory logs
+  bin/kamal native accessory logs --help
+  bin/kamal native accessory details [NAME]
   bin/kamal accessory transfer memoryd   Import the prepared private portable bundles
   bin/kamal accessory network memoryd    Allow the owned bridge to reach MemoryD
   bin/kamal accessory register memoryd   Register the imported read-only app
@@ -78,6 +82,60 @@ def parse_command(argv):
 
 def memoryd_stopped(inventory):
     return all(item['state'] in ('exited', 'created') for item in inventory['services'].values())
+
+
+def native(argv):
+    """Use the real Kamal diagnostics CLI with the recorded private config."""
+    if not argv or argv[0] in ('help', 'version', 'tree', '--help'):
+        return subprocess.run(['bundle', 'exec', 'kamal', *argv], cwd=deploy.ROOT).returncode
+    if argv[:2] not in (['accessory', 'logs'], ['accessory', 'details'], ['accessory', 'help']):
+        raise ValueError('Native mode exposes Kamal accessory logs/details/help; use the managed commands for lifecycle operations')
+    if argv[:2] == ['accessory', 'help'] or '--help' in argv[2:]:
+        return subprocess.run(['bundle', 'exec', 'kamal', *argv], cwd=deploy.ROOT).returncode
+    # The instance config and host pin remain selected by .env.kamal.local.
+    for arg in argv:
+        option = arg.split('=', 1)[0]
+        if (option in ('-c', '-d', '-h', '-r')
+                or (option.startswith('--') and any(
+                    name.startswith(option) for name in
+                    ('--config-file', '--destination', '--hosts', '--roles')))
+                or (not option.startswith('--') and option.startswith(('-c', '-d', '-h', '-r')))):
+            raise ValueError('Native mode uses the pinned instance configuration and host')
+    deploy.configure_local(deploy.ROOT / '.env.kamal.local')
+    deploy.trusted_context(os.environ, local=True)
+    current = deploy.remote('current')
+    if not current or current.get('authority') != 'kamal':
+        raise ValueError('Native diagnostics require recorded Kamal ownership')
+    with tempfile.TemporaryDirectory(prefix='mcp-local-kamal-native-') as directory:
+        config = deploy.configuration(directory, current['manifest'])
+        accessories = json.loads(config.read_text())['accessories']
+        # Kamal supplies its own options/parser. Only expand our historical "all"
+        # alias, and skip accessories whose logging driver intentionally is none.
+        commands = [argv]
+        if argv[:2] == ['accessory', 'logs']:
+            name = argv[2] if len(argv) > 2 and not argv[2].startswith('-') else 'all'
+            if name != 'all' and name not in accessories:
+                raise ValueError('Unknown control-plane accessory')
+            options = argv[3:] if len(argv) > 2 and not argv[2].startswith('-') else argv[2:]
+            names = deploy.ORDER if name == 'all' else (name,)
+            if name == 'all' and any(arg.split('=', 1)[0] in ('--follow', '-f') for arg in options):
+                raise ValueError('--follow requires one accessory name')
+            commands = []
+            for name in names:
+                if accessories[name].get('options', {}).get('log-driver') == 'none':
+                    print(f'{name}: logging is disabled in the deployment configuration', flush=True)
+                else:
+                    commands.append(['accessory', 'logs', name, *options])
+        env = {**os.environ, 'KAMAL_PUBLIC_DOCKER_CONFIG':
+               deploy.profile()['state_dir'] + '/deployment/anonymous-docker-config'}
+        for command in commands:
+            result = subprocess.run([
+                'bundle', 'exec', 'ruby', str(deploy.ROOT / 'scripts/kamal_anonymous.rb'),
+                *command, '--config-file', str(config),
+            ], env=env, cwd=deploy.ROOT)
+            if result.returncode:
+                return result.returncode
+    return 0
 
 
 def lifecycle(operation, target):
@@ -160,6 +218,9 @@ def main(argv=None):
         print(HELP)
         return 0
     try:
+        if argv[:1] == ['native'] or argv[:2] == ['accessory', 'logs']:
+            bundle_environment()
+            return native(argv[1:] if argv[0] == 'native' else argv)
         confirmed = False
         legacy_approved = False
         rollout_id = None

@@ -27,6 +27,105 @@ def test_local_command_mapping(argv, expected):
     assert cli.parse_command(argv) == expected
 
 
+@pytest.fixture
+def native_cli(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    calls = []
+    accessories = {name: {'options': {'log-driver': 'none'}}
+                   if name in ('schema-proxy', 'tunnel') else {}
+                   for name in (*cli.deploy.ORDER, *cli.deploy.MEMORYD_ORDER)}
+    config = tmp_path / 'deploy.yml'
+    config.write_text(json.dumps({'accessories': accessories}))
+    config.chmod(0o600)
+    monkeypatch.setattr(cli.deploy, 'configure_local', lambda _: calls.append('configure'))
+    monkeypatch.setattr(cli.deploy, 'trusted_context', lambda *_args, **_kwargs: calls.append('trust'))
+    monkeypatch.setattr(cli.deploy, 'remote', lambda action: calls.append(action) or
+                        {'authority': 'kamal', 'manifest': {}})
+    monkeypatch.setattr(cli.deploy, 'configuration', lambda *_: config)
+    monkeypatch.setattr(cli.deploy, 'profile', lambda: {'state_dir': '/private/state'})
+    def run(argv, **kwargs):
+        if '--config-file' in argv:
+            assert Path(argv[-1]).stat().st_mode & 0o777 == 0o600
+            assert kwargs['env']['KAMAL_PUBLIC_DOCKER_CONFIG'] == '/private/state/deployment/anonymous-docker-config'
+        calls.append(argv)
+        return SimpleNamespace(returncode=0)
+    monkeypatch.setattr(cli.subprocess, 'run', run)
+    return calls
+
+
+@pytest.mark.parametrize('command', [
+    ['accessory', 'logs', 'cas', '--since', '6h', '--lines', '200', '--grep', 'InvalidMessage', '--follow'],
+    ['accessory', 'details', 'cas', '--quiet'],
+    ['accessory', 'logs', 'memoryd-mcp', '--skip-timestamps'],
+])
+def test_native_cli_forwards_kamal_diagnostics_verbatim(native_cli, command):
+    assert cli.native(command) == 0
+    assert native_cli[:3] == ['configure', 'trust', 'current']
+    assert native_cli[3][4:-2] == command
+    assert native_cli[3][-2] == '--config-file'
+
+
+@pytest.mark.parametrize('command', [[], ['help'], ['help', 'accessory'], ['version'], ['tree'],
+    ['accessory', 'help'], ['accessory', 'logs', '--help'], ['accessory', 'details', '--help']])
+def test_native_help_needs_no_remote_or_private_config(native_cli, command):
+    assert cli.native(command) == 0
+    assert native_cli == [['bundle', 'exec', 'kamal', *command]]
+
+
+@pytest.mark.parametrize('command', [
+    ['-h', 'elsewhere', 'deploy'], ['deploy'], ['app', 'logs'], ['proxy', 'reboot'], ['server', 'exec', 'true'],
+    ['accessory', 'reboot', 'cas'], ['accessory', 'stop', 'tunnel'],
+    ['accessory', 'remove', 'executor'], ['accessory', 'exec', 'cas', 'true'],
+    ['accessory', 'details', '--config-file=elsewhere'],
+    ['accessory', 'logs', 'cas', '-celsewhere'],
+    ['accessory', 'details', '--config-f', 'elsewhere'],
+    ['accessory', 'details', '--hosts=another-host'],
+    ['accessory', 'details', '-d', 'production'],
+])
+def test_native_refuses_unmanaged_operations_and_config_overrides(native_cli, command):
+    with pytest.raises(ValueError):
+        cli.native(command)
+    assert native_cli == []
+
+
+def test_native_logs_all_skips_disabled_services(native_cli, capsys):
+    assert cli.native(['accessory', 'logs', '--lines', '1']) == 0
+    assert [command[6] for command in native_cli if isinstance(command, list)] == ['executor', 'cas']
+    output = capsys.readouterr().out
+    assert 'schema-proxy: logging is disabled' in output
+    assert 'tunnel: logging is disabled' in output
+
+
+def test_native_logs_preserves_exit_status(native_cli, monkeypatch):
+    from types import SimpleNamespace
+    monkeypatch.setattr(cli.subprocess, 'run', lambda *_a, **_kw: SimpleNamespace(returncode=7))
+    assert cli.native(['accessory', 'logs', 'cas']) == 7
+
+
+def test_native_requires_kamal_ownership(native_cli, monkeypatch):
+    monkeypatch.setattr(cli.deploy, 'remote', lambda _: {'authority': 'compose'})
+    with pytest.raises(ValueError, match='Kamal ownership'):
+        cli.native(['accessory', 'logs', 'cas'])
+    assert not any(isinstance(call, list) for call in native_cli)
+
+
+def test_native_logs_refuses_unknown_service_and_multi_follow(native_cli):
+    with pytest.raises(ValueError, match='Unknown'):
+        cli.native(['accessory', 'logs', 'another-app'])
+    with pytest.raises(ValueError, match='one accessory'):
+        cli.native(['accessory', 'logs', '--follow'])
+    assert not any(isinstance(call, list) for call in native_cli)
+
+
+def test_logs_alias_and_native_entrypoint_use_same_cli(monkeypatch):
+    calls = []
+    monkeypatch.setattr(cli, 'bundle_environment', lambda: None)
+    monkeypatch.setattr(cli, 'native', lambda argv: calls.append(argv) or 0)
+    assert cli.main(['native', 'accessory', 'logs', 'cas', '--grep', 'failure']) == 0
+    assert cli.main(['accessory', 'logs', 'cas', '--grep', 'failure']) == 0
+    assert calls == [['accessory', 'logs', 'cas', '--grep', 'failure']] * 2
+
+
 def test_memoryd_deploy_routes_to_its_capacity_gated_controller():
     assert cli.parse_command(['accessory', 'deploy', 'memoryd']) == ('deploy', 'memoryd')
     assert cli.parse_command(['accessory', 'start', 'memoryd']) == ('start', 'memoryd')
