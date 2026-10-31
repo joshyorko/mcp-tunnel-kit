@@ -16,15 +16,16 @@ def promotion_fixture():
     spec=importlib.util.spec_from_file_location("cas_promotion_fixture",ROOT/"tests/test_cas_promotion.py")
     module=importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return module.receipt(),module.proof
+    return module.receipt(),module.proof,module.locator(),module.run_proof
 
 
 def test_proposer_creates_only_paired_review_files_with_verified_evidence():
     current=json.loads((ROOT/"config/deploy-images.json").read_text())
-    handoff,proof=promotion_fixture()
+    handoff,proof,handoff_locator,run_proof=promotion_fixture()
     candidate=propose_cas_promotion.propose(
         current,handoff,verifier=lambda manifest,**_kwargs:proof(manifest),
-        run_verifier=lambda _receipt:{},candidate_verifier=lambda *_args:None)
+        run_verifier=run_proof,candidate_verifier=lambda *_args:None,
+        handoff_locator=handoff_locator,source_verifier=lambda *_args:{})
     assert candidate is not None
     assert candidate["manifest"]["images"]["cas"]==candidate["manifest"]["images"]["schema_proxy"]
     assert candidate["manifest"]["images"]["executor"]==current["images"]["executor"]
@@ -32,7 +33,8 @@ def test_proposer_creates_only_paired_review_files_with_verified_evidence():
     assert cas_promotion.validate_deployment_evidence(candidate["evidence"],candidate["manifest"])
     already_current=propose_cas_promotion.propose(
         candidate["manifest"],handoff,verifier=lambda manifest,**_kwargs:proof(manifest),
-        run_verifier=lambda _receipt:{},candidate_verifier=lambda *_args:None)
+        run_verifier=run_proof,candidate_verifier=lambda *_args:None,
+        handoff_locator=handoff_locator,source_verifier=lambda *_args:{})
     assert already_current is None
 
 
@@ -70,6 +72,7 @@ def test_pr_lane_is_daily_and_deduplicates_only_a_draft_automation_branch():
     assert "--force-with-lease" in workflow
     assert "gh pr create" in workflow and "--draft" in workflow
     assert "enable-auto-merge" not in workflow
+    assert "CAS_ARTIFACTS_READ_TOKEN: ${{ secrets.CAS_ARTIFACTS_READ_TOKEN }}" in workflow
 
 
 def test_production_workflow_remains_manual_approval_gated_and_does_not_auto_deploy():

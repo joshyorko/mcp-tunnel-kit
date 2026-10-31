@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/joshyorko/mcp-tunnel-kit/blob/main/.github/schemas/cas-qualified-release-v1.schema.json",
   "title": "Qualified CAS release handoff v1",
-  "description": "CAS-owned evidence consumed by mcp-tunnel-kit before opening a production image promotion PR.",
+  "description": "CAS-owned evidence consumed by mcp-tunnel-kit before opening a production image promotion PR. The publication run also uploads exactly one qualified-cas-release-v1 artifact containing qualified-release.json; the consumer verifies that run-bound archive digest and requires its receipt content to equal the pinned main file.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "source", "qualification", "publication", "receipt_sha256"],
@@ -53,7 +53,7 @@
                 "additionalProperties": false,
                 "required": ["name", "owner"],
                 "properties": {
-                  "name": {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_.]{0,127}$"},
+                  "name": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z][A-Za-z0-9_.-]*(/[A-Za-z][A-Za-z0-9_.-]*)*$"},
                   "owner": {"enum": ["typed_action", "shared_helper"]}
                 }
               }

@@ -1,0 +1,409 @@
+{
+  "source_repository": "joshyorko/codex-action-server",
+  "source_revision": "ea1ec468027d20b511d059248335f36fd64e473b",
+  "catalog_path": "ci/codex_qualification/native_methods.json",
+  "schema_version": 1,
+  "methods": [
+    {
+      "method": "account/rateLimits/read",
+      "owning_typed_actions": [
+        "read_account_rate_limits"
+      ]
+    },
+    {
+      "method": "account/usage/read",
+      "owning_typed_actions": [
+        "read_account_usage"
+      ]
+    },
+    {
+      "method": "app/list",
+      "owning_typed_actions": [
+        "list_apps"
+      ]
+    },
+    {
+      "method": "app/read",
+      "owning_typed_actions": [
+        "read_app"
+      ]
+    },
+    {
+      "method": "hooks/list",
+      "owning_typed_actions": [
+        "list_hooks"
+      ]
+    },
+    {
+      "method": "mcpServer/resource/read",
+      "owning_typed_actions": [
+        "read_mcp_resource"
+      ]
+    },
+    {
+      "method": "mcpServer/tool/call",
+      "owning_typed_actions": [
+        "call_mcp_tool"
+      ]
+    },
+    {
+      "method": "mcpServerStatus/list",
+      "owning_typed_actions": [
+        "list_mcp_server_status"
+      ]
+    },
+    {
+      "method": "model/list",
+      "owning_typed_actions": [
+        "list_models"
+      ]
+    },
+    {
+      "method": "modelProvider/capabilities/read",
+      "owning_typed_actions": [
+        "read_model_provider_capabilities"
+      ]
+    },
+    {
+      "method": "plugin/list",
+      "owning_typed_actions": [
+        "list_plugins"
+      ]
+    },
+    {
+      "method": "plugin/read",
+      "owning_typed_actions": [
+        "read_plugin"
+      ]
+    },
+    {
+      "method": "review/start",
+      "owning_typed_actions": [
+        "start_review"
+      ]
+    },
+    {
+      "method": "server/diagnostics",
+      "owning_typed_actions": [
+        "read_server_diagnostics"
+      ]
+    },
+    {
+      "method": "skills/list",
+      "owning_typed_actions": [
+        "list_skills"
+      ]
+    },
+    {
+      "method": "thread/archive",
+      "owning_typed_actions": [
+        "archive_thread"
+      ]
+    },
+    {
+      "method": "thread/attachment/add",
+      "owning_typed_actions": [
+        "add_thread_attachment"
+      ]
+    },
+    {
+      "method": "thread/attachment/list",
+      "owning_typed_actions": [
+        "list_thread_attachments"
+      ]
+    },
+    {
+      "method": "thread/attachment/remove",
+      "owning_typed_actions": [
+        "remove_thread_attachment"
+      ]
+    },
+    {
+      "method": "thread/backgroundTerminals/list",
+      "owning_typed_actions": [
+        "list_background_terminals",
+        "terminate_background_terminal"
+      ]
+    },
+    {
+      "method": "thread/backgroundTerminals/terminate",
+      "owning_typed_actions": [
+        "terminate_background_terminal"
+      ]
+    },
+    {
+      "method": "thread/compact/start",
+      "owning_typed_actions": [
+        "compact_thread"
+      ]
+    },
+    {
+      "method": "thread/delete",
+      "owning_typed_actions": [
+        "delete_thread"
+      ]
+    },
+    {
+      "method": "thread/fork",
+      "owning_typed_actions": [
+        "fork_thread"
+      ]
+    },
+    {
+      "method": "thread/goal/clear",
+      "owning_typed_actions": [
+        "clear_thread_goal"
+      ]
+    },
+    {
+      "method": "thread/goal/get",
+      "owning_typed_actions": [
+        "get_thread_goal"
+      ]
+    },
+    {
+      "method": "thread/goal/set",
+      "owning_typed_actions": [
+        "set_thread_goal"
+      ]
+    },
+    {
+      "method": "thread/inject_items",
+      "owning_typed_actions": [
+        "inject_thread_items"
+      ]
+    },
+    {
+      "method": "thread/items/list",
+      "owning_typed_actions": [
+        "get_thread_snapshot",
+        "list_thread_items"
+      ]
+    },
+    {
+      "method": "thread/list",
+      "owning_typed_actions": [
+        "discover_threads"
+      ]
+    },
+    {
+      "method": "thread/loaded/list",
+      "owning_typed_actions": [
+        "list_loaded_threads"
+      ]
+    },
+    {
+      "method": "thread/metadata/update",
+      "owning_typed_actions": [
+        "update_thread_metadata"
+      ]
+    },
+    {
+      "method": "thread/name/set",
+      "owning_typed_actions": [
+        "set_thread_name"
+      ]
+    },
+    {
+      "method": "thread/queue/add",
+      "owning_typed_actions": [
+        "add_thread_queue_item"
+      ]
+    },
+    {
+      "method": "thread/queue/delete",
+      "owning_typed_actions": [
+        "delete_thread_queue_item"
+      ]
+    },
+    {
+      "method": "thread/queue/list",
+      "owning_typed_actions": [
+        "list_thread_queue"
+      ]
+    },
+    {
+      "method": "thread/queue/reorder",
+      "owning_typed_actions": [
+        "reorder_thread_queue"
+      ]
+    },
+    {
+      "method": "thread/queue/start",
+      "owning_typed_actions": [
+        "start_thread_queue"
+      ]
+    },
+    {
+      "method": "thread/queue/update",
+      "owning_typed_actions": [
+        "update_thread_queue_item"
+      ]
+    },
+    {
+      "method": "thread/read",
+      "owning_typed_actions": [
+        "add_thread_attachment",
+        "add_thread_queue_item",
+        "archive_thread",
+        "call_mcp_tool",
+        "clear_thread_goal",
+        "compact_thread",
+        "create_thread_and_start_turn",
+        "delete_thread",
+        "delete_thread_queue_item",
+        "fork_thread",
+        "get_thread_goal",
+        "get_thread_snapshot",
+        "inject_thread_items",
+        "interrupt_turn",
+        "list_apps",
+        "list_background_terminals",
+        "list_thread_attachments",
+        "list_thread_items",
+        "list_thread_queue",
+        "list_thread_timeline",
+        "list_thread_turns",
+        "move_thread_to_section",
+        "read_account_usage",
+        "read_app",
+        "read_mcp_resource",
+        "read_thread",
+        "remove_thread_attachment",
+        "reorder_thread_queue",
+        "resume_thread",
+        "revert_thread",
+        "search_thread_occurrences",
+        "set_thread_goal",
+        "set_thread_name",
+        "start_review",
+        "start_thread",
+        "start_thread_queue",
+        "start_turn",
+        "steer_turn",
+        "terminate_background_terminal",
+        "unarchive_thread",
+        "update_thread_metadata",
+        "update_thread_queue_item",
+        "update_thread_settings",
+        "update_turn_settings"
+      ]
+    },
+    {
+      "method": "thread/resume",
+      "owning_typed_actions": [
+        "create_thread_and_start_turn",
+        "resume_thread",
+        "start_turn"
+      ]
+    },
+    {
+      "method": "thread/revert",
+      "owning_typed_actions": [
+        "revert_thread"
+      ]
+    },
+    {
+      "method": "thread/search",
+      "owning_typed_actions": [
+        "search_threads"
+      ]
+    },
+    {
+      "method": "thread/searchOccurrences",
+      "owning_typed_actions": [
+        "search_thread_occurrences"
+      ]
+    },
+    {
+      "method": "thread/section/move",
+      "owning_typed_actions": [
+        "move_thread_to_section"
+      ]
+    },
+    {
+      "method": "thread/settings/update",
+      "owning_typed_actions": [
+        "resume_thread",
+        "start_thread",
+        "update_thread_settings"
+      ]
+    },
+    {
+      "method": "thread/start",
+      "owning_typed_actions": [
+        "create_thread_and_start_turn",
+        "start_thread"
+      ]
+    },
+    {
+      "method": "thread/timeline/list",
+      "owning_typed_actions": [
+        "list_thread_timeline"
+      ]
+    },
+    {
+      "method": "thread/turns/list",
+      "owning_typed_actions": [
+        "get_thread_snapshot",
+        "list_thread_turns"
+      ]
+    },
+    {
+      "method": "thread/unarchive",
+      "owning_typed_actions": [
+        "unarchive_thread"
+      ]
+    },
+    {
+      "method": "threadSection/create",
+      "owning_typed_actions": [
+        "create_thread_section"
+      ]
+    },
+    {
+      "method": "threadSection/delete",
+      "owning_typed_actions": [
+        "delete_thread_section"
+      ]
+    },
+    {
+      "method": "threadSection/list",
+      "owning_typed_actions": [
+        "list_thread_sections",
+        "move_thread_to_section"
+      ]
+    },
+    {
+      "method": "threadSection/update",
+      "owning_typed_actions": [
+        "update_thread_section"
+      ]
+    },
+    {
+      "method": "turn/interrupt",
+      "owning_typed_actions": [
+        "interrupt_turn"
+      ]
+    },
+    {
+      "method": "turn/settings/update",
+      "owning_typed_actions": [
+        "update_turn_settings"
+      ]
+    },
+    {
+      "method": "turn/start",
+      "owning_typed_actions": [
+        "create_thread_and_start_turn",
+        "start_turn"
+      ]
+    },
+    {
+      "method": "turn/steer",
+      "owning_typed_actions": [
+        "steer_turn"
+      ]
+    }
+  ]
+}

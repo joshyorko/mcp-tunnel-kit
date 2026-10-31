@@ -890,6 +890,7 @@ def _verified_cas_candidate(current_manifest,manifest,evidence):
             raise ValueError('CAS promotion changed unrelated production image: '+name)
     validated=cas_promotion.validate_deployment_evidence(evidence,manifest)
     handoff=validated['handoff']
+    cas_promotion.verify_handoff_source(handoff,validated['handoff_source'])
     if evidence.get('comparison',{}).get('schema_proxy_promoted_together') is not True:
         raise ValueError('CAS promotion evidence does not record the paired image update')
     cas_promotion.verify_candidate_is_current_or_newer(

@@ -14,8 +14,13 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def propose(current: dict, handoff: dict, *, verifier=None, run_verifier=None,
-            candidate_verifier=None) -> dict | None:
+            candidate_verifier=None, handoff_locator: dict | None = None,
+            source_verifier=None) -> dict | None:
     """Return paired manifest/evidence, or None when the pin is already current."""
+    if handoff_locator is None:
+        raise cas_promotion.PromotionError("Immutable CAS handoff locator is unavailable")
+    source_verifier = source_verifier or cas_promotion.verify_handoff_source
+    source_verifier(handoff, cas_promotion.handoff_source_evidence(handoff, handoff_locator))
     kwargs = {}
     if verifier is not None:
         kwargs["verifier"] = verifier
@@ -27,7 +32,7 @@ def propose(current: dict, handoff: dict, *, verifier=None, run_verifier=None,
     if (promoted["images"]["cas"] == current["images"]["cas"]
             and promoted["images"]["schema_proxy"] == current["images"]["schema_proxy"]):
         return None
-    evidence = cas_promotion.build_evidence(current, promoted, handoff, proof)
+    evidence = cas_promotion.build_evidence(current, promoted, handoff, proof, handoff_locator)
     return {"manifest": promoted, "evidence": evidence}
 
 
@@ -55,10 +60,11 @@ def run(repo: Path = ROOT) -> dict:
         current = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError):
         raise cas_promotion.PromotionError("Current deployment image manifest is unavailable") from None
-    handoff = cas_promotion.fetch_handoff()
-    if handoff is None:
+    fetched = cas_promotion.fetch_handoff()
+    if fetched is None:
         return {"status": "no-qualified-release", "changed": False}
-    candidate = propose(current, handoff)
+    handoff, handoff_locator = fetched
+    candidate = propose(current, handoff, handoff_locator=handoff_locator)
     if candidate is None:
         return {"status": "already-current", "changed": False}
     _atomic_json(manifest_path, candidate["manifest"])

@@ -32,6 +32,7 @@ jobs:
       - name: Resolve the qualified release and create a deduplicated draft PR
         env:
           GH_TOKEN: ${{ github.token }}
+          CAS_ARTIFACTS_READ_TOKEN: ${{ secrets.CAS_ARTIFACTS_READ_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           PROMOTION_BRANCH: automation/cas-promotion
         shell: bash

@@ -16,13 +16,13 @@ import vm_deploy_host as h
 
 
 def cas_promotion_fixture():
-    from test_cas_promotion import receipt, proof
+    from test_cas_promotion import receipt, proof, locator, run_proof
     current=json.loads((ROOT/'config/deploy-images.json').read_text())
     handoff=receipt()
     promoted,publisher_proof=d.cas_promotion.promote_manifest(
         current,handoff,verifier=lambda manifest,**_kwargs:proof(manifest),
-        run_verifier=lambda _receipt:{},candidate_verifier=lambda *_args:None)
-    evidence=d.cas_promotion.build_evidence(current,promoted,handoff,publisher_proof)
+        run_verifier=run_proof,candidate_verifier=lambda *_args:None)
+    evidence=d.cas_promotion.build_evidence(current,promoted,handoff,publisher_proof,locator())
     return current,promoted,evidence
 
 
@@ -146,10 +146,12 @@ def test_deployment_candidate_rechecks_receipt_provenance_and_rejects_unrelated_
                    "revision":manifest["images"]["cas"]["revision"],
                    "platform":"linux/amd64"}
               for key in ("cas","schema_proxy")}
-    with patch.object(d.cas_promotion,"verify_candidate_is_current_or_newer") as ancestry, \
+    with patch.object(d.cas_promotion,"verify_handoff_source") as source, \
+         patch.object(d.cas_promotion,"verify_candidate_is_current_or_newer") as ancestry, \
          patch.object(d.cas_promotion,"verify_action_runs",return_value={}) as runs, \
          patch.object(d.cas_promotion,"verify_publisher",return_value=verified) as publisher:
         assert d._verified_cas_candidate(current,manifest,evidence)==evidence
+        source.assert_called_once()
     ancestry.assert_called_once()
     runs.assert_called_once_with(evidence["handoff"])
     publisher.assert_called_once_with(evidence["handoff"])
@@ -253,14 +255,14 @@ def test_remote_source_injects_stdlib_generation_validator_without_target_instal
 
 
 def test_native_reconcile_is_read_only_and_reports_separate_versions_and_qualification():
-    from test_cas_promotion import receipt as handoff_fixture, proof as proof_fixture
+    from test_cas_promotion import receipt as handoff_fixture, proof as proof_fixture, locator, run_proof
     deployed_manifest = json.loads((ROOT / "config/deploy-images.json").read_text())
     handoff = handoff_fixture()
     promoted, proof = d.cas_promotion.promote_manifest(
         deployed_manifest, handoff,
         verifier=lambda manifest, **_kwargs: proof_fixture(manifest),
-        run_verifier=lambda _receipt: {}, candidate_verifier=lambda *_args: None)
-    promotion_receipt = d.cas_promotion.build_evidence(deployed_manifest, promoted, handoff, proof)
+        run_verifier=run_proof, candidate_verifier=lambda *_args: None)
+    promotion_receipt = d.cas_promotion.build_evidence(deployed_manifest, promoted, handoff, proof, locator())
     current = {"manifest":promoted,"cas_promotion":promotion_receipt}
     native = {"mutated":False,"targets":{
         "dakota-cpu":{"installed_cli":{"version":"0.172.0"},
