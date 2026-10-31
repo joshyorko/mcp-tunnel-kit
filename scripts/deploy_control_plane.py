@@ -25,6 +25,7 @@ import uuid
 
 from kamal_model import render,validate_manifest
 from image_provenance import verify as verify_provenance
+import cas_promotion
 from instance_profile import DEFAULT_PATH as DEFAULT_INSTANCE_PROFILE, encode as encode_instance_profile, load as load_instance_profile
 from devsy_vm_bootstrap import MISSING_KUBECTL_REASON
 ROOT=Path(__file__).resolve().parents[1]
@@ -59,11 +60,13 @@ def configure_instance(value):
     return INSTANCE
 
 
-def trusted_context(env, local=False):
+def trusted_context(env, local=False, operation=None):
     if INSTANCE is None:raise ValueError('Private instance profile must be loaded before deployment')
     if not (local and LOCAL_CONFIGURED):
         if socket.gethostname()!='pi5-01' or os.uname().machine!='aarch64':raise ValueError('Deployment must run on the approved ARM64 Pi')
-        if not local and (LOCAL_CONFIGURED or env.get('GITHUB_REPOSITORY')!='joshyorko/mcp-tunnel-kit' or env.get('GITHUB_REF')!='refs/heads/main' or env.get('GITHUB_EVENT_NAME')!='workflow_dispatch' or env.get('RUNNER_NAME')!='pi5-01-mcp-control-plane'):
+        event=env.get('GITHUB_EVENT_NAME')
+        approved_event=event=='workflow_dispatch'
+        if not local and (LOCAL_CONFIGURED or env.get('GITHUB_REPOSITORY')!='joshyorko/mcp-tunnel-kit' or env.get('GITHUB_REF')!='refs/heads/main' or not approved_event or env.get('RUNNER_NAME')!='pi5-01-mcp-control-plane'):
             raise ValueError('Untrusted workflow/runner context')
     for p in (SSH,KEY,KNOWN):
         s=p.lstat()
@@ -175,7 +178,7 @@ def lock():
 
 def remote_source():
     bootstrap='import sys,types\n'
-    for name in ('instance_profile','prepare_recovery_generation','devsy_vm_bootstrap','scope_binding_rebind','bridge_kubectl_path','compose_control'):
+    for name in ('instance_profile','prepare_recovery_generation','devsy_vm_bootstrap','scope_binding_rebind','bridge_kubectl_path','compose_control','native_drift'):
         source=(ROOT/'scripts'/(name+'.py')).read_text()
         bootstrap+=('_module=types.ModuleType('+repr(name)+')\n'
                     +'_module.__file__='+repr(str(ROOT/'scripts'/(name+'.py')))+'\n'
@@ -282,16 +285,6 @@ def memoryd_rollout_recovery_lock(rollout_id):
 
 def configuration(directory,manifest,*,allow_memoryd_mcp=True,memoryd_recovery=None):
     p=Path(directory)/'deploy.yml';p.write_text(render(profile(),manifest,allow_memoryd_mcp=allow_memoryd_mcp,memoryd_recovery=memoryd_recovery));p.chmod(0o600);return p
-
-
-def choose_manifest(current, digest, revision):
-    result=copy.deepcopy(current)
-    if bool(digest)!=bool(revision):raise ValueError('CAS digest and source revision must be selected together')
-    if digest:
-        result['images']['cas']['digest']=digest
-        result['images']['cas']['revision']=revision
-    validate_manifest(result)
-    return result
 
 
 def native_codex_tuple(args, *, require_valid=True):
@@ -804,14 +797,119 @@ def restore(previous,directory,native_tuple=None):
     return after
 
 
-def restore_cas(previous,directory,native_tuple=None):
+def restore_cas(previous,directory,native_tuple=None,*,before=None):
     config=configuration(directory,previous['manifest'])
-    kamal(config,'reboot','cas');remote('wait',{'owner':'kamal','service':'cas'})
+    for service in ('schema-proxy','cas'):
+        kamal(config,'reboot',service);remote('wait',{'owner':'kamal','service':service})
     smoke(native_tuple);after=remote('snapshot')
     if after['identity']!=previous['identity']:raise RuntimeError('CAS rollback identity mismatch')
     if after['source_sha']!=previous['source_sha']:raise RuntimeError('CAS rollback found source drift; full deployment reconciliation required')
+    image_ids=remote('image-check',previous['manifest'])['image_ids']
+    if any(after['inventory'][service]['image']!=image_ids[key]
+           for service,key in (('cas','cas'),('schema-proxy','schema_proxy'))):
+        raise RuntimeError('CAS rollback image verification failed')
+    if before is not None:_assert_cas_pair_rollout(before,after,image_ids)
     remote('set-current',previous)
     return after
+
+
+def _cas_qualification_snapshot(current):
+    """Report only evidence committed with the actually deployed CAS generation."""
+    manifest=current.get('manifest') if isinstance(current,dict) else None
+    pin=(manifest or {}).get('images',{}).get('cas',{}) if isinstance(manifest,dict) else {}
+    revision=pin.get('revision') if isinstance(pin,dict) else None
+    evidence=current.get('cas_promotion') if isinstance(current,dict) else None
+    if evidence is None:
+        return {'status':'NOT_RECORDED','source_revision':revision,
+                'qualified_methods':{},'withheld_methods':None}
+    try:
+        checked=cas_promotion.validate_deployment_evidence(evidence,manifest)
+    except (ValueError,TypeError,KeyError):
+        return {'status':'INVALID','source_revision':revision,
+                'qualified_methods':{},'withheld_methods':None}
+    qualification=checked['qualification']
+    if checked['source_revision']!=revision:
+        return {'status':'MISMATCH','source_revision':revision,
+                'qualified_methods':{},'withheld_methods':None}
+    return {'status':'QUALIFIED','source_revision':revision,
+            'qualified_methods':qualification['method_verdicts'],
+            'withheld_methods':qualification['withheld_methods'],
+            'qualification_run_url':qualification['run_url'],
+            'required_ci_url':qualification['required_ci_url']}
+
+
+def _assert_cas_pair_rollout(before,after,image_ids):
+    """Prove the pair changed while Executor and tunnel kept their container ids."""
+    prior, current = before.get('inventory',{}), after.get('inventory',{})
+    for service in ('executor','tunnel'):
+        old,new=prior.get(service,{}),current.get(service,{})
+        if (not old.get('container_id') or not new.get('container_id')
+                or old.get('container_id')!=new.get('container_id')
+                or old.get('started_at')!=new.get('started_at')
+                or old.get('image')!=new.get('image')):
+            raise RuntimeError('CAS promotion changed an unrelated service: '+service)
+    for service,key in (('cas','cas'),('schema-proxy','schema_proxy')):
+        old,new=prior.get(service,{}),current.get(service,{})
+        if (not old.get('container_id') or not new.get('container_id')
+                or old.get('container_id')==new.get('container_id')
+                or old.get('started_at')==new.get('started_at')
+                or new.get('image')!=image_ids.get(key) or new.get('state')!='running'
+                or new.get('health')!='healthy'):
+            raise RuntimeError('CAS promotion pair did not return healthy at the approved image')
+
+
+def _cas_deployment_receipt(current,manifest,evidence,*,status,failure_reason=None,rollback_status=None):
+    handoff=evidence.get('handoff',{}) if isinstance(evidence,dict) else {}
+    qualification=handoff.get('qualification',{}) if isinstance(handoff,dict) else {}
+    publication=handoff.get('publication',{}) if isinstance(handoff,dict) else {}
+    run_id=os.environ.get('GITHUB_RUN_ID','')
+    attempt=os.environ.get('GITHUB_RUN_ATTEMPT','')
+    deploy_url=(f'https://github.com/joshyorko/mcp-tunnel-kit/actions/runs/{run_id}'
+                + (f'/attempts/{attempt}' if attempt else '')) if re.fullmatch(r'[1-9][0-9]*',run_id) else None
+    old=(current or {}).get('manifest',{}).get('images',{}).get('cas',{})
+    new=manifest.get('images',{}).get('cas',{})
+    return {'schema_version':1,'status':status,'source_revision':new.get('revision'),
+            'image_digest':new.get('digest'),'qualification_run_url':qualification.get('run_url'),
+            'required_ci_url':qualification.get('required_ci_url'),
+            'publisher_run_url':publication.get('run_url'),'deploy_run_url':deploy_url,
+            'rollback_digest':old.get('digest'),'rollback_source_revision':old.get('revision'),
+            'rollback_status':rollback_status,'failure_reason':failure_reason}
+
+
+def _verified_cas_candidate(current_manifest,manifest,evidence):
+    """Resolve a merged, evidence-bearing CAS pin; never accept user-supplied pins."""
+    from kamal_model import validate_manifest
+    validate_manifest(current_manifest)
+    validate_manifest(manifest)
+    if current_manifest['images']['cas']!=current_manifest['images']['schema_proxy']:
+        raise ValueError('Current CAS/schema-proxy rollback generation is not a coherent pair')
+    if manifest['images']['cas']!=manifest['images']['schema_proxy']:
+        raise ValueError('Merged CAS/schema-proxy production pins are not a coherent pair')
+    for name in ('executor','tunnel'):
+        if current_manifest['images'][name]!=manifest['images'][name]:
+            raise ValueError('CAS promotion changed unrelated production image: '+name)
+    validated=cas_promotion.validate_deployment_evidence(evidence,manifest)
+    handoff=validated['handoff']
+    source_proof=cas_promotion.verify_handoff_source(handoff,validated['handoff_source'])
+    if evidence.get('comparison',{}).get('schema_proxy_promoted_together') is not True:
+        raise ValueError('CAS promotion evidence does not record the paired image update')
+    cas_promotion.verify_candidate_is_current_or_newer(
+        current_manifest['images']['cas']['revision'],manifest['images']['cas']['revision'])
+    if (manifest['images']['cas']['revision']==current_manifest['images']['cas']['revision']
+            and manifest['images']['cas']['digest']!=current_manifest['images']['cas']['digest']):
+        raise ValueError('CAS source revision was republished with a different image digest')
+    run_proof=cas_promotion.verify_action_runs(handoff)
+    if (not isinstance(source_proof,dict) or not isinstance(run_proof,dict)
+            or source_proof.get('artifact')!=validated['handoff_source'].get('artifact')
+            or run_proof.get('publication_artifact')!=validated['handoff_source'].get('artifact')):
+        raise ValueError('CAS publisher artifact no longer matches the reviewed handoff evidence')
+    platform_proof=cas_promotion.verify_publisher(handoff)
+    for key in ('cas','schema_proxy'):
+        if (platform_proof[key].get('digest')!=manifest['images']['cas']['digest']
+                or platform_proof[key].get('revision')!=manifest['images']['cas']['revision']
+                or platform_proof[key].get('platform')!='linux/amd64'):
+            raise ValueError('CAS publisher image proof does not match the merged image pair')
+    return validated
 
 
 def _sha256_file(path):
@@ -1538,13 +1636,13 @@ def execute(args):
         'devsy-tap-rollback-check', 'devsy-tap-rollback',
     )
     native_tuple = native_codex_tuple(
-        args, require_valid=args.operation in ('adopt','cas','deploy','devsy-apply')
+        args, require_valid=args.operation in ('adopt','deploy','devsy-apply')
         or args.operation in host_tap_operations)
     if args.operation in host_tap_operations and native_tuple is None:
         raise ValueError('qualified native Codex tuple is required for protected Homebrew tap operations')
     if INSTANCE is None:
         configure_instance(getattr(args,'instance_profile',None) or os.environ.get('KAMAL_INSTANCE_PROFILE',DEFAULT_INSTANCE_PROFILE))
-    trusted_context(os.environ,args.local)
+    trusted_context(os.environ,args.local,args.operation)
     if args.operation in ('adopt','deploy','rollback') and not args.approve_full_stack:raise ValueError('Explicit full-stack approval input required')
     sha=os.environ.get('GITHUB_SHA') or subprocess.check_output(['git','rev-parse','HEAD'],cwd=ROOT,text=True).strip()
     rollout_recovery=('memoryd-rollout-reconcile','memoryd-rollout-abort','memoryd-rollout-complete')
@@ -1579,6 +1677,12 @@ def execute(args):
             result['devsy_plan']=remote('devsy-plan',devsy_payload())
             result['smoke']=smoke(native_tuple) if result['healthy'] else {'status':'BLOCKED: managed service unhealthy'}
             return result
+        if args.operation=='native-reconcile':
+            current=remote('current')
+            drift=remote('native-drift',{})
+            return {'operation':'native-reconcile','mutated':False,
+                    'native_drift':drift,
+                    'cas_method_qualification':_cas_qualification_snapshot(current)}
         if args.operation=='memoryd':
             if not (args.local and LOCAL_CONFIGURED):
                 raise ValueError('MemoryD accessory deployment requires the private pinned local Kamal profile')
@@ -1653,12 +1757,24 @@ def execute(args):
         remote('profile')
         remote('network-check',profile()['network'])
         current=remote('current');needs_baseline=current is None
+        if args.operation=='cas' and needs_baseline:
+            raise ValueError('CAS promotion requires a recorded generation for verified rollback')
         defaults=json.loads((ROOT/'config/deploy-images.json').read_text())
         if current is None:
             current={'authority':before['authority'],'source_sha':before['source_sha'],'manifest':defaults,'identity':before['identity']}
         if before['identity']!=current['identity']:raise ValueError('Executor identity drift')
         current['publication_proof']=prove_images(current['manifest'],current)
-        manifest=choose_manifest(current['manifest'],args.cas_digest,args.cas_revision)
+        promotion_evidence=None
+        if args.operation=='cas':
+            promotion_path=ROOT/'config/cas-promotion.json'
+            try:
+                promotion_evidence=json.loads(promotion_path.read_text())
+            except (OSError,UnicodeError,json.JSONDecodeError):
+                raise ValueError('Merged CAS qualification promotion evidence is unavailable') from None
+            manifest=defaults
+            promotion_evidence=_verified_cas_candidate(current['manifest'],manifest,promotion_evidence)
+        else:
+            manifest=current['manifest']
         publication=prove_images(manifest,current)
         config=configuration(directory,manifest)
         provenance=remote('image-check',current['manifest'])
@@ -1673,8 +1789,13 @@ def execute(args):
         if args.operation=='adopt' and before['authority']!='compose':raise ValueError('Adoption requires the sole Compose owner')
         if args.operation=='deploy' and before['authority']!='kamal':raise ValueError('Use explicit adoption first')
         remote('devsy-check',devsy_payload())
-        smoke(native_tuple, require_native=True)
+        smoke(native_tuple, require_native=args.operation!='cas')
         _pin_memoryd_before_core_change()
+        if args.operation=='cas' and manifest==current['manifest']:
+            return {'operation':'cas','status':'already-current','mutated':False,
+                    'source_revision':manifest['images']['cas']['revision'],
+                    'image_digest':manifest['images']['cas']['digest'],
+                    'cas_method_qualification':_cas_qualification_snapshot(current)}
         remote('images',manifest)
         if needs_baseline:remote('baseline',current)
         backup=remote('backup-cas' if args.operation=='cas' else 'backup')
@@ -1689,6 +1810,8 @@ def execute(args):
                     phase='boot-'+name
                     kamal(config,'boot',name);remote('wait',{'owner':'kamal','service':name})
             elif args.operation=='cas':
+                phase='reboot-schema-proxy'
+                kamal(config,'reboot','schema-proxy');remote('wait',{'owner':'kamal','service':'schema-proxy'})
                 phase='reboot-cas'
                 kamal(config,'reboot','cas');remote('wait',{'owner':'kamal','service':'cas'})
             else:
@@ -1700,23 +1823,54 @@ def execute(args):
                 phase='devsy-start'
                 remote('devsy-start')
             phase='acceptance'
-            after=remote('snapshot');smoke_result=smoke(native_tuple, require_native=True)
+            after=remote('snapshot');smoke_result=smoke(native_tuple, require_native=args.operation!='cas')
             if after['identity']!=before['identity']:raise RuntimeError('Post-deploy Executor identity changed')
             deployed_source=current['source_sha'] if args.operation=='cas' else sha
-            remote('commit',{'authority':'kamal','source_sha':deployed_source,'manifest':manifest,'identity':after['identity'],'publication_proof':publication})
-            return {'operation':args.operation,'authority':'kamal','inventory':after['inventory'],'smoke':smoke_result,'identity_preserved':True,'backup':backup,'source_sha':deployed_source,'controller_sha':sha}
+            if args.operation=='cas':
+                image_ids=remote('image-check',manifest)['image_ids']
+                _assert_cas_pair_rollout(before,after,image_ids)
+                deploy_receipt=_cas_deployment_receipt(
+                    current,manifest,promotion_evidence,status='deployed',rollback_status='available')
+                generation={'authority':'kamal','source_sha':deployed_source,'manifest':manifest,
+                            'identity':after['identity'],'publication_proof':publication,
+                            'cas_promotion':promotion_evidence,
+                            'cas_deployment_receipt':deploy_receipt}
+            else:
+                deploy_receipt=None
+                generation={'authority':'kamal','source_sha':deployed_source,'manifest':manifest,
+                            'identity':after['identity'],'publication_proof':publication}
+            remote('commit',generation)
+            result={'operation':args.operation,'authority':'kamal','inventory':after['inventory'],
+                    'smoke':smoke_result,'identity_preserved':True,'backup':backup,
+                    'source_sha':deployed_source,'controller_sha':sha}
+            if deploy_receipt is not None:result.update(status='deployed',deployment_receipt=deploy_receipt)
+            return result
         except Exception:
             # Report only our fixed phase names, never subprocess output or secrets.
+            if args.operation=='cas':
+                try:
+                    restore_cas(current,directory,native_tuple,before=before)
+                    failure_receipt=_cas_deployment_receipt(
+                        current,manifest,promotion_evidence,status='failed',
+                        failure_reason=phase,rollback_status='restored')
+                    rollback_status='restored'
+                except Exception:
+                    failure_receipt=_cas_deployment_receipt(
+                        current,manifest,promotion_evidence,status='failed',
+                        failure_reason=phase,rollback_status='failed')
+                    rollback_status='failed'
+                raise RuntimeError(json.dumps({'operation':'cas','status':'failed',
+                        'phase':phase,'automatic_rollback':rollback_status,
+                        'deployment_receipt':failure_receipt},sort_keys=True)) from None
             try:
-                if args.operation=='cas':restore_cas(current,directory,native_tuple)
-                else:restore(current,directory,native_tuple)
+                restore(current,directory,native_tuple)
             except Exception:
                 raise RuntimeError('Deployment failed at '+phase+'; automatic rollback FAILED; operator recovery required') from None
             raise RuntimeError('Deployment failed at '+phase+'; previous generation restored') from None
 
 
 def main():
-    p=argparse.ArgumentParser();p.add_argument('operation',choices=('devsy-bridge-path-check','devsy-bridge-path-apply','devsy-scope-rebind-check','devsy-scope-rebind','preflight','status','memoryd','memoryd-transfer','memoryd-network','memoryd-register','memoryd-registration-reconcile','memoryd-legacy-reconcile','adopt','cas','deploy','rollback','devsy-check','devsy-apply','devsy-rollback','devsy-tap-reconcile-check','devsy-tap-reconcile','devsy-tap-rollback-check','devsy-tap-rollback'));p.add_argument('--cas-digest',default='');p.add_argument('--cas-revision',default='');p.add_argument('--approve-bridge-kubectl-path',action='store_true');p.add_argument('--approve-scope-binding-rebind',action='store_true');p.add_argument('--approve-full-stack',action='store_true');p.add_argument('--approve-host-devsy-apply',action='store_true');p.add_argument('--approve-host-devsy-rollback',action='store_true');p.add_argument('--approve-host-tap-reconciliation',action='store_true');p.add_argument('--approve-host-tap-rollback',action='store_true');p.add_argument('--tap-reconciliation-run-id',default=os.environ.get('TAP_RECONCILIATION_RUN_ID'));p.add_argument('--tap-reconciliation-run-attempt',default=os.environ.get('TAP_RECONCILIATION_RUN_ATTEMPT'));p.add_argument('--instance-profile',help='Absolute path to an owned mode-0600 private instance profile');p.add_argument('--native-target',default=os.environ.get('NATIVE_TARGET'));p.add_argument('--native-cwd',default=os.environ.get('NATIVE_CWD'));p.add_argument('--native-thread-id',default=os.environ.get('NATIVE_THREAD_ID'));p.add_argument('--local',action='store_true',help='Approved Pi break-glass, or bin/kamal with explicit private local config')
+    p=argparse.ArgumentParser();p.add_argument('operation',choices=('devsy-bridge-path-check','devsy-bridge-path-apply','devsy-scope-rebind-check','devsy-scope-rebind','preflight','status','native-reconcile','memoryd','memoryd-transfer','memoryd-network','memoryd-register','memoryd-registration-reconcile','memoryd-legacy-reconcile','adopt','cas','deploy','rollback','devsy-check','devsy-apply','devsy-rollback','devsy-tap-reconcile-check','devsy-tap-reconcile','devsy-tap-rollback-check','devsy-tap-rollback'));p.add_argument('--approve-bridge-kubectl-path',action='store_true');p.add_argument('--approve-scope-binding-rebind',action='store_true');p.add_argument('--approve-full-stack',action='store_true');p.add_argument('--approve-host-devsy-apply',action='store_true');p.add_argument('--approve-host-devsy-rollback',action='store_true');p.add_argument('--approve-host-tap-reconciliation',action='store_true');p.add_argument('--approve-host-tap-rollback',action='store_true');p.add_argument('--tap-reconciliation-run-id',default=os.environ.get('TAP_RECONCILIATION_RUN_ID'));p.add_argument('--tap-reconciliation-run-attempt',default=os.environ.get('TAP_RECONCILIATION_RUN_ATTEMPT'));p.add_argument('--instance-profile',help='Absolute path to an owned mode-0600 private instance profile');p.add_argument('--native-target',default=os.environ.get('NATIVE_TARGET'));p.add_argument('--native-cwd',default=os.environ.get('NATIVE_CWD'));p.add_argument('--native-thread-id',default=os.environ.get('NATIVE_THREAD_ID'));p.add_argument('--local',action='store_true',help='Approved Pi break-glass, or bin/kamal with explicit private local config')
     p.add_argument('--confirm-import-quiescent',action='store_true')
     p.add_argument('--approve-legacy-abandon',action='store_true')
     args=p.parse_args()

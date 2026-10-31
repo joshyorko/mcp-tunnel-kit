@@ -1,0 +1,569 @@
+{
+  "publication": {
+    "digest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "image_repository": "ghcr.io/joshyorko/codex-action-server",
+    "image_tag": "sha-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "platform": "linux/amd64",
+    "revision": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "run_url": "https://github.com/joshyorko/codex-action-server/actions/runs/125",
+    "status": "published"
+  },
+  "qualification": {
+    "behavior_coverage": {
+      "account/rateLimits/read": {
+        "result": "passed",
+        "strategy": "native_read_smoke"
+      },
+      "account/usage/read": {
+        "result": "passed",
+        "strategy": "isolated_fixture"
+      },
+      "app/list": {
+        "result": "passed",
+        "strategy": "native_read_smoke"
+      },
+      "app/read": {
+        "result": "passed",
+        "strategy": "isolated_fixture"
+      },
+      "hooks/list": {
+        "result": "passed",
+        "strategy": "native_read_smoke"
+      },
+      "mcpServer/resource/read": {
+        "result": "passed",
+        "strategy": "isolated_fixture"
+      },
+      "mcpServer/tool/call": {
+        "result": "passed",
+        "strategy": "isolated_fixture"
+      },
+      "mcpServerStatus/list": {
+        "result": "passed",
+        "strategy": "native_read_smoke"
+      },
+      "model/list": {
+        "result": "passed",
+        "strategy": "native_read_smoke"
+      },
+      "modelProvider/capabilities/read": {
+        "result": "passed",
+        "strategy": "native_read_smoke"
+      },
+      "plugin/list": {
+        "result": "passed",
+        "strategy": "native_read_smoke"
+      },
+      "plugin/read": {
+        "result": "passed",
+        "strategy": "isolated_fixture"
+      },
+      "review/start": {
+        "result": "passed",
+        "strategy": "isolated_fixture"
+      },
+      "server/diagnostics": {
+        "result": "passed",
+        "strategy": "native_read_smoke"
+      },
+      "skills/list": {
+        "result": "passed",
+        "strategy": "native_read_smoke"
+      },
+      "thread/archive": {
+        "result": "passed",
+        "strategy": "isolated_fixture"
+      },
+      "thread/attachment/add": {
+        "result": "passed",
+        "strategy": "isolated_fixture"
+      },
+      "thread/attachment/list": {
+        "result": "passed",
+        "strategy": "isolated_fixture"
+      },
+      "thread/attachment/remove": {
+        "result": "passed",
+        "strategy": "isolated_fixture"
+      },
+      "thread/backgroundTerminals/list": {
+        "result": "passed",
+        "strategy": "isolated_fixture"
+      },
+      "thread/backgroundTerminals/terminate": {
+        "result": "passed",
+        "strategy": "isolated_fixture"
+      },
+      "thread/compact/start": {
+        "result": "passed",
+        "strategy": "isolated_fixture"
+      },
+      "thread/delete": {
+        "result": "passed",
+        "strategy": "isolated_fixture"
+      },
+      "thread/fork": {
+        "result": "passed",
+        "strategy": "isolated_fixture"
+      },
+      "thread/goal/clear": {
+        "result": "passed",
+        "strategy": "isolated_fixture"
+      },
+      "thread/goal/get": {
+        "result": "passed",
+        "strategy": "isolated_fixture"
+      },
+      "thread/goal/set": {
+        "result": "passed",
+        "strategy": "isolated_fixture"
+      },
+      "thread/inject_items": {
+        "result": "passed",
+        "strategy": "isolated_fixture"
+      },
+      "thread/items/list": {
+        "result": "passed",
+        "strategy": "isolated_fixture"
+      },
+      "thread/list": {
+        "result": "passed",
+        "strategy": "native_read_smoke"
+      },
+      "thread/loaded/list": {
+        "result": "passed",
+        "strategy": "native_read_smoke"
+      },
+      "thread/metadata/update": {
+        "result": "passed",
+        "strategy": "isolated_fixture"
+      },
+      "thread/name/set": {
+        "result": "passed",
+        "strategy": "isolated_fixture"
+      },
+      "thread/queue/add": {
+        "result": "passed",
+        "strategy": "isolated_fixture"
+      },
+      "thread/queue/delete": {
+        "result": "passed",
+        "strategy": "isolated_fixture"
+      },
+      "thread/queue/list": {
+        "result": "passed",
+        "strategy": "isolated_fixture"
+      },
+      "thread/queue/reorder": {
+        "result": "passed",
+        "strategy": "isolated_fixture"
+      },
+      "thread/queue/start": {
+        "result": "passed",
+        "strategy": "isolated_fixture"
+      },
+      "thread/queue/update": {
+        "result": "passed",
+        "strategy": "isolated_fixture"
+      },
+      "thread/read": {
+        "result": "passed",
+        "strategy": "isolated_fixture"
+      },
+      "thread/resume": {
+        "result": "passed",
+        "strategy": "isolated_fixture"
+      },
+      "thread/revert": {
+        "result": "passed",
+        "strategy": "isolated_fixture"
+      },
+      "thread/search": {
+        "result": "passed",
+        "strategy": "isolated_fixture"
+      },
+      "thread/searchOccurrences": {
+        "result": "passed",
+        "strategy": "isolated_fixture"
+      },
+      "thread/section/move": {
+        "result": "passed",
+        "strategy": "isolated_fixture"
+      },
+      "thread/settings/update": {
+        "result": "passed",
+        "strategy": "isolated_fixture"
+      },
+      "thread/start": {
+        "result": "passed",
+        "strategy": "isolated_fixture"
+      },
+      "thread/timeline/list": {
+        "result": "passed",
+        "strategy": "isolated_fixture"
+      },
+      "thread/turns/list": {
+        "result": "passed",
+        "strategy": "isolated_fixture"
+      },
+      "thread/unarchive": {
+        "result": "passed",
+        "strategy": "isolated_fixture"
+      },
+      "threadSection/create": {
+        "result": "passed",
+        "strategy": "isolated_fixture"
+      },
+      "threadSection/delete": {
+        "result": "passed",
+        "strategy": "isolated_fixture"
+      },
+      "threadSection/list": {
+        "result": "passed",
+        "strategy": "native_read_smoke"
+      },
+      "threadSection/update": {
+        "result": "passed",
+        "strategy": "isolated_fixture"
+      },
+      "turn/interrupt": {
+        "result": "passed",
+        "strategy": "isolated_fixture"
+      },
+      "turn/settings/update": {
+        "result": "passed",
+        "strategy": "isolated_fixture"
+      },
+      "turn/start": {
+        "result": "passed",
+        "strategy": "isolated_fixture"
+      },
+      "turn/steer": {
+        "result": "passed",
+        "strategy": "isolated_fixture"
+      }
+    },
+    "comparison_url": "https://github.com/joshyorko/codex-action-server/compare/dddddddddddddddddddddddddddddddddddddddd...eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "method_verdicts": {
+      "account/rateLimits/read": "qualified",
+      "account/usage/read": "qualified",
+      "app/list": "qualified",
+      "app/read": "already_approved",
+      "hooks/list": "qualified",
+      "mcpServer/resource/read": "qualified",
+      "mcpServer/tool/call": "qualified",
+      "mcpServerStatus/list": "qualified",
+      "model/list": "qualified",
+      "modelProvider/capabilities/read": "qualified",
+      "plugin/list": "qualified",
+      "plugin/read": "qualified",
+      "review/start": "qualified",
+      "server/diagnostics": "already_approved",
+      "skills/list": "qualified",
+      "thread/archive": "qualified",
+      "thread/attachment/add": "qualified",
+      "thread/attachment/list": "qualified",
+      "thread/attachment/remove": "qualified",
+      "thread/backgroundTerminals/list": "already_approved",
+      "thread/backgroundTerminals/terminate": "already_approved",
+      "thread/compact/start": "qualified",
+      "thread/delete": "qualified",
+      "thread/fork": "qualified",
+      "thread/goal/clear": "qualified",
+      "thread/goal/get": "qualified",
+      "thread/goal/set": "qualified",
+      "thread/inject_items": "qualified",
+      "thread/items/list": "qualified",
+      "thread/list": "qualified",
+      "thread/loaded/list": "qualified",
+      "thread/metadata/update": "qualified",
+      "thread/name/set": "qualified",
+      "thread/queue/add": "already_approved",
+      "thread/queue/delete": "already_approved",
+      "thread/queue/list": "already_approved",
+      "thread/queue/reorder": "already_approved",
+      "thread/queue/start": "already_approved",
+      "thread/queue/update": "already_approved",
+      "thread/read": "qualified",
+      "thread/resume": "qualified",
+      "thread/revert": "qualified",
+      "thread/search": "already_approved",
+      "thread/searchOccurrences": "already_approved",
+      "thread/section/move": "qualified",
+      "thread/settings/update": "already_approved",
+      "thread/start": "qualified",
+      "thread/timeline/list": "already_approved",
+      "thread/turns/list": "qualified",
+      "thread/unarchive": "qualified",
+      "threadSection/create": "qualified",
+      "threadSection/delete": "qualified",
+      "threadSection/list": "qualified",
+      "threadSection/update": "qualified",
+      "turn/interrupt": "qualified",
+      "turn/settings/update": "already_approved",
+      "turn/start": "qualified",
+      "turn/steer": "qualified"
+    },
+    "native_release": {
+      "asset_id": "999999999",
+      "asset_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "asset_url": "https://github.com/openai/codex/releases/download/rust-v9.9.9/codex-x86_64-unknown-linux-musl.tar.gz",
+      "binary_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "fixture_path": "tests/fixtures/protocol/codex_9.9.9_native_methods.json",
+      "fixture_sha256": "32a37dc957702f2d3306039ec31f37472cd88a34706b9bff5704ccb88585a599",
+      "qualification_run_url": "https://github.com/joshyorko/codex-action-server/actions/runs/999999999",
+      "tag": "rust-v9.9.9",
+      "version": "9.9.9"
+    },
+    "required_ci_url": "https://github.com/joshyorko/codex-action-server/actions/runs/124",
+    "run_url": "https://github.com/joshyorko/codex-action-server/actions/runs/123",
+    "status": "qualified",
+    "surface": {
+      "complete": true,
+      "methods": [
+        {
+          "name": "account/rateLimits/read",
+          "owner": "typed_action"
+        },
+        {
+          "name": "account/usage/read",
+          "owner": "typed_action"
+        },
+        {
+          "name": "app/list",
+          "owner": "typed_action"
+        },
+        {
+          "name": "app/read",
+          "owner": "typed_action"
+        },
+        {
+          "name": "hooks/list",
+          "owner": "typed_action"
+        },
+        {
+          "name": "mcpServer/resource/read",
+          "owner": "typed_action"
+        },
+        {
+          "name": "mcpServer/tool/call",
+          "owner": "typed_action"
+        },
+        {
+          "name": "mcpServerStatus/list",
+          "owner": "typed_action"
+        },
+        {
+          "name": "model/list",
+          "owner": "typed_action"
+        },
+        {
+          "name": "modelProvider/capabilities/read",
+          "owner": "typed_action"
+        },
+        {
+          "name": "plugin/list",
+          "owner": "typed_action"
+        },
+        {
+          "name": "plugin/read",
+          "owner": "typed_action"
+        },
+        {
+          "name": "review/start",
+          "owner": "typed_action"
+        },
+        {
+          "name": "server/diagnostics",
+          "owner": "typed_action"
+        },
+        {
+          "name": "skills/list",
+          "owner": "typed_action"
+        },
+        {
+          "name": "thread/archive",
+          "owner": "typed_action"
+        },
+        {
+          "name": "thread/attachment/add",
+          "owner": "typed_action"
+        },
+        {
+          "name": "thread/attachment/list",
+          "owner": "typed_action"
+        },
+        {
+          "name": "thread/attachment/remove",
+          "owner": "typed_action"
+        },
+        {
+          "name": "thread/backgroundTerminals/list",
+          "owner": "typed_action"
+        },
+        {
+          "name": "thread/backgroundTerminals/terminate",
+          "owner": "typed_action"
+        },
+        {
+          "name": "thread/compact/start",
+          "owner": "typed_action"
+        },
+        {
+          "name": "thread/delete",
+          "owner": "typed_action"
+        },
+        {
+          "name": "thread/fork",
+          "owner": "typed_action"
+        },
+        {
+          "name": "thread/goal/clear",
+          "owner": "typed_action"
+        },
+        {
+          "name": "thread/goal/get",
+          "owner": "typed_action"
+        },
+        {
+          "name": "thread/goal/set",
+          "owner": "typed_action"
+        },
+        {
+          "name": "thread/inject_items",
+          "owner": "typed_action"
+        },
+        {
+          "name": "thread/items/list",
+          "owner": "typed_action"
+        },
+        {
+          "name": "thread/list",
+          "owner": "typed_action"
+        },
+        {
+          "name": "thread/loaded/list",
+          "owner": "typed_action"
+        },
+        {
+          "name": "thread/metadata/update",
+          "owner": "typed_action"
+        },
+        {
+          "name": "thread/name/set",
+          "owner": "typed_action"
+        },
+        {
+          "name": "thread/queue/add",
+          "owner": "typed_action"
+        },
+        {
+          "name": "thread/queue/delete",
+          "owner": "typed_action"
+        },
+        {
+          "name": "thread/queue/list",
+          "owner": "typed_action"
+        },
+        {
+          "name": "thread/queue/reorder",
+          "owner": "typed_action"
+        },
+        {
+          "name": "thread/queue/start",
+          "owner": "typed_action"
+        },
+        {
+          "name": "thread/queue/update",
+          "owner": "typed_action"
+        },
+        {
+          "name": "thread/read",
+          "owner": "typed_action"
+        },
+        {
+          "name": "thread/resume",
+          "owner": "typed_action"
+        },
+        {
+          "name": "thread/revert",
+          "owner": "typed_action"
+        },
+        {
+          "name": "thread/search",
+          "owner": "typed_action"
+        },
+        {
+          "name": "thread/searchOccurrences",
+          "owner": "typed_action"
+        },
+        {
+          "name": "thread/section/move",
+          "owner": "typed_action"
+        },
+        {
+          "name": "thread/settings/update",
+          "owner": "typed_action"
+        },
+        {
+          "name": "thread/start",
+          "owner": "typed_action"
+        },
+        {
+          "name": "thread/timeline/list",
+          "owner": "typed_action"
+        },
+        {
+          "name": "thread/turns/list",
+          "owner": "typed_action"
+        },
+        {
+          "name": "thread/unarchive",
+          "owner": "typed_action"
+        },
+        {
+          "name": "threadSection/create",
+          "owner": "typed_action"
+        },
+        {
+          "name": "threadSection/delete",
+          "owner": "typed_action"
+        },
+        {
+          "name": "threadSection/list",
+          "owner": "typed_action"
+        },
+        {
+          "name": "threadSection/update",
+          "owner": "typed_action"
+        },
+        {
+          "name": "turn/interrupt",
+          "owner": "typed_action"
+        },
+        {
+          "name": "turn/settings/update",
+          "owner": "typed_action"
+        },
+        {
+          "name": "turn/start",
+          "owner": "typed_action"
+        },
+        {
+          "name": "turn/steer",
+          "owner": "typed_action"
+        }
+      ],
+      "sha256": "7abc3b3c5396e44c9da61520fccce8de04d8efb138750173de628bb317780eae"
+    },
+    "withheld_methods": []
+  },
+  "receipt_sha256": "ce24db707c451fb98a9c367b382220a02c004c7c22f4deab48e7b79cd521c838",
+  "schema_version": 1,
+  "source": {
+    "commit_url": "https://github.com/joshyorko/codex-action-server/commit/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "merged": true,
+    "repository": "joshyorko/codex-action-server",
+    "revision": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+  }
+}

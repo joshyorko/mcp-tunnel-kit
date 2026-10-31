@@ -1,0 +1,1 @@
+{"schema_version": 1, "methods": [{"method": "app/read", "classification": "experimental", "request_schema": "AppsReadParams", "response_schema": "AppsReadResponse", "smoke_strategy": "typed_read_fixture", "owning_typed_actions": ["read_app"]}]}

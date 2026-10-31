@@ -1,0 +1,3209 @@
+{
+  "methods": [
+    {
+      "access": "read_only",
+      "action_capabilities": [
+        {
+          "action": "read_account_rate_limits",
+          "destructive_hint": false,
+          "group": "inspection",
+          "idempotent_hint": true,
+          "is_consequential": false,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-observe"
+          ],
+          "profiles": [
+            "observe",
+            "operator"
+          ],
+          "read_only_hint": true
+        }
+      ],
+      "classification": "stable",
+      "method": "account/rateLimits/read",
+      "owning_typed_actions": [
+        "read_account_rate_limits"
+      ],
+      "regression_tests": [
+        "tests/test_mcp_annotations.py",
+        "tests/test_native_operator_surfaces.py",
+        "tests/test_package_composition.py",
+        "tests/test_protocol_contracts.py"
+      ],
+      "request_schema": "Nullable_GetAccountRateLimitsParams",
+      "required_capabilities": [],
+      "response_schema": "GetAccountRateLimitsResponse",
+      "smoke_strategy": "disposable_protocol_smoke"
+    },
+    {
+      "access": "read_only",
+      "action_capabilities": [
+        {
+          "action": "read_account_usage",
+          "destructive_hint": false,
+          "group": "inspection",
+          "idempotent_hint": true,
+          "is_consequential": false,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-observe"
+          ],
+          "profiles": [
+            "observe",
+            "operator"
+          ],
+          "read_only_hint": true
+        }
+      ],
+      "classification": "stable",
+      "method": "account/usage/read",
+      "owning_typed_actions": [
+        "read_account_usage"
+      ],
+      "regression_tests": [
+        "tests/test_capability_metadata.py",
+        "tests/test_mcp_annotations.py",
+        "tests/test_native_capabilities.py",
+        "tests/test_native_operator_surfaces.py",
+        "tests/test_package_composition.py",
+        "tests/test_protocol_contracts.py"
+      ],
+      "request_schema": "Nullable_GetAccountTokenUsageParams",
+      "required_capabilities": [],
+      "response_schema": "GetAccountTokenUsageResponse",
+      "smoke_strategy": "typed_read_fixture"
+    },
+    {
+      "access": "read_only",
+      "action_capabilities": [
+        {
+          "action": "list_apps",
+          "destructive_hint": false,
+          "group": "integrations",
+          "idempotent_hint": true,
+          "is_consequential": false,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-observe"
+          ],
+          "profiles": [
+            "observe",
+            "operator"
+          ],
+          "read_only_hint": true
+        }
+      ],
+      "classification": "stable",
+      "method": "app/list",
+      "owning_typed_actions": [
+        "list_apps"
+      ],
+      "regression_tests": [
+        "tests/test_mcp_annotations.py",
+        "tests/test_native_operator_surfaces.py",
+        "tests/test_package_composition.py",
+        "tests/test_protocol_contracts.py"
+      ],
+      "request_schema": "AppsListParams",
+      "required_capabilities": [],
+      "response_schema": "AppsListResponse",
+      "smoke_strategy": "disposable_protocol_smoke"
+    },
+    {
+      "access": "read_only",
+      "action_capabilities": [
+        {
+          "action": "read_app",
+          "destructive_hint": false,
+          "group": "integrations",
+          "idempotent_hint": true,
+          "is_consequential": false,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-observe"
+          ],
+          "profiles": [
+            "observe",
+            "operator"
+          ],
+          "read_only_hint": true
+        }
+      ],
+      "classification": "experimental",
+      "method": "app/read",
+      "owning_typed_actions": [
+        "read_app"
+      ],
+      "regression_tests": [
+        "tests/test_codex_qualification.py",
+        "tests/test_exposure_profiles.py",
+        "tests/test_mcp_annotations.py",
+        "tests/test_native_capabilities.py",
+        "tests/test_native_operator_surfaces.py",
+        "tests/test_native_qualification_receipt.py",
+        "tests/test_native_wire_contract_fixtures.py",
+        "tests/test_package_composition.py",
+        "tests/test_protocol_contracts.py"
+      ],
+      "request_schema": "AppsReadParams",
+      "required_capabilities": [
+        "experimentalApi"
+      ],
+      "response_schema": "AppsReadResponse",
+      "smoke_strategy": "typed_read_fixture"
+    },
+    {
+      "access": "read_only",
+      "action_capabilities": [
+        {
+          "action": "list_hooks",
+          "destructive_hint": false,
+          "group": "integrations",
+          "idempotent_hint": true,
+          "is_consequential": false,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-observe"
+          ],
+          "profiles": [
+            "observe",
+            "operator"
+          ],
+          "read_only_hint": true
+        }
+      ],
+      "classification": "stable",
+      "method": "hooks/list",
+      "owning_typed_actions": [
+        "list_hooks"
+      ],
+      "regression_tests": [
+        "tests/test_mcp_annotations.py",
+        "tests/test_native_operator_surfaces.py",
+        "tests/test_package_composition.py",
+        "tests/test_protocol_contracts.py"
+      ],
+      "request_schema": "HooksListParams",
+      "required_capabilities": [],
+      "response_schema": "HooksListResponse",
+      "smoke_strategy": "disposable_protocol_smoke"
+    },
+    {
+      "access": "read_only",
+      "action_capabilities": [
+        {
+          "action": "read_mcp_resource",
+          "destructive_hint": false,
+          "group": "integrations",
+          "idempotent_hint": true,
+          "is_consequential": false,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-observe"
+          ],
+          "profiles": [
+            "observe",
+            "operator"
+          ],
+          "read_only_hint": true
+        }
+      ],
+      "classification": "stable",
+      "method": "mcpServer/resource/read",
+      "owning_typed_actions": [
+        "read_mcp_resource"
+      ],
+      "regression_tests": [
+        "tests/test_mcp_annotations.py",
+        "tests/test_native_operator_surfaces.py",
+        "tests/test_package_composition.py",
+        "tests/test_protocol_contracts.py"
+      ],
+      "request_schema": "McpResourceReadParams",
+      "required_capabilities": [],
+      "response_schema": "McpResourceReadResponse",
+      "smoke_strategy": "typed_read_fixture"
+    },
+    {
+      "access": "mutating_or_external",
+      "action_capabilities": [
+        {
+          "action": "call_mcp_tool",
+          "destructive_hint": true,
+          "group": "integrations",
+          "idempotent_hint": false,
+          "is_consequential": true,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-control"
+          ],
+          "profiles": [
+            "operator"
+          ],
+          "read_only_hint": false
+        }
+      ],
+      "classification": "stable",
+      "method": "mcpServer/tool/call",
+      "owning_typed_actions": [
+        "call_mcp_tool"
+      ],
+      "regression_tests": [
+        "tests/test_mcp_annotations.py",
+        "tests/test_native_operator_surfaces.py",
+        "tests/test_package_composition.py",
+        "tests/test_protocol_contracts.py"
+      ],
+      "request_schema": "McpServerToolCallParams",
+      "required_capabilities": [],
+      "response_schema": "McpServerToolCallResponse",
+      "smoke_strategy": "disposable_mutation_fixture"
+    },
+    {
+      "access": "read_only",
+      "action_capabilities": [
+        {
+          "action": "list_mcp_server_status",
+          "destructive_hint": false,
+          "group": "integrations",
+          "idempotent_hint": true,
+          "is_consequential": false,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-observe"
+          ],
+          "profiles": [
+            "observe",
+            "operator"
+          ],
+          "read_only_hint": true
+        }
+      ],
+      "classification": "stable",
+      "method": "mcpServerStatus/list",
+      "owning_typed_actions": [
+        "list_mcp_server_status"
+      ],
+      "regression_tests": [
+        "tests/test_action_server_validation.py",
+        "tests/test_control_actions.py",
+        "tests/test_mcp_annotations.py",
+        "tests/test_package_composition.py",
+        "tests/test_protocol_contracts.py",
+        "tests/test_rpc_lifecycle.py"
+      ],
+      "request_schema": "ListMcpServerStatusParams",
+      "required_capabilities": [],
+      "response_schema": "ListMcpServerStatusResponse",
+      "smoke_strategy": "disposable_protocol_smoke"
+    },
+    {
+      "access": "read_only",
+      "action_capabilities": [
+        {
+          "action": "list_models",
+          "destructive_hint": false,
+          "group": "inspection",
+          "idempotent_hint": true,
+          "is_consequential": false,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-observe"
+          ],
+          "profiles": [
+            "observe",
+            "operator"
+          ],
+          "read_only_hint": true
+        }
+      ],
+      "classification": "stable",
+      "method": "model/list",
+      "owning_typed_actions": [
+        "list_models"
+      ],
+      "regression_tests": [
+        "tests/test_action_server_validation.py",
+        "tests/test_control_actions.py",
+        "tests/test_mcp_annotations.py",
+        "tests/test_package_composition.py",
+        "tests/test_protocol_contracts.py",
+        "tests/test_rpc_lifecycle.py"
+      ],
+      "request_schema": "ModelListParams",
+      "required_capabilities": [],
+      "response_schema": "ModelListResponse",
+      "smoke_strategy": "disposable_protocol_smoke"
+    },
+    {
+      "access": "read_only",
+      "action_capabilities": [
+        {
+          "action": "read_model_provider_capabilities",
+          "destructive_hint": false,
+          "group": "inspection",
+          "idempotent_hint": true,
+          "is_consequential": false,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-observe"
+          ],
+          "profiles": [
+            "observe",
+            "operator"
+          ],
+          "read_only_hint": true
+        }
+      ],
+      "classification": "stable",
+      "method": "modelProvider/capabilities/read",
+      "owning_typed_actions": [
+        "read_model_provider_capabilities"
+      ],
+      "regression_tests": [
+        "tests/test_action_server_validation.py",
+        "tests/test_control_actions.py",
+        "tests/test_mcp_annotations.py",
+        "tests/test_package_composition.py",
+        "tests/test_protocol_contracts.py",
+        "tests/test_rpc_lifecycle.py"
+      ],
+      "request_schema": "ModelProviderCapabilitiesReadParams",
+      "required_capabilities": [],
+      "response_schema": "ModelProviderCapabilitiesReadResponse",
+      "smoke_strategy": "disposable_protocol_smoke"
+    },
+    {
+      "access": "read_only",
+      "action_capabilities": [
+        {
+          "action": "list_plugins",
+          "destructive_hint": false,
+          "group": "integrations",
+          "idempotent_hint": true,
+          "is_consequential": false,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-observe"
+          ],
+          "profiles": [
+            "observe",
+            "operator"
+          ],
+          "read_only_hint": true
+        }
+      ],
+      "classification": "stable",
+      "method": "plugin/list",
+      "owning_typed_actions": [
+        "list_plugins"
+      ],
+      "regression_tests": [
+        "tests/test_mcp_annotations.py",
+        "tests/test_native_operator_surfaces.py",
+        "tests/test_package_composition.py",
+        "tests/test_protocol_contracts.py"
+      ],
+      "request_schema": "PluginListParams",
+      "required_capabilities": [],
+      "response_schema": "PluginListResponse",
+      "smoke_strategy": "disposable_protocol_smoke"
+    },
+    {
+      "access": "read_only",
+      "action_capabilities": [
+        {
+          "action": "read_plugin",
+          "destructive_hint": false,
+          "group": "integrations",
+          "idempotent_hint": true,
+          "is_consequential": false,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-observe"
+          ],
+          "profiles": [
+            "observe",
+            "operator"
+          ],
+          "read_only_hint": true
+        }
+      ],
+      "classification": "stable",
+      "method": "plugin/read",
+      "owning_typed_actions": [
+        "read_plugin"
+      ],
+      "regression_tests": [
+        "tests/test_mcp_annotations.py",
+        "tests/test_native_operator_surfaces.py",
+        "tests/test_package_composition.py",
+        "tests/test_protocol_contracts.py"
+      ],
+      "request_schema": "PluginReadParams",
+      "required_capabilities": [],
+      "response_schema": "PluginReadResponse",
+      "smoke_strategy": "typed_read_fixture"
+    },
+    {
+      "access": "mutating_or_external",
+      "action_capabilities": [
+        {
+          "action": "start_review",
+          "destructive_hint": true,
+          "group": "execution",
+          "idempotent_hint": false,
+          "is_consequential": true,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-control"
+          ],
+          "profiles": [
+            "operator"
+          ],
+          "read_only_hint": false
+        }
+      ],
+      "classification": "stable",
+      "method": "review/start",
+      "owning_typed_actions": [
+        "start_review"
+      ],
+      "regression_tests": [
+        "tests/test_mcp_annotations.py",
+        "tests/test_native_operator_surfaces.py",
+        "tests/test_package_composition.py",
+        "tests/test_protocol_contracts.py"
+      ],
+      "request_schema": "ReviewStartParams",
+      "required_capabilities": [],
+      "response_schema": "ReviewStartResponse",
+      "smoke_strategy": "disposable_mutation_fixture"
+    },
+    {
+      "access": "read_only",
+      "action_capabilities": [
+        {
+          "action": "read_server_diagnostics",
+          "destructive_hint": false,
+          "group": "inspection",
+          "idempotent_hint": true,
+          "is_consequential": false,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-observe"
+          ],
+          "profiles": [
+            "observe",
+            "operator"
+          ],
+          "read_only_hint": true
+        }
+      ],
+      "classification": "experimental",
+      "method": "server/diagnostics",
+      "owning_typed_actions": [
+        "read_server_diagnostics"
+      ],
+      "regression_tests": [
+        "tests/test_action_server_validation.py",
+        "tests/test_codex_qualification.py",
+        "tests/test_container_image.py",
+        "tests/test_control_actions.py",
+        "tests/test_mcp_annotations.py",
+        "tests/test_native_capabilities.py",
+        "tests/test_native_diagnostics_0162.py",
+        "tests/test_package_composition.py",
+        "tests/test_protocol_contracts.py",
+        "tests/test_provider_acceptance_contract.py",
+        "tests/test_rpc_lifecycle.py"
+      ],
+      "request_schema": "ServerDiagnosticsParams",
+      "required_capabilities": [
+        "experimentalApi"
+      ],
+      "response_schema": "ServerDiagnosticsResponse",
+      "smoke_strategy": "disposable_protocol_smoke"
+    },
+    {
+      "access": "read_only",
+      "action_capabilities": [
+        {
+          "action": "list_skills",
+          "destructive_hint": false,
+          "group": "integrations",
+          "idempotent_hint": true,
+          "is_consequential": false,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-observe"
+          ],
+          "profiles": [
+            "observe",
+            "operator"
+          ],
+          "read_only_hint": true
+        }
+      ],
+      "classification": "stable",
+      "method": "skills/list",
+      "owning_typed_actions": [
+        "list_skills"
+      ],
+      "regression_tests": [
+        "tests/test_mcp_annotations.py",
+        "tests/test_native_operator_surfaces.py",
+        "tests/test_package_composition.py",
+        "tests/test_protocol_contracts.py"
+      ],
+      "request_schema": "SkillsListParams",
+      "required_capabilities": [],
+      "response_schema": "SkillsListResponse",
+      "smoke_strategy": "disposable_protocol_smoke"
+    },
+    {
+      "access": "mutating_or_external",
+      "action_capabilities": [
+        {
+          "action": "archive_thread",
+          "destructive_hint": true,
+          "group": "organization",
+          "idempotent_hint": false,
+          "is_consequential": true,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-control"
+          ],
+          "profiles": [
+            "operator"
+          ],
+          "read_only_hint": false
+        }
+      ],
+      "classification": "stable",
+      "method": "thread/archive",
+      "owning_typed_actions": [
+        "archive_thread"
+      ],
+      "regression_tests": [
+        "tests/test_mcp_annotations.py",
+        "tests/test_package_composition.py",
+        "tests/test_protocol_contracts.py",
+        "tests/test_thread_lifecycle.py"
+      ],
+      "request_schema": "ThreadArchiveParams",
+      "required_capabilities": [],
+      "response_schema": "ThreadArchiveResponse",
+      "smoke_strategy": "disposable_mutation_fixture"
+    },
+    {
+      "access": "mutating_or_external",
+      "action_capabilities": [
+        {
+          "action": "add_thread_attachment",
+          "destructive_hint": true,
+          "group": "organization",
+          "idempotent_hint": false,
+          "is_consequential": true,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-control"
+          ],
+          "profiles": [
+            "operator"
+          ],
+          "read_only_hint": false
+        }
+      ],
+      "classification": "stable",
+      "method": "thread/attachment/add",
+      "owning_typed_actions": [
+        "add_thread_attachment"
+      ],
+      "regression_tests": [
+        "tests/test_mcp_annotations.py",
+        "tests/test_package_composition.py",
+        "tests/test_protocol_contracts.py",
+        "tests/test_thread_attachments.py"
+      ],
+      "request_schema": "ThreadAttachmentAddParams",
+      "required_capabilities": [],
+      "response_schema": "ThreadAttachmentAddResponse",
+      "smoke_strategy": "disposable_mutation_fixture"
+    },
+    {
+      "access": "read_only",
+      "action_capabilities": [
+        {
+          "action": "list_thread_attachments",
+          "destructive_hint": false,
+          "group": "organization",
+          "idempotent_hint": true,
+          "is_consequential": false,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-observe"
+          ],
+          "profiles": [
+            "observe",
+            "operator"
+          ],
+          "read_only_hint": true
+        }
+      ],
+      "classification": "stable",
+      "method": "thread/attachment/list",
+      "owning_typed_actions": [
+        "list_thread_attachments"
+      ],
+      "regression_tests": [
+        "tests/test_mcp_annotations.py",
+        "tests/test_package_composition.py",
+        "tests/test_protocol_contracts.py",
+        "tests/test_thread_attachments.py"
+      ],
+      "request_schema": "ThreadAttachmentListParams",
+      "required_capabilities": [],
+      "response_schema": "ThreadAttachmentListResponse",
+      "smoke_strategy": "typed_read_fixture"
+    },
+    {
+      "access": "mutating_or_external",
+      "action_capabilities": [
+        {
+          "action": "remove_thread_attachment",
+          "destructive_hint": true,
+          "group": "organization",
+          "idempotent_hint": false,
+          "is_consequential": true,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-control"
+          ],
+          "profiles": [
+            "operator"
+          ],
+          "read_only_hint": false
+        }
+      ],
+      "classification": "stable",
+      "method": "thread/attachment/remove",
+      "owning_typed_actions": [
+        "remove_thread_attachment"
+      ],
+      "regression_tests": [
+        "tests/test_mcp_annotations.py",
+        "tests/test_package_composition.py",
+        "tests/test_protocol_contracts.py",
+        "tests/test_thread_attachments.py"
+      ],
+      "request_schema": "ThreadAttachmentRemoveParams",
+      "required_capabilities": [],
+      "response_schema": "ThreadAttachmentRemoveResponse",
+      "smoke_strategy": "disposable_mutation_fixture"
+    },
+    {
+      "access": "read_only",
+      "action_capabilities": [
+        {
+          "action": "list_background_terminals",
+          "destructive_hint": false,
+          "group": "organization",
+          "idempotent_hint": true,
+          "is_consequential": false,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-observe"
+          ],
+          "profiles": [
+            "observe",
+            "operator"
+          ],
+          "read_only_hint": true
+        },
+        {
+          "action": "terminate_background_terminal",
+          "destructive_hint": true,
+          "group": "organization",
+          "idempotent_hint": false,
+          "is_consequential": true,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-control"
+          ],
+          "profiles": [
+            "operator"
+          ],
+          "read_only_hint": false
+        }
+      ],
+      "classification": "experimental",
+      "method": "thread/backgroundTerminals/list",
+      "owning_typed_actions": [
+        "list_background_terminals",
+        "terminate_background_terminal"
+      ],
+      "regression_tests": [
+        "tests/test_capability_metadata.py",
+        "tests/test_mcp_annotations.py",
+        "tests/test_native_operator_surfaces.py",
+        "tests/test_native_wire_contract_fixtures.py",
+        "tests/test_package_composition.py",
+        "tests/test_protocol_contracts.py"
+      ],
+      "request_schema": "ThreadBackgroundTerminalsListParams",
+      "required_capabilities": [
+        "experimentalApi"
+      ],
+      "response_schema": "ThreadBackgroundTerminalsListResponse",
+      "smoke_strategy": "typed_read_fixture"
+    },
+    {
+      "access": "mutating_or_external",
+      "action_capabilities": [
+        {
+          "action": "terminate_background_terminal",
+          "destructive_hint": true,
+          "group": "organization",
+          "idempotent_hint": false,
+          "is_consequential": true,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-control"
+          ],
+          "profiles": [
+            "operator"
+          ],
+          "read_only_hint": false
+        }
+      ],
+      "classification": "experimental",
+      "method": "thread/backgroundTerminals/terminate",
+      "owning_typed_actions": [
+        "terminate_background_terminal"
+      ],
+      "regression_tests": [
+        "tests/test_mcp_annotations.py",
+        "tests/test_native_operator_surfaces.py",
+        "tests/test_native_wire_contract_fixtures.py",
+        "tests/test_package_composition.py",
+        "tests/test_protocol_contracts.py"
+      ],
+      "request_schema": "ThreadBackgroundTerminalsTerminateParams",
+      "required_capabilities": [
+        "experimentalApi"
+      ],
+      "response_schema": "ThreadBackgroundTerminalsTerminateResponse",
+      "smoke_strategy": "disposable_mutation_fixture"
+    },
+    {
+      "access": "mutating_or_external",
+      "action_capabilities": [
+        {
+          "action": "compact_thread",
+          "destructive_hint": true,
+          "group": "organization",
+          "idempotent_hint": false,
+          "is_consequential": true,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-control"
+          ],
+          "profiles": [
+            "operator"
+          ],
+          "read_only_hint": false
+        }
+      ],
+      "classification": "stable",
+      "method": "thread/compact/start",
+      "owning_typed_actions": [
+        "compact_thread"
+      ],
+      "regression_tests": [
+        "tests/test_mcp_annotations.py",
+        "tests/test_package_composition.py",
+        "tests/test_protocol_contracts.py",
+        "tests/test_thread_lifecycle.py"
+      ],
+      "request_schema": "ThreadCompactStartParams",
+      "required_capabilities": [],
+      "response_schema": "ThreadCompactStartResponse",
+      "smoke_strategy": "disposable_mutation_fixture"
+    },
+    {
+      "access": "mutating_or_external",
+      "action_capabilities": [
+        {
+          "action": "delete_thread",
+          "destructive_hint": true,
+          "group": "organization",
+          "idempotent_hint": false,
+          "is_consequential": true,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-control"
+          ],
+          "profiles": [
+            "operator"
+          ],
+          "read_only_hint": false
+        }
+      ],
+      "classification": "stable",
+      "method": "thread/delete",
+      "owning_typed_actions": [
+        "delete_thread"
+      ],
+      "regression_tests": [
+        "tests/test_mcp_annotations.py",
+        "tests/test_package_composition.py",
+        "tests/test_protocol_contracts.py",
+        "tests/test_thread_lifecycle.py",
+        "tests/test_thread_queue.py",
+        "tests/test_thread_sections.py"
+      ],
+      "request_schema": "ThreadDeleteParams",
+      "required_capabilities": [],
+      "response_schema": "ThreadDeleteResponse",
+      "smoke_strategy": "disposable_mutation_fixture"
+    },
+    {
+      "access": "mutating_or_external",
+      "action_capabilities": [
+        {
+          "action": "fork_thread",
+          "destructive_hint": true,
+          "group": "organization",
+          "idempotent_hint": false,
+          "is_consequential": true,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-control"
+          ],
+          "profiles": [
+            "operator"
+          ],
+          "read_only_hint": false
+        }
+      ],
+      "classification": "stable",
+      "method": "thread/fork",
+      "owning_typed_actions": [
+        "fork_thread"
+      ],
+      "regression_tests": [
+        "tests/test_mcp_annotations.py",
+        "tests/test_package_composition.py",
+        "tests/test_protocol_contracts.py",
+        "tests/test_thread_lifecycle.py"
+      ],
+      "request_schema": "ThreadForkParams",
+      "required_capabilities": [],
+      "response_schema": "ThreadForkResponse",
+      "smoke_strategy": "disposable_mutation_fixture"
+    },
+    {
+      "access": "mutating_or_external",
+      "action_capabilities": [
+        {
+          "action": "clear_thread_goal",
+          "destructive_hint": true,
+          "group": "execution",
+          "idempotent_hint": false,
+          "is_consequential": true,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-control"
+          ],
+          "profiles": [
+            "operator"
+          ],
+          "read_only_hint": false
+        }
+      ],
+      "classification": "stable",
+      "method": "thread/goal/clear",
+      "owning_typed_actions": [
+        "clear_thread_goal"
+      ],
+      "regression_tests": [
+        "tests/test_action_server_validation.py",
+        "tests/test_control_actions.py",
+        "tests/test_mcp_annotations.py",
+        "tests/test_package_composition.py",
+        "tests/test_protocol_contracts.py",
+        "tests/test_rpc_lifecycle.py"
+      ],
+      "request_schema": "ThreadGoalClearParams",
+      "required_capabilities": [],
+      "response_schema": "ThreadGoalClearResponse",
+      "smoke_strategy": "disposable_mutation_fixture"
+    },
+    {
+      "access": "read_only",
+      "action_capabilities": [
+        {
+          "action": "get_thread_goal",
+          "destructive_hint": false,
+          "group": "execution",
+          "idempotent_hint": true,
+          "is_consequential": false,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-observe"
+          ],
+          "profiles": [
+            "observe",
+            "operator"
+          ],
+          "read_only_hint": true
+        }
+      ],
+      "classification": "stable",
+      "method": "thread/goal/get",
+      "owning_typed_actions": [
+        "get_thread_goal"
+      ],
+      "regression_tests": [
+        "tests/test_action_server_validation.py",
+        "tests/test_control_actions.py",
+        "tests/test_mcp_annotations.py",
+        "tests/test_package_composition.py",
+        "tests/test_protocol_contracts.py",
+        "tests/test_rpc_lifecycle.py"
+      ],
+      "request_schema": "ThreadGoalGetParams",
+      "required_capabilities": [],
+      "response_schema": "ThreadGoalGetResponse",
+      "smoke_strategy": "typed_read_fixture"
+    },
+    {
+      "access": "mutating_or_external",
+      "action_capabilities": [
+        {
+          "action": "set_thread_goal",
+          "destructive_hint": true,
+          "group": "execution",
+          "idempotent_hint": false,
+          "is_consequential": true,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-control"
+          ],
+          "profiles": [
+            "operator"
+          ],
+          "read_only_hint": false
+        }
+      ],
+      "classification": "stable",
+      "method": "thread/goal/set",
+      "owning_typed_actions": [
+        "set_thread_goal"
+      ],
+      "regression_tests": [
+        "tests/test_action_server_validation.py",
+        "tests/test_control_actions.py",
+        "tests/test_mcp_annotations.py",
+        "tests/test_package_composition.py",
+        "tests/test_protocol_contracts.py",
+        "tests/test_rpc_lifecycle.py"
+      ],
+      "request_schema": "ThreadGoalSetParams",
+      "required_capabilities": [],
+      "response_schema": "ThreadGoalSetResponse",
+      "smoke_strategy": "disposable_mutation_fixture"
+    },
+    {
+      "access": "mutating_or_external",
+      "action_capabilities": [
+        {
+          "action": "inject_thread_items",
+          "destructive_hint": true,
+          "group": "organization",
+          "idempotent_hint": false,
+          "is_consequential": true,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-control"
+          ],
+          "profiles": [
+            "operator"
+          ],
+          "read_only_hint": false
+        }
+      ],
+      "classification": "stable",
+      "method": "thread/inject_items",
+      "owning_typed_actions": [
+        "inject_thread_items"
+      ],
+      "regression_tests": [
+        "tests/test_mcp_annotations.py",
+        "tests/test_package_composition.py",
+        "tests/test_protocol_contracts.py",
+        "tests/test_thread_injection.py"
+      ],
+      "request_schema": "ThreadInjectItemsParams",
+      "required_capabilities": [],
+      "response_schema": "ThreadInjectItemsResponse",
+      "smoke_strategy": "disposable_mutation_fixture"
+    },
+    {
+      "access": "read_only",
+      "action_capabilities": [
+        {
+          "action": "get_thread_snapshot",
+          "destructive_hint": false,
+          "group": "threads",
+          "idempotent_hint": true,
+          "is_consequential": false,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-observe"
+          ],
+          "profiles": [
+            "observe",
+            "operator"
+          ],
+          "read_only_hint": true
+        },
+        {
+          "action": "list_thread_items",
+          "destructive_hint": false,
+          "group": "threads",
+          "idempotent_hint": true,
+          "is_consequential": false,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-observe"
+          ],
+          "profiles": [
+            "observe",
+            "operator"
+          ],
+          "read_only_hint": true
+        }
+      ],
+      "classification": "stable",
+      "method": "thread/items/list",
+      "owning_typed_actions": [
+        "get_thread_snapshot",
+        "list_thread_items"
+      ],
+      "regression_tests": [
+        "tests/test_action_server_validation.py",
+        "tests/test_capability_metadata.py",
+        "tests/test_container_image.py",
+        "tests/test_control_actions.py",
+        "tests/test_http_boot.py",
+        "tests/test_mcp_annotations.py",
+        "tests/test_package_composition.py",
+        "tests/test_protocol_contracts.py",
+        "tests/test_rpc_lifecycle.py",
+        "tests/test_thread_read_surfaces.py",
+        "tests/test_thread_snapshot.py"
+      ],
+      "request_schema": "ThreadItemsListParams",
+      "required_capabilities": [],
+      "response_schema": "ThreadItemsListResponse",
+      "smoke_strategy": "typed_read_fixture"
+    },
+    {
+      "access": "read_only",
+      "action_capabilities": [
+        {
+          "action": "discover_threads",
+          "destructive_hint": false,
+          "group": "threads",
+          "idempotent_hint": true,
+          "is_consequential": false,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-observe"
+          ],
+          "profiles": [
+            "observe",
+            "operator"
+          ],
+          "read_only_hint": true
+        }
+      ],
+      "classification": "stable",
+      "method": "thread/list",
+      "owning_typed_actions": [
+        "discover_threads"
+      ],
+      "regression_tests": [
+        "tests/test_action_server_validation.py",
+        "tests/test_actions.py",
+        "tests/test_container_image.py",
+        "tests/test_http_boot.py",
+        "tests/test_mcp_annotations.py",
+        "tests/test_package_composition.py",
+        "tests/test_protocol_contracts.py",
+        "tests/test_provider_acceptance_contract.py",
+        "tests/test_rpc_lifecycle.py",
+        "tests/test_runtime_import.py",
+        "tests/test_thread_discovery.py"
+      ],
+      "request_schema": "ThreadListParams",
+      "required_capabilities": [],
+      "response_schema": "ThreadListResponse",
+      "smoke_strategy": "disposable_protocol_smoke"
+    },
+    {
+      "access": "read_only",
+      "action_capabilities": [
+        {
+          "action": "list_loaded_threads",
+          "destructive_hint": false,
+          "group": "threads",
+          "idempotent_hint": true,
+          "is_consequential": false,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-observe"
+          ],
+          "profiles": [
+            "observe",
+            "operator"
+          ],
+          "read_only_hint": true
+        }
+      ],
+      "classification": "stable",
+      "method": "thread/loaded/list",
+      "owning_typed_actions": [
+        "list_loaded_threads"
+      ],
+      "regression_tests": [
+        "tests/test_action_server_validation.py",
+        "tests/test_control_actions.py",
+        "tests/test_mcp_annotations.py",
+        "tests/test_package_composition.py",
+        "tests/test_protocol_contracts.py",
+        "tests/test_rpc_lifecycle.py"
+      ],
+      "request_schema": "ThreadLoadedListParams",
+      "required_capabilities": [],
+      "response_schema": "ThreadLoadedListResponse",
+      "smoke_strategy": "disposable_protocol_smoke"
+    },
+    {
+      "access": "mutating_or_external",
+      "action_capabilities": [
+        {
+          "action": "update_thread_metadata",
+          "destructive_hint": true,
+          "group": "organization",
+          "idempotent_hint": false,
+          "is_consequential": true,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-control"
+          ],
+          "profiles": [
+            "operator"
+          ],
+          "read_only_hint": false
+        }
+      ],
+      "classification": "stable",
+      "method": "thread/metadata/update",
+      "owning_typed_actions": [
+        "update_thread_metadata"
+      ],
+      "regression_tests": [
+        "tests/test_mcp_annotations.py",
+        "tests/test_package_composition.py",
+        "tests/test_protocol_contracts.py",
+        "tests/test_thread_lifecycle.py"
+      ],
+      "request_schema": "ThreadMetadataUpdateParams",
+      "required_capabilities": [],
+      "response_schema": "ThreadMetadataUpdateResponse",
+      "smoke_strategy": "disposable_mutation_fixture"
+    },
+    {
+      "access": "mutating_or_external",
+      "action_capabilities": [
+        {
+          "action": "set_thread_name",
+          "destructive_hint": true,
+          "group": "organization",
+          "idempotent_hint": false,
+          "is_consequential": true,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-control"
+          ],
+          "profiles": [
+            "operator"
+          ],
+          "read_only_hint": false
+        }
+      ],
+      "classification": "stable",
+      "method": "thread/name/set",
+      "owning_typed_actions": [
+        "set_thread_name"
+      ],
+      "regression_tests": [
+        "tests/test_mcp_annotations.py",
+        "tests/test_package_composition.py",
+        "tests/test_protocol_contracts.py",
+        "tests/test_thread_lifecycle.py"
+      ],
+      "request_schema": "ThreadSetNameParams",
+      "required_capabilities": [],
+      "response_schema": "ThreadSetNameResponse",
+      "smoke_strategy": "disposable_mutation_fixture"
+    },
+    {
+      "access": "mutating_or_external",
+      "action_capabilities": [
+        {
+          "action": "add_thread_queue_item",
+          "destructive_hint": true,
+          "group": "queues",
+          "idempotent_hint": false,
+          "is_consequential": true,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-control"
+          ],
+          "profiles": [
+            "operator"
+          ],
+          "read_only_hint": false
+        }
+      ],
+      "classification": "experimental",
+      "method": "thread/queue/add",
+      "owning_typed_actions": [
+        "add_thread_queue_item"
+      ],
+      "regression_tests": [
+        "tests/test_mcp_annotations.py",
+        "tests/test_native_capabilities.py",
+        "tests/test_native_wire_contract_fixtures.py",
+        "tests/test_package_composition.py",
+        "tests/test_protocol_contracts.py",
+        "tests/test_thread_queue.py"
+      ],
+      "request_schema": "ThreadQueueAddParams",
+      "required_capabilities": [
+        "experimentalApi"
+      ],
+      "response_schema": "ThreadQueueAddResponse",
+      "smoke_strategy": "disposable_mutation_fixture"
+    },
+    {
+      "access": "mutating_or_external",
+      "action_capabilities": [
+        {
+          "action": "delete_thread_queue_item",
+          "destructive_hint": true,
+          "group": "queues",
+          "idempotent_hint": false,
+          "is_consequential": true,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-control"
+          ],
+          "profiles": [
+            "operator"
+          ],
+          "read_only_hint": false
+        }
+      ],
+      "classification": "experimental",
+      "method": "thread/queue/delete",
+      "owning_typed_actions": [
+        "delete_thread_queue_item"
+      ],
+      "regression_tests": [
+        "tests/test_mcp_annotations.py",
+        "tests/test_native_capabilities.py",
+        "tests/test_native_wire_contract_fixtures.py",
+        "tests/test_package_composition.py",
+        "tests/test_protocol_contracts.py",
+        "tests/test_thread_queue.py"
+      ],
+      "request_schema": "ThreadQueueDeleteParams",
+      "required_capabilities": [
+        "experimentalApi"
+      ],
+      "response_schema": "ThreadQueueDeleteResponse",
+      "smoke_strategy": "disposable_mutation_fixture"
+    },
+    {
+      "access": "read_only",
+      "action_capabilities": [
+        {
+          "action": "list_thread_queue",
+          "destructive_hint": false,
+          "group": "queues",
+          "idempotent_hint": true,
+          "is_consequential": false,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-observe"
+          ],
+          "profiles": [
+            "observe",
+            "operator"
+          ],
+          "read_only_hint": true
+        }
+      ],
+      "classification": "experimental",
+      "method": "thread/queue/list",
+      "owning_typed_actions": [
+        "list_thread_queue"
+      ],
+      "regression_tests": [
+        "tests/test_mcp_annotations.py",
+        "tests/test_native_capabilities.py",
+        "tests/test_native_wire_contract_fixtures.py",
+        "tests/test_package_composition.py",
+        "tests/test_protocol_contracts.py",
+        "tests/test_thread_queue.py"
+      ],
+      "request_schema": "ThreadQueueListParams",
+      "required_capabilities": [
+        "experimentalApi"
+      ],
+      "response_schema": "ThreadQueueListResponse",
+      "smoke_strategy": "typed_read_fixture"
+    },
+    {
+      "access": "mutating_or_external",
+      "action_capabilities": [
+        {
+          "action": "reorder_thread_queue",
+          "destructive_hint": true,
+          "group": "queues",
+          "idempotent_hint": false,
+          "is_consequential": true,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-control"
+          ],
+          "profiles": [
+            "operator"
+          ],
+          "read_only_hint": false
+        }
+      ],
+      "classification": "experimental",
+      "method": "thread/queue/reorder",
+      "owning_typed_actions": [
+        "reorder_thread_queue"
+      ],
+      "regression_tests": [
+        "tests/test_mcp_annotations.py",
+        "tests/test_native_capabilities.py",
+        "tests/test_native_wire_contract_fixtures.py",
+        "tests/test_package_composition.py",
+        "tests/test_protocol_contracts.py",
+        "tests/test_thread_queue.py"
+      ],
+      "request_schema": "ThreadQueueReorderParams",
+      "required_capabilities": [
+        "experimentalApi"
+      ],
+      "response_schema": "ThreadQueueReorderResponse",
+      "smoke_strategy": "disposable_mutation_fixture"
+    },
+    {
+      "access": "mutating_or_external",
+      "action_capabilities": [
+        {
+          "action": "start_thread_queue",
+          "destructive_hint": true,
+          "group": "queues",
+          "idempotent_hint": false,
+          "is_consequential": true,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-control"
+          ],
+          "profiles": [
+            "operator"
+          ],
+          "read_only_hint": false
+        }
+      ],
+      "classification": "experimental",
+      "method": "thread/queue/start",
+      "owning_typed_actions": [
+        "start_thread_queue"
+      ],
+      "regression_tests": [
+        "tests/test_exposure_profiles.py",
+        "tests/test_mcp_annotations.py",
+        "tests/test_native_capabilities.py",
+        "tests/test_native_wire_contract_fixtures.py",
+        "tests/test_package_composition.py",
+        "tests/test_protocol_contracts.py",
+        "tests/test_thread_queue.py"
+      ],
+      "request_schema": "ThreadQueueStartParams",
+      "required_capabilities": [
+        "experimentalApi"
+      ],
+      "response_schema": "ThreadQueueStartResponse",
+      "smoke_strategy": "disposable_mutation_fixture"
+    },
+    {
+      "access": "mutating_or_external",
+      "action_capabilities": [
+        {
+          "action": "update_thread_queue_item",
+          "destructive_hint": true,
+          "group": "queues",
+          "idempotent_hint": false,
+          "is_consequential": true,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-control"
+          ],
+          "profiles": [
+            "operator"
+          ],
+          "read_only_hint": false
+        }
+      ],
+      "classification": "experimental",
+      "method": "thread/queue/update",
+      "owning_typed_actions": [
+        "update_thread_queue_item"
+      ],
+      "regression_tests": [
+        "tests/test_mcp_annotations.py",
+        "tests/test_native_capabilities.py",
+        "tests/test_native_wire_contract_fixtures.py",
+        "tests/test_package_composition.py",
+        "tests/test_protocol_contracts.py",
+        "tests/test_thread_queue.py"
+      ],
+      "request_schema": "ThreadQueueUpdateParams",
+      "required_capabilities": [
+        "experimentalApi"
+      ],
+      "response_schema": "ThreadQueueUpdateResponse",
+      "smoke_strategy": "disposable_mutation_fixture"
+    },
+    {
+      "access": "read_only",
+      "action_capabilities": [
+        {
+          "action": "add_thread_attachment",
+          "destructive_hint": true,
+          "group": "organization",
+          "idempotent_hint": false,
+          "is_consequential": true,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-control"
+          ],
+          "profiles": [
+            "operator"
+          ],
+          "read_only_hint": false
+        },
+        {
+          "action": "add_thread_queue_item",
+          "destructive_hint": true,
+          "group": "queues",
+          "idempotent_hint": false,
+          "is_consequential": true,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-control"
+          ],
+          "profiles": [
+            "operator"
+          ],
+          "read_only_hint": false
+        },
+        {
+          "action": "archive_thread",
+          "destructive_hint": true,
+          "group": "organization",
+          "idempotent_hint": false,
+          "is_consequential": true,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-control"
+          ],
+          "profiles": [
+            "operator"
+          ],
+          "read_only_hint": false
+        },
+        {
+          "action": "call_mcp_tool",
+          "destructive_hint": true,
+          "group": "integrations",
+          "idempotent_hint": false,
+          "is_consequential": true,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-control"
+          ],
+          "profiles": [
+            "operator"
+          ],
+          "read_only_hint": false
+        },
+        {
+          "action": "clear_thread_goal",
+          "destructive_hint": true,
+          "group": "execution",
+          "idempotent_hint": false,
+          "is_consequential": true,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-control"
+          ],
+          "profiles": [
+            "operator"
+          ],
+          "read_only_hint": false
+        },
+        {
+          "action": "compact_thread",
+          "destructive_hint": true,
+          "group": "organization",
+          "idempotent_hint": false,
+          "is_consequential": true,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-control"
+          ],
+          "profiles": [
+            "operator"
+          ],
+          "read_only_hint": false
+        },
+        {
+          "action": "create_thread_and_start_turn",
+          "destructive_hint": true,
+          "group": "execution",
+          "idempotent_hint": false,
+          "is_consequential": true,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-control"
+          ],
+          "profiles": [
+            "operator"
+          ],
+          "read_only_hint": false
+        },
+        {
+          "action": "delete_thread",
+          "destructive_hint": true,
+          "group": "organization",
+          "idempotent_hint": false,
+          "is_consequential": true,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-control"
+          ],
+          "profiles": [
+            "operator"
+          ],
+          "read_only_hint": false
+        },
+        {
+          "action": "delete_thread_queue_item",
+          "destructive_hint": true,
+          "group": "queues",
+          "idempotent_hint": false,
+          "is_consequential": true,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-control"
+          ],
+          "profiles": [
+            "operator"
+          ],
+          "read_only_hint": false
+        },
+        {
+          "action": "fork_thread",
+          "destructive_hint": true,
+          "group": "organization",
+          "idempotent_hint": false,
+          "is_consequential": true,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-control"
+          ],
+          "profiles": [
+            "operator"
+          ],
+          "read_only_hint": false
+        },
+        {
+          "action": "get_thread_goal",
+          "destructive_hint": false,
+          "group": "execution",
+          "idempotent_hint": true,
+          "is_consequential": false,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-observe"
+          ],
+          "profiles": [
+            "observe",
+            "operator"
+          ],
+          "read_only_hint": true
+        },
+        {
+          "action": "get_thread_snapshot",
+          "destructive_hint": false,
+          "group": "threads",
+          "idempotent_hint": true,
+          "is_consequential": false,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-observe"
+          ],
+          "profiles": [
+            "observe",
+            "operator"
+          ],
+          "read_only_hint": true
+        },
+        {
+          "action": "inject_thread_items",
+          "destructive_hint": true,
+          "group": "organization",
+          "idempotent_hint": false,
+          "is_consequential": true,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-control"
+          ],
+          "profiles": [
+            "operator"
+          ],
+          "read_only_hint": false
+        },
+        {
+          "action": "interrupt_turn",
+          "destructive_hint": true,
+          "group": "execution",
+          "idempotent_hint": false,
+          "is_consequential": true,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-control"
+          ],
+          "profiles": [
+            "operator"
+          ],
+          "read_only_hint": false
+        },
+        {
+          "action": "list_apps",
+          "destructive_hint": false,
+          "group": "integrations",
+          "idempotent_hint": true,
+          "is_consequential": false,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-observe"
+          ],
+          "profiles": [
+            "observe",
+            "operator"
+          ],
+          "read_only_hint": true
+        },
+        {
+          "action": "list_background_terminals",
+          "destructive_hint": false,
+          "group": "organization",
+          "idempotent_hint": true,
+          "is_consequential": false,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-observe"
+          ],
+          "profiles": [
+            "observe",
+            "operator"
+          ],
+          "read_only_hint": true
+        },
+        {
+          "action": "list_thread_attachments",
+          "destructive_hint": false,
+          "group": "organization",
+          "idempotent_hint": true,
+          "is_consequential": false,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-observe"
+          ],
+          "profiles": [
+            "observe",
+            "operator"
+          ],
+          "read_only_hint": true
+        },
+        {
+          "action": "list_thread_items",
+          "destructive_hint": false,
+          "group": "threads",
+          "idempotent_hint": true,
+          "is_consequential": false,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-observe"
+          ],
+          "profiles": [
+            "observe",
+            "operator"
+          ],
+          "read_only_hint": true
+        },
+        {
+          "action": "list_thread_queue",
+          "destructive_hint": false,
+          "group": "queues",
+          "idempotent_hint": true,
+          "is_consequential": false,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-observe"
+          ],
+          "profiles": [
+            "observe",
+            "operator"
+          ],
+          "read_only_hint": true
+        },
+        {
+          "action": "list_thread_timeline",
+          "destructive_hint": false,
+          "group": "threads",
+          "idempotent_hint": true,
+          "is_consequential": false,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-observe"
+          ],
+          "profiles": [
+            "observe",
+            "operator"
+          ],
+          "read_only_hint": true
+        },
+        {
+          "action": "list_thread_turns",
+          "destructive_hint": false,
+          "group": "threads",
+          "idempotent_hint": true,
+          "is_consequential": false,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-observe"
+          ],
+          "profiles": [
+            "observe",
+            "operator"
+          ],
+          "read_only_hint": true
+        },
+        {
+          "action": "move_thread_to_section",
+          "destructive_hint": true,
+          "group": "organization",
+          "idempotent_hint": false,
+          "is_consequential": true,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-control"
+          ],
+          "profiles": [
+            "operator"
+          ],
+          "read_only_hint": false
+        },
+        {
+          "action": "read_account_usage",
+          "destructive_hint": false,
+          "group": "inspection",
+          "idempotent_hint": true,
+          "is_consequential": false,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-observe"
+          ],
+          "profiles": [
+            "observe",
+            "operator"
+          ],
+          "read_only_hint": true
+        },
+        {
+          "action": "read_app",
+          "destructive_hint": false,
+          "group": "integrations",
+          "idempotent_hint": true,
+          "is_consequential": false,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-observe"
+          ],
+          "profiles": [
+            "observe",
+            "operator"
+          ],
+          "read_only_hint": true
+        },
+        {
+          "action": "read_mcp_resource",
+          "destructive_hint": false,
+          "group": "integrations",
+          "idempotent_hint": true,
+          "is_consequential": false,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-observe"
+          ],
+          "profiles": [
+            "observe",
+            "operator"
+          ],
+          "read_only_hint": true
+        },
+        {
+          "action": "read_thread",
+          "destructive_hint": false,
+          "group": "threads",
+          "idempotent_hint": true,
+          "is_consequential": false,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-observe"
+          ],
+          "profiles": [
+            "observe",
+            "operator"
+          ],
+          "read_only_hint": true
+        },
+        {
+          "action": "remove_thread_attachment",
+          "destructive_hint": true,
+          "group": "organization",
+          "idempotent_hint": false,
+          "is_consequential": true,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-control"
+          ],
+          "profiles": [
+            "operator"
+          ],
+          "read_only_hint": false
+        },
+        {
+          "action": "reorder_thread_queue",
+          "destructive_hint": true,
+          "group": "queues",
+          "idempotent_hint": false,
+          "is_consequential": true,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-control"
+          ],
+          "profiles": [
+            "operator"
+          ],
+          "read_only_hint": false
+        },
+        {
+          "action": "resume_thread",
+          "destructive_hint": true,
+          "group": "execution",
+          "idempotent_hint": false,
+          "is_consequential": true,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-control"
+          ],
+          "profiles": [
+            "operator"
+          ],
+          "read_only_hint": false
+        },
+        {
+          "action": "revert_thread",
+          "destructive_hint": true,
+          "group": "organization",
+          "idempotent_hint": false,
+          "is_consequential": true,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-control"
+          ],
+          "profiles": [
+            "operator"
+          ],
+          "read_only_hint": false
+        },
+        {
+          "action": "search_thread_occurrences",
+          "destructive_hint": false,
+          "group": "threads",
+          "idempotent_hint": true,
+          "is_consequential": false,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-observe"
+          ],
+          "profiles": [
+            "observe",
+            "operator"
+          ],
+          "read_only_hint": true
+        },
+        {
+          "action": "set_thread_goal",
+          "destructive_hint": true,
+          "group": "execution",
+          "idempotent_hint": false,
+          "is_consequential": true,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-control"
+          ],
+          "profiles": [
+            "operator"
+          ],
+          "read_only_hint": false
+        },
+        {
+          "action": "set_thread_name",
+          "destructive_hint": true,
+          "group": "organization",
+          "idempotent_hint": false,
+          "is_consequential": true,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-control"
+          ],
+          "profiles": [
+            "operator"
+          ],
+          "read_only_hint": false
+        },
+        {
+          "action": "start_review",
+          "destructive_hint": true,
+          "group": "execution",
+          "idempotent_hint": false,
+          "is_consequential": true,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-control"
+          ],
+          "profiles": [
+            "operator"
+          ],
+          "read_only_hint": false
+        },
+        {
+          "action": "start_thread",
+          "destructive_hint": true,
+          "group": "execution",
+          "idempotent_hint": false,
+          "is_consequential": true,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-control"
+          ],
+          "profiles": [
+            "operator"
+          ],
+          "read_only_hint": false
+        },
+        {
+          "action": "start_thread_queue",
+          "destructive_hint": true,
+          "group": "queues",
+          "idempotent_hint": false,
+          "is_consequential": true,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-control"
+          ],
+          "profiles": [
+            "operator"
+          ],
+          "read_only_hint": false
+        },
+        {
+          "action": "start_turn",
+          "destructive_hint": true,
+          "group": "execution",
+          "idempotent_hint": false,
+          "is_consequential": true,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-control"
+          ],
+          "profiles": [
+            "operator"
+          ],
+          "read_only_hint": false
+        },
+        {
+          "action": "steer_turn",
+          "destructive_hint": true,
+          "group": "execution",
+          "idempotent_hint": false,
+          "is_consequential": true,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-control"
+          ],
+          "profiles": [
+            "operator"
+          ],
+          "read_only_hint": false
+        },
+        {
+          "action": "terminate_background_terminal",
+          "destructive_hint": true,
+          "group": "organization",
+          "idempotent_hint": false,
+          "is_consequential": true,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-control"
+          ],
+          "profiles": [
+            "operator"
+          ],
+          "read_only_hint": false
+        },
+        {
+          "action": "unarchive_thread",
+          "destructive_hint": true,
+          "group": "organization",
+          "idempotent_hint": false,
+          "is_consequential": true,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-control"
+          ],
+          "profiles": [
+            "operator"
+          ],
+          "read_only_hint": false
+        },
+        {
+          "action": "update_thread_metadata",
+          "destructive_hint": true,
+          "group": "organization",
+          "idempotent_hint": false,
+          "is_consequential": true,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-control"
+          ],
+          "profiles": [
+            "operator"
+          ],
+          "read_only_hint": false
+        },
+        {
+          "action": "update_thread_queue_item",
+          "destructive_hint": true,
+          "group": "queues",
+          "idempotent_hint": false,
+          "is_consequential": true,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-control"
+          ],
+          "profiles": [
+            "operator"
+          ],
+          "read_only_hint": false
+        },
+        {
+          "action": "update_thread_settings",
+          "destructive_hint": true,
+          "group": "execution",
+          "idempotent_hint": false,
+          "is_consequential": true,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-control"
+          ],
+          "profiles": [
+            "operator"
+          ],
+          "read_only_hint": false
+        },
+        {
+          "action": "update_turn_settings",
+          "destructive_hint": true,
+          "group": "execution",
+          "idempotent_hint": false,
+          "is_consequential": true,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-control"
+          ],
+          "profiles": [
+            "operator"
+          ],
+          "read_only_hint": false
+        }
+      ],
+      "classification": "stable",
+      "method": "thread/read",
+      "owning_typed_actions": [
+        "add_thread_attachment",
+        "add_thread_queue_item",
+        "archive_thread",
+        "call_mcp_tool",
+        "clear_thread_goal",
+        "compact_thread",
+        "create_thread_and_start_turn",
+        "delete_thread",
+        "delete_thread_queue_item",
+        "fork_thread",
+        "get_thread_goal",
+        "get_thread_snapshot",
+        "inject_thread_items",
+        "interrupt_turn",
+        "list_apps",
+        "list_background_terminals",
+        "list_thread_attachments",
+        "list_thread_items",
+        "list_thread_queue",
+        "list_thread_timeline",
+        "list_thread_turns",
+        "move_thread_to_section",
+        "read_account_usage",
+        "read_app",
+        "read_mcp_resource",
+        "read_thread",
+        "remove_thread_attachment",
+        "reorder_thread_queue",
+        "resume_thread",
+        "revert_thread",
+        "search_thread_occurrences",
+        "set_thread_goal",
+        "set_thread_name",
+        "start_review",
+        "start_thread",
+        "start_thread_queue",
+        "start_turn",
+        "steer_turn",
+        "terminate_background_terminal",
+        "unarchive_thread",
+        "update_thread_metadata",
+        "update_thread_queue_item",
+        "update_thread_settings",
+        "update_turn_settings"
+      ],
+      "regression_tests": [
+        "tests/test_action_server_validation.py",
+        "tests/test_actions.py",
+        "tests/test_capability_metadata.py",
+        "tests/test_container_image.py",
+        "tests/test_control_actions.py",
+        "tests/test_dispatch_actions.py",
+        "tests/test_dispatch_policy.py",
+        "tests/test_exposure_profiles.py",
+        "tests/test_http_boot.py",
+        "tests/test_mcp_annotations.py",
+        "tests/test_model_selection.py",
+        "tests/test_native_capabilities.py",
+        "tests/test_native_operator_surfaces.py",
+        "tests/test_native_qualification_receipt.py",
+        "tests/test_package_composition.py",
+        "tests/test_protocol_contracts.py",
+        "tests/test_rpc_lifecycle.py",
+        "tests/test_shared_extraction.py",
+        "tests/test_subscription.py",
+        "tests/test_thread_attachments.py",
+        "tests/test_thread_discovery.py",
+        "tests/test_thread_injection.py",
+        "tests/test_thread_lifecycle.py",
+        "tests/test_thread_queue.py",
+        "tests/test_thread_read_surfaces.py",
+        "tests/test_thread_sections.py",
+        "tests/test_thread_snapshot.py"
+      ],
+      "request_schema": "ThreadReadParams",
+      "required_capabilities": [],
+      "response_schema": "ThreadReadResponse",
+      "smoke_strategy": "typed_read_fixture"
+    },
+    {
+      "access": "mutating_or_external",
+      "action_capabilities": [
+        {
+          "action": "create_thread_and_start_turn",
+          "destructive_hint": true,
+          "group": "execution",
+          "idempotent_hint": false,
+          "is_consequential": true,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-control"
+          ],
+          "profiles": [
+            "operator"
+          ],
+          "read_only_hint": false
+        },
+        {
+          "action": "resume_thread",
+          "destructive_hint": true,
+          "group": "execution",
+          "idempotent_hint": false,
+          "is_consequential": true,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-control"
+          ],
+          "profiles": [
+            "operator"
+          ],
+          "read_only_hint": false
+        },
+        {
+          "action": "start_turn",
+          "destructive_hint": true,
+          "group": "execution",
+          "idempotent_hint": false,
+          "is_consequential": true,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-control"
+          ],
+          "profiles": [
+            "operator"
+          ],
+          "read_only_hint": false
+        }
+      ],
+      "classification": "stable",
+      "method": "thread/resume",
+      "owning_typed_actions": [
+        "create_thread_and_start_turn",
+        "resume_thread",
+        "start_turn"
+      ],
+      "regression_tests": [
+        "tests/test_action_server_validation.py",
+        "tests/test_actions.py",
+        "tests/test_capability_metadata.py",
+        "tests/test_container_image.py",
+        "tests/test_control_actions.py",
+        "tests/test_dispatch_actions.py",
+        "tests/test_dispatch_policy.py",
+        "tests/test_http_boot.py",
+        "tests/test_mcp_annotations.py",
+        "tests/test_model_selection.py",
+        "tests/test_package_composition.py",
+        "tests/test_protocol_contracts.py",
+        "tests/test_rpc_lifecycle.py",
+        "tests/test_subscription.py"
+      ],
+      "request_schema": "ThreadResumeParams",
+      "required_capabilities": [],
+      "response_schema": "ThreadResumeResponse",
+      "smoke_strategy": "disposable_mutation_fixture"
+    },
+    {
+      "access": "mutating_or_external",
+      "action_capabilities": [
+        {
+          "action": "revert_thread",
+          "destructive_hint": true,
+          "group": "organization",
+          "idempotent_hint": false,
+          "is_consequential": true,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-control"
+          ],
+          "profiles": [
+            "operator"
+          ],
+          "read_only_hint": false
+        }
+      ],
+      "classification": "stable",
+      "method": "thread/revert",
+      "owning_typed_actions": [
+        "revert_thread"
+      ],
+      "regression_tests": [
+        "tests/test_mcp_annotations.py",
+        "tests/test_package_composition.py",
+        "tests/test_protocol_contracts.py",
+        "tests/test_thread_lifecycle.py"
+      ],
+      "request_schema": "ThreadRevertParams",
+      "required_capabilities": [],
+      "response_schema": "ThreadRevertResponse",
+      "smoke_strategy": "disposable_mutation_fixture"
+    },
+    {
+      "access": "read_only",
+      "action_capabilities": [
+        {
+          "action": "search_threads",
+          "destructive_hint": false,
+          "group": "threads",
+          "idempotent_hint": true,
+          "is_consequential": false,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-observe"
+          ],
+          "profiles": [
+            "observe",
+            "operator"
+          ],
+          "read_only_hint": true
+        }
+      ],
+      "classification": "experimental",
+      "method": "thread/search",
+      "owning_typed_actions": [
+        "search_threads"
+      ],
+      "regression_tests": [
+        "tests/test_mcp_annotations.py",
+        "tests/test_native_capabilities.py",
+        "tests/test_native_wire_contract_fixtures.py",
+        "tests/test_package_composition.py",
+        "tests/test_protocol_contracts.py",
+        "tests/test_rpc_lifecycle.py",
+        "tests/test_thread_read_surfaces.py"
+      ],
+      "request_schema": "ThreadSearchParams",
+      "required_capabilities": [
+        "experimentalApi"
+      ],
+      "response_schema": "ThreadSearchResponse",
+      "smoke_strategy": "typed_read_fixture"
+    },
+    {
+      "access": "read_only",
+      "action_capabilities": [
+        {
+          "action": "search_thread_occurrences",
+          "destructive_hint": false,
+          "group": "threads",
+          "idempotent_hint": true,
+          "is_consequential": false,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-observe"
+          ],
+          "profiles": [
+            "observe",
+            "operator"
+          ],
+          "read_only_hint": true
+        }
+      ],
+      "classification": "experimental",
+      "method": "thread/searchOccurrences",
+      "owning_typed_actions": [
+        "search_thread_occurrences"
+      ],
+      "regression_tests": [
+        "tests/test_mcp_annotations.py",
+        "tests/test_native_wire_contract_fixtures.py",
+        "tests/test_package_composition.py",
+        "tests/test_protocol_contracts.py",
+        "tests/test_thread_read_surfaces.py"
+      ],
+      "request_schema": "ThreadSearchOccurrencesParams",
+      "required_capabilities": [
+        "experimentalApi"
+      ],
+      "response_schema": "ThreadSearchOccurrencesResponse",
+      "smoke_strategy": "typed_read_fixture"
+    },
+    {
+      "access": "mutating_or_external",
+      "action_capabilities": [
+        {
+          "action": "move_thread_to_section",
+          "destructive_hint": true,
+          "group": "organization",
+          "idempotent_hint": false,
+          "is_consequential": true,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-control"
+          ],
+          "profiles": [
+            "operator"
+          ],
+          "read_only_hint": false
+        }
+      ],
+      "classification": "stable",
+      "method": "thread/section/move",
+      "owning_typed_actions": [
+        "move_thread_to_section"
+      ],
+      "regression_tests": [
+        "tests/test_mcp_annotations.py",
+        "tests/test_native_wire_contract_fixtures.py",
+        "tests/test_package_composition.py",
+        "tests/test_protocol_contracts.py",
+        "tests/test_thread_sections.py"
+      ],
+      "request_schema": "ThreadSectionMoveParams",
+      "required_capabilities": [],
+      "response_schema": "ThreadSectionMoveResponse",
+      "smoke_strategy": "disposable_mutation_fixture"
+    },
+    {
+      "access": "mutating_or_external",
+      "action_capabilities": [
+        {
+          "action": "resume_thread",
+          "destructive_hint": true,
+          "group": "execution",
+          "idempotent_hint": false,
+          "is_consequential": true,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-control"
+          ],
+          "profiles": [
+            "operator"
+          ],
+          "read_only_hint": false
+        },
+        {
+          "action": "start_thread",
+          "destructive_hint": true,
+          "group": "execution",
+          "idempotent_hint": false,
+          "is_consequential": true,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-control"
+          ],
+          "profiles": [
+            "operator"
+          ],
+          "read_only_hint": false
+        },
+        {
+          "action": "update_thread_settings",
+          "destructive_hint": true,
+          "group": "execution",
+          "idempotent_hint": false,
+          "is_consequential": true,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-control"
+          ],
+          "profiles": [
+            "operator"
+          ],
+          "read_only_hint": false
+        }
+      ],
+      "classification": "experimental",
+      "method": "thread/settings/update",
+      "owning_typed_actions": [
+        "resume_thread",
+        "start_thread",
+        "update_thread_settings"
+      ],
+      "regression_tests": [
+        "tests/test_action_server_validation.py",
+        "tests/test_actions.py",
+        "tests/test_control_actions.py",
+        "tests/test_dispatch_policy.py",
+        "tests/test_mcp_annotations.py",
+        "tests/test_native_capabilities.py",
+        "tests/test_native_wire_contract_fixtures.py",
+        "tests/test_package_composition.py",
+        "tests/test_protocol_contracts.py",
+        "tests/test_rpc_lifecycle.py",
+        "tests/test_thread_queue.py"
+      ],
+      "request_schema": "ThreadSettingsUpdateParams",
+      "required_capabilities": [
+        "experimentalApi"
+      ],
+      "response_schema": "ThreadSettingsUpdateResponse",
+      "smoke_strategy": "disposable_mutation_fixture"
+    },
+    {
+      "access": "mutating_or_external",
+      "action_capabilities": [
+        {
+          "action": "create_thread_and_start_turn",
+          "destructive_hint": true,
+          "group": "execution",
+          "idempotent_hint": false,
+          "is_consequential": true,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-control"
+          ],
+          "profiles": [
+            "operator"
+          ],
+          "read_only_hint": false
+        },
+        {
+          "action": "start_thread",
+          "destructive_hint": true,
+          "group": "execution",
+          "idempotent_hint": false,
+          "is_consequential": true,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-control"
+          ],
+          "profiles": [
+            "operator"
+          ],
+          "read_only_hint": false
+        }
+      ],
+      "classification": "stable",
+      "method": "thread/start",
+      "owning_typed_actions": [
+        "create_thread_and_start_turn",
+        "start_thread"
+      ],
+      "regression_tests": [
+        "tests/test_action_server_validation.py",
+        "tests/test_actions.py",
+        "tests/test_capability_metadata.py",
+        "tests/test_container_image.py",
+        "tests/test_control_actions.py",
+        "tests/test_dispatch_actions.py",
+        "tests/test_dispatch_policy.py",
+        "tests/test_http_boot.py",
+        "tests/test_mcp_annotations.py",
+        "tests/test_package_composition.py",
+        "tests/test_protocol_contracts.py",
+        "tests/test_rpc_lifecycle.py",
+        "tests/test_thread_queue.py"
+      ],
+      "request_schema": "ThreadStartParams",
+      "required_capabilities": [],
+      "response_schema": "ThreadStartResponse",
+      "smoke_strategy": "disposable_mutation_fixture"
+    },
+    {
+      "access": "read_only",
+      "action_capabilities": [
+        {
+          "action": "list_thread_timeline",
+          "destructive_hint": false,
+          "group": "threads",
+          "idempotent_hint": true,
+          "is_consequential": false,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-observe"
+          ],
+          "profiles": [
+            "observe",
+            "operator"
+          ],
+          "read_only_hint": true
+        }
+      ],
+      "classification": "experimental",
+      "method": "thread/timeline/list",
+      "owning_typed_actions": [
+        "list_thread_timeline"
+      ],
+      "regression_tests": [
+        "tests/test_mcp_annotations.py",
+        "tests/test_native_capabilities.py",
+        "tests/test_native_wire_contract_fixtures.py",
+        "tests/test_package_composition.py",
+        "tests/test_protocol_contracts.py",
+        "tests/test_thread_read_surfaces.py"
+      ],
+      "request_schema": "ThreadTimelineListParams",
+      "required_capabilities": [
+        "experimentalApi"
+      ],
+      "response_schema": "ThreadTimelineListResponse",
+      "smoke_strategy": "typed_read_fixture"
+    },
+    {
+      "access": "read_only",
+      "action_capabilities": [
+        {
+          "action": "get_thread_snapshot",
+          "destructive_hint": false,
+          "group": "threads",
+          "idempotent_hint": true,
+          "is_consequential": false,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-observe"
+          ],
+          "profiles": [
+            "observe",
+            "operator"
+          ],
+          "read_only_hint": true
+        },
+        {
+          "action": "list_thread_turns",
+          "destructive_hint": false,
+          "group": "threads",
+          "idempotent_hint": true,
+          "is_consequential": false,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-observe"
+          ],
+          "profiles": [
+            "observe",
+            "operator"
+          ],
+          "read_only_hint": true
+        }
+      ],
+      "classification": "stable",
+      "method": "thread/turns/list",
+      "owning_typed_actions": [
+        "get_thread_snapshot",
+        "list_thread_turns"
+      ],
+      "regression_tests": [
+        "tests/test_action_server_validation.py",
+        "tests/test_capability_metadata.py",
+        "tests/test_container_image.py",
+        "tests/test_control_actions.py",
+        "tests/test_http_boot.py",
+        "tests/test_mcp_annotations.py",
+        "tests/test_package_composition.py",
+        "tests/test_protocol_contracts.py",
+        "tests/test_rpc_lifecycle.py",
+        "tests/test_thread_snapshot.py"
+      ],
+      "request_schema": "ThreadTurnsListParams",
+      "required_capabilities": [],
+      "response_schema": "ThreadTurnsListResponse",
+      "smoke_strategy": "typed_read_fixture"
+    },
+    {
+      "access": "mutating_or_external",
+      "action_capabilities": [
+        {
+          "action": "unarchive_thread",
+          "destructive_hint": true,
+          "group": "organization",
+          "idempotent_hint": false,
+          "is_consequential": true,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-control"
+          ],
+          "profiles": [
+            "operator"
+          ],
+          "read_only_hint": false
+        }
+      ],
+      "classification": "stable",
+      "method": "thread/unarchive",
+      "owning_typed_actions": [
+        "unarchive_thread"
+      ],
+      "regression_tests": [
+        "tests/test_mcp_annotations.py",
+        "tests/test_package_composition.py",
+        "tests/test_protocol_contracts.py",
+        "tests/test_thread_lifecycle.py"
+      ],
+      "request_schema": "ThreadUnarchiveParams",
+      "required_capabilities": [],
+      "response_schema": "ThreadUnarchiveResponse",
+      "smoke_strategy": "disposable_mutation_fixture"
+    },
+    {
+      "access": "mutating_or_external",
+      "action_capabilities": [
+        {
+          "action": "create_thread_section",
+          "destructive_hint": true,
+          "group": "organization",
+          "idempotent_hint": false,
+          "is_consequential": true,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-control"
+          ],
+          "profiles": [
+            "operator"
+          ],
+          "read_only_hint": false
+        }
+      ],
+      "classification": "stable",
+      "method": "threadSection/create",
+      "owning_typed_actions": [
+        "create_thread_section"
+      ],
+      "regression_tests": [
+        "tests/test_mcp_annotations.py",
+        "tests/test_package_composition.py",
+        "tests/test_protocol_contracts.py",
+        "tests/test_thread_sections.py"
+      ],
+      "request_schema": "ThreadSectionCreateParams",
+      "required_capabilities": [],
+      "response_schema": "ThreadSectionCreateResponse",
+      "smoke_strategy": "disposable_mutation_fixture"
+    },
+    {
+      "access": "mutating_or_external",
+      "action_capabilities": [
+        {
+          "action": "delete_thread_section",
+          "destructive_hint": true,
+          "group": "organization",
+          "idempotent_hint": false,
+          "is_consequential": true,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-control"
+          ],
+          "profiles": [
+            "operator"
+          ],
+          "read_only_hint": false
+        }
+      ],
+      "classification": "stable",
+      "method": "threadSection/delete",
+      "owning_typed_actions": [
+        "delete_thread_section"
+      ],
+      "regression_tests": [
+        "tests/test_mcp_annotations.py",
+        "tests/test_package_composition.py",
+        "tests/test_protocol_contracts.py",
+        "tests/test_thread_sections.py"
+      ],
+      "request_schema": "ThreadSectionDeleteParams",
+      "required_capabilities": [],
+      "response_schema": "ThreadSectionDeleteResponse",
+      "smoke_strategy": "disposable_mutation_fixture"
+    },
+    {
+      "access": "read_only",
+      "action_capabilities": [
+        {
+          "action": "list_thread_sections",
+          "destructive_hint": false,
+          "group": "threads",
+          "idempotent_hint": true,
+          "is_consequential": false,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-observe"
+          ],
+          "profiles": [
+            "observe",
+            "operator"
+          ],
+          "read_only_hint": true
+        },
+        {
+          "action": "move_thread_to_section",
+          "destructive_hint": true,
+          "group": "organization",
+          "idempotent_hint": false,
+          "is_consequential": true,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-control"
+          ],
+          "profiles": [
+            "operator"
+          ],
+          "read_only_hint": false
+        }
+      ],
+      "classification": "stable",
+      "method": "threadSection/list",
+      "owning_typed_actions": [
+        "list_thread_sections",
+        "move_thread_to_section"
+      ],
+      "regression_tests": [
+        "tests/test_capability_metadata.py",
+        "tests/test_mcp_annotations.py",
+        "tests/test_package_composition.py",
+        "tests/test_protocol_contracts.py",
+        "tests/test_thread_read_surfaces.py",
+        "tests/test_thread_sections.py"
+      ],
+      "request_schema": "ThreadSectionListParams",
+      "required_capabilities": [],
+      "response_schema": "ThreadSectionListResponse",
+      "smoke_strategy": "disposable_protocol_smoke"
+    },
+    {
+      "access": "mutating_or_external",
+      "action_capabilities": [
+        {
+          "action": "update_thread_section",
+          "destructive_hint": true,
+          "group": "organization",
+          "idempotent_hint": false,
+          "is_consequential": true,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-control"
+          ],
+          "profiles": [
+            "operator"
+          ],
+          "read_only_hint": false
+        }
+      ],
+      "classification": "stable",
+      "method": "threadSection/update",
+      "owning_typed_actions": [
+        "update_thread_section"
+      ],
+      "regression_tests": [
+        "tests/test_mcp_annotations.py",
+        "tests/test_package_composition.py",
+        "tests/test_protocol_contracts.py",
+        "tests/test_thread_sections.py"
+      ],
+      "request_schema": "ThreadSectionUpdateParams",
+      "required_capabilities": [],
+      "response_schema": "ThreadSectionUpdateResponse",
+      "smoke_strategy": "disposable_mutation_fixture"
+    },
+    {
+      "access": "mutating_or_external",
+      "action_capabilities": [
+        {
+          "action": "interrupt_turn",
+          "destructive_hint": true,
+          "group": "execution",
+          "idempotent_hint": false,
+          "is_consequential": true,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-control"
+          ],
+          "profiles": [
+            "operator"
+          ],
+          "read_only_hint": false
+        }
+      ],
+      "classification": "stable",
+      "method": "turn/interrupt",
+      "owning_typed_actions": [
+        "interrupt_turn"
+      ],
+      "regression_tests": [
+        "tests/test_action_server_validation.py",
+        "tests/test_actions.py",
+        "tests/test_capability_metadata.py",
+        "tests/test_http_boot.py",
+        "tests/test_mcp_annotations.py",
+        "tests/test_package_composition.py",
+        "tests/test_protocol_contracts.py"
+      ],
+      "request_schema": "TurnInterruptParams",
+      "required_capabilities": [],
+      "response_schema": "TurnInterruptResponse",
+      "smoke_strategy": "disposable_mutation_fixture"
+    },
+    {
+      "access": "mutating_or_external",
+      "action_capabilities": [
+        {
+          "action": "update_turn_settings",
+          "destructive_hint": true,
+          "group": "execution",
+          "idempotent_hint": false,
+          "is_consequential": true,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-control"
+          ],
+          "profiles": [
+            "operator"
+          ],
+          "read_only_hint": false
+        }
+      ],
+      "classification": "experimental",
+      "method": "turn/settings/update",
+      "owning_typed_actions": [
+        "update_turn_settings"
+      ],
+      "regression_tests": [
+        "tests/test_action_server_validation.py",
+        "tests/test_control_actions.py",
+        "tests/test_mcp_annotations.py",
+        "tests/test_native_capabilities.py",
+        "tests/test_native_wire_contract_fixtures.py",
+        "tests/test_package_composition.py",
+        "tests/test_protocol_contracts.py",
+        "tests/test_rpc_lifecycle.py"
+      ],
+      "request_schema": "TurnSettingsUpdateParams",
+      "required_capabilities": [
+        "experimentalApi"
+      ],
+      "response_schema": "TurnSettingsUpdateResponse",
+      "smoke_strategy": "disposable_mutation_fixture"
+    },
+    {
+      "access": "mutating_or_external",
+      "action_capabilities": [
+        {
+          "action": "create_thread_and_start_turn",
+          "destructive_hint": true,
+          "group": "execution",
+          "idempotent_hint": false,
+          "is_consequential": true,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-control"
+          ],
+          "profiles": [
+            "operator"
+          ],
+          "read_only_hint": false
+        },
+        {
+          "action": "start_turn",
+          "destructive_hint": true,
+          "group": "execution",
+          "idempotent_hint": false,
+          "is_consequential": true,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-control"
+          ],
+          "profiles": [
+            "operator"
+          ],
+          "read_only_hint": false
+        }
+      ],
+      "classification": "stable",
+      "method": "turn/start",
+      "owning_typed_actions": [
+        "create_thread_and_start_turn",
+        "start_turn"
+      ],
+      "regression_tests": [
+        "tests/test_action_server_validation.py",
+        "tests/test_actions.py",
+        "tests/test_capability_metadata.py",
+        "tests/test_container_image.py",
+        "tests/test_control_actions.py",
+        "tests/test_dispatch_actions.py",
+        "tests/test_dispatch_policy.py",
+        "tests/test_http_boot.py",
+        "tests/test_mcp_annotations.py",
+        "tests/test_model_selection.py",
+        "tests/test_native_capabilities.py",
+        "tests/test_package_composition.py",
+        "tests/test_protocol_contracts.py",
+        "tests/test_rpc_lifecycle.py",
+        "tests/test_subscription.py"
+      ],
+      "request_schema": "TurnStartParams",
+      "required_capabilities": [],
+      "response_schema": "TurnStartResponse",
+      "smoke_strategy": "disposable_mutation_fixture"
+    },
+    {
+      "access": "mutating_or_external",
+      "action_capabilities": [
+        {
+          "action": "steer_turn",
+          "destructive_hint": true,
+          "group": "execution",
+          "idempotent_hint": false,
+          "is_consequential": true,
+          "open_world_hint": true,
+          "packages": [
+            "codex-action-server",
+            "codex-control"
+          ],
+          "profiles": [
+            "operator"
+          ],
+          "read_only_hint": false
+        }
+      ],
+      "classification": "stable",
+      "method": "turn/steer",
+      "owning_typed_actions": [
+        "steer_turn"
+      ],
+      "regression_tests": [
+        "tests/test_action_server_validation.py",
+        "tests/test_actions.py",
+        "tests/test_http_boot.py",
+        "tests/test_mcp_annotations.py",
+        "tests/test_package_composition.py",
+        "tests/test_protocol_contracts.py"
+      ],
+      "request_schema": "TurnSteerParams",
+      "required_capabilities": [],
+      "response_schema": "TurnSteerResponse",
+      "smoke_strategy": "disposable_mutation_fixture"
+    }
+  ],
+  "schema_version": 1
+}

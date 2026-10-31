@@ -15,6 +15,17 @@ import deploy_control_plane as d
 import vm_deploy_host as h
 
 
+def cas_promotion_fixture():
+    from test_cas_promotion import receipt, proof, locator, run_proof
+    current=json.loads((ROOT/'config/deploy-images.json').read_text())
+    handoff=receipt()
+    promoted,publisher_proof=d.cas_promotion.promote_manifest(
+        current,handoff,verifier=lambda manifest,**_kwargs:proof(manifest),
+        run_verifier=run_proof,candidate_verifier=lambda *_args:None)
+    evidence=d.cas_promotion.build_evidence(current,promoted,handoff,publisher_proof,locator())
+    return current,promoted,evidence
+
+
 def test_wrong_source_or_runner_context_is_refused_before_ssh():
     good={'GITHUB_REPOSITORY':'joshyorko/mcp-tunnel-kit','GITHUB_REF':'refs/heads/main','GITHUB_EVENT_NAME':'workflow_dispatch','RUNNER_NAME':'pi5-01-mcp-control-plane'}
     with patch.object(d.socket,'gethostname',return_value='pi5-01'),patch.object(d.os,'uname',return_value=type('U',(),{'machine':'aarch64'})()):
@@ -24,7 +35,7 @@ def test_wrong_source_or_runner_context_is_refused_before_ssh():
 
 
 def test_execute_requires_private_profile_before_runner_checks_or_transport(tmp_path):
-    args=type('A',(),{'local':False,'operation':'preflight','cas_digest':'','cas_revision':'','approve_full_stack':False})()
+    args=type('A',(),{'local':False,'operation':'preflight','approve_full_stack':False})()
     missing=tmp_path/'missing-instance.json'
     with patch.object(d,'INSTANCE',None),patch.dict(os.environ,{'KAMAL_INSTANCE_PROFILE':str(missing)}), \
          patch.object(d,'trusted_context') as trusted,patch.object(d,'remote') as remote:
@@ -118,10 +129,45 @@ def test_protected_workflow_has_one_time_tap_reconciliation_and_rollback_approva
     assert "args+=(--approve-host-tap-rollback)" in workflow
 
 
+def test_cas_workflow_resolves_merged_pins_and_has_no_manual_digest_or_native_upgrade_input():
+    workflow = (ROOT / ".github/workflows/deploy-control-plane.yml").read_text()
+    assert "native-reconcile" in workflow
+    assert "cas_digest:" not in workflow
+    assert "cas_revision:" not in workflow
+    assert "CAS_DIGEST" not in workflow
+    assert "CAS_REVISION" not in workflow
+    assert "workflow_dispatch" in workflow
+    assert "cas-promotion.json" in (ROOT / "scripts/deploy_control_plane.py").read_text()
+
+
+def test_deployment_candidate_rechecks_receipt_provenance_and_rejects_unrelated_image_change():
+    current,manifest,evidence=cas_promotion_fixture()
+    verified={key:{"digest":manifest["images"]["cas"]["digest"],
+                   "revision":manifest["images"]["cas"]["revision"],
+                   "platform":"linux/amd64"}
+              for key in ("cas","schema_proxy")}
+    with patch.object(d.cas_promotion,"verify_handoff_source") as source, \
+         patch.object(d.cas_promotion,"verify_candidate_is_current_or_newer") as ancestry, \
+         patch.object(d.cas_promotion,"verify_action_runs",return_value={
+             "publication_artifact": evidence["handoff_source"]["artifact"]
+         }) as runs, \
+         patch.object(d.cas_promotion,"verify_publisher",return_value=verified) as publisher:
+        source.return_value={"artifact":evidence["handoff_source"]["artifact"]}
+        assert d._verified_cas_candidate(current,manifest,evidence)==evidence
+        source.assert_called_once()
+    ancestry.assert_called_once()
+    runs.assert_called_once_with(evidence["handoff"])
+    publisher.assert_called_once_with(evidence["handoff"])
+    unrelated=json.loads(json.dumps(manifest))
+    unrelated["images"]["executor"]["digest"]="sha256:"+"1"*64
+    with pytest.raises(ValueError,match="unrelated production image"):
+        d._verified_cas_candidate(current,unrelated,evidence)
+
+
 def test_tap_reconciliation_requires_approval_and_native_tuple_before_vm_operations():
     instance = json.loads((ROOT / "config/instance.example.json").read_text())
     args = SimpleNamespace(
-        operation="devsy-tap-reconcile", local=False, cas_digest="", cas_revision="",
+        operation="devsy-tap-reconcile", local=False,
         approve_full_stack=False, approve_host_tap_reconciliation=False,
         approve_host_tap_rollback=False, native_target="local",
         native_cwd="/home/operator/mcp-tunnel-kit",
@@ -139,7 +185,7 @@ def test_tap_reconciliation_requires_approval_and_native_tuple_before_vm_operati
 def test_tap_reconciliation_dispatch_uses_current_sha_and_exact_native_tuple():
     instance = json.loads((ROOT / "config/instance.example.json").read_text())
     args = SimpleNamespace(
-        operation="devsy-tap-reconcile", local=False, cas_digest="", cas_revision="",
+        operation="devsy-tap-reconcile", local=False,
         approve_full_stack=False, approve_host_tap_reconciliation=True,
         approve_host_tap_rollback=False, native_target="local",
         native_cwd="/home/operator/mcp-tunnel-kit",
@@ -198,7 +244,7 @@ def test_remote_stdin_bootstrap_preserves_following_json():
 
 def test_remote_source_injects_stdlib_generation_validator_without_target_install():
     names=("instance_profile","prepare_recovery_generation","devsy_vm_bootstrap",
-           "scope_binding_rebind","bridge_kubectl_path","compose_control")
+           "scope_binding_rebind","bridge_kubectl_path","compose_control","native_drift")
     previous={name:sys.modules.get(name) for name in names}
     try:
         namespace={"__name__":"remote_source_test"}
@@ -209,6 +255,148 @@ def test_remote_source_injects_stdlib_generation_validator_without_target_instal
         for name,module in previous.items():
             if module is None:sys.modules.pop(name,None)
             else:sys.modules[name]=module
+
+
+def test_native_reconcile_is_read_only_and_reports_separate_versions_and_qualification():
+    from test_cas_promotion import receipt as handoff_fixture, proof as proof_fixture, locator, run_proof
+    deployed_manifest = json.loads((ROOT / "config/deploy-images.json").read_text())
+    handoff = handoff_fixture()
+    promoted, proof = d.cas_promotion.promote_manifest(
+        deployed_manifest, handoff,
+        verifier=lambda manifest, **_kwargs: proof_fixture(manifest),
+        run_verifier=run_proof, candidate_verifier=lambda *_args: None)
+    promotion_receipt = d.cas_promotion.build_evidence(deployed_manifest, promoted, handoff, proof, locator())
+    current = {"manifest":promoted,"cas_promotion":promotion_receipt}
+    native = {"mutated":False,"targets":{
+        "dakota-cpu":{"installed_cli":{"version":"0.172.0"},
+                       "running_daemon":{"version":"0.171.0"},
+                       "version_drift":"cli_daemon_drift"},
+        "dakota-nvidia":{"installed_cli":{"version":"0.171.0"},
+                          "running_daemon":{"version":"0.171.0"},
+                          "version_drift":"in_sync"}}}
+    calls=[]
+    def remote(action,data=None):
+        calls.append((action,data))
+        if action=="current":return current
+        if action=="native-drift":return native
+        raise AssertionError("unexpected VM action: "+action)
+    args=SimpleNamespace(local=False,operation="native-reconcile")
+    with patch.object(d,"INSTANCE",json.loads((ROOT/"config/instance.example.json").read_text())), \
+         patch.object(d,"trusted_context"),patch.object(d,"lock",return_value=nullcontext()), \
+         patch.object(d,"remote",side_effect=remote),patch.dict(os.environ,{"GITHUB_SHA":"b"*40}):
+        result=d.execute(args)
+    assert result["mutated"] is False
+    assert result["native_drift"]["targets"]["dakota-cpu"]["installed_cli"]["version"]=="0.172.0"
+    assert result["native_drift"]["targets"]["dakota-cpu"]["running_daemon"]["version"]=="0.171.0"
+    assert result["cas_method_qualification"]["status"]=="QUALIFIED"
+    assert result["cas_method_qualification"]["qualified_methods"]==handoff["qualification"]["method_verdicts"]
+    assert calls==[("current",None),("native-drift",{})]
+
+
+def test_cas_rollback_reboots_only_pair_and_checks_unrelated_container_identity(tmp_path):
+    manifest=json.loads((ROOT/"config/deploy-images.json").read_text())
+    previous={"authority":"kamal","identity":"executor-identity","source_sha":"a"*40,
+              "manifest":manifest}
+    inventory={
+        "executor":{"container_id":"executor-id","started_at":"executor-start","image":"executor-image"},
+        "tunnel":{"container_id":"tunnel-id","started_at":"tunnel-start","image":"tunnel-image"},
+        "cas":{"container_id":"cas-old","started_at":"cas-old-start","image":"cas-image","state":"running","health":"healthy"},
+        "schema-proxy":{"container_id":"schema-old","started_at":"schema-old-start","image":"schema-image","state":"running","health":"healthy"}}
+    before={"identity":"executor-identity","source_sha":"a"*40,"inventory":inventory}
+    after={**before,"inventory":{**inventory,
+        "cas":{"container_id":"cas-rollback","started_at":"cas-rollback-start","image":"cas-image","state":"running","health":"healthy"},
+        "schema-proxy":{"container_id":"schema-rollback","started_at":"schema-rollback-start","image":"schema-image","state":"running","health":"healthy"}}}
+    calls=[]
+    def remote(action,data=None):
+        calls.append((action,data))
+        if action=="snapshot":return after
+        if action=="image-check":return {"image_ids":{"cas":"cas-image","schema_proxy":"schema-image"}}
+        if action=="set-current":return {"generation_restored":True}
+        return {}
+    with patch.object(d,"configuration",return_value=tmp_path/"deploy.yml"), \
+         patch.object(d,"remote",side_effect=remote),patch.object(d,"kamal") as kamal, \
+         patch.object(d,"smoke"):
+        d.restore_cas(previous,tmp_path,None,before=before)
+    assert [call.args[2] for call in kamal.call_args_list]==["schema-proxy","cas"]
+    assert [data for action,data in calls if action=="wait"]==[
+        {"owner":"kamal","service":"schema-proxy"},
+        {"owner":"kamal","service":"cas"}]
+    assert calls[-1]==("set-current",previous)
+
+
+def test_cas_rollback_refuses_to_accept_changed_executor_or_tunnel(tmp_path):
+    previous={"authority":"kamal","identity":"executor-identity","source_sha":"a"*40,
+              "manifest":json.loads((ROOT/"config/deploy-images.json").read_text())}
+    old={"executor":{"container_id":"old-e","started_at":"e0","image":"e"},
+         "tunnel":{"container_id":"old-t","started_at":"t0","image":"t"}}
+    after={"inventory":{"executor":{"container_id":"new-e","started_at":"e1","image":"e"},
+                        "tunnel":old["tunnel"]}}
+    ids={"cas":"c","schema_proxy":"s"}
+    with pytest.raises(RuntimeError,match="unrelated service: executor"):
+        d._assert_cas_pair_rollout({"inventory":old},after,ids)
+
+
+def test_cas_deploy_updates_pair_and_rolls_back_after_receipt_commit_failure(tmp_path):
+    import json as json_module
+    current_manifest,candidate_manifest,evidence=cas_promotion_fixture()
+    repo=tmp_path/"repo";config=repo/"config";config.mkdir(parents=True)
+    (config/"deploy-images.json").write_text(json_module.dumps(candidate_manifest))
+    (config/"cas-promotion.json").write_text(json_module.dumps(evidence))
+    monkeypatch_root=d.ROOT
+    d.ROOT=repo
+    before_inventory={
+        "executor":{"container_id":"exec-id","started_at":"exec-start","image":"exec-image"},
+        "tunnel":{"container_id":"tunnel-id","started_at":"tunnel-start","image":"tunnel-image"},
+        "cas":{"container_id":"old-cas","started_at":"cas-old-start","image":"old-cas-image","state":"running","health":"healthy"},
+        "schema-proxy":{"container_id":"old-schema","started_at":"schema-old-start","image":"old-schema-image","state":"running","health":"healthy"}}
+    before={"authority":"kamal","identity":"exec-identity","source_sha":"a"*40,
+            "inventory":before_inventory}
+    promoted_inventory={**before_inventory,
+        "cas":{"container_id":"new-cas","started_at":"cas-new-start","image":"new-cas-image","state":"running","health":"healthy"},
+        "schema-proxy":{"container_id":"new-schema","started_at":"schema-new-start","image":"new-schema-image","state":"running","health":"healthy"}}
+    deployed={**before,"inventory":promoted_inventory}
+    rollback_inventory={**before_inventory,
+        "cas":{"container_id":"rollback-cas","started_at":"rollback-cas-start","image":"old-cas-image","state":"running","health":"healthy"},
+        "schema-proxy":{"container_id":"rollback-schema","started_at":"rollback-schema-start","image":"old-schema-image","state":"running","health":"healthy"}}
+    restored={**before,"inventory":rollback_inventory}
+    generation={"authority":"kamal","identity":"exec-identity","source_sha":"a"*40,
+                "manifest":current_manifest}
+    old_ids={"cas":"old-cas-image","schema_proxy":"old-schema-image",
+             "executor":"exec-image","tunnel":"tunnel-image"}
+    new_ids={"cas":"new-cas-image","schema_proxy":"new-schema-image",
+             "executor":"exec-image","tunnel":"tunnel-image"}
+    snapshots=iter((before,deployed,restored));image_checks=iter((old_ids,new_ids,old_ids));calls=[]
+    def remote(action,data=None):
+        calls.append((action,data))
+        if action=="snapshot":return next(snapshots)
+        if action=="current":return generation
+        if action=="image-check":return {"image_ids":next(image_checks)}
+        if action=="images":return {"image_ids":new_ids}
+        if action=="commit":raise RuntimeError("fixture receipt commit failure")
+        return {}
+    args=SimpleNamespace(local=False,operation="cas",native_target=None,native_cwd=None,
+                         native_thread_id=None,approve_full_stack=False)
+    try:
+        with patch.object(d,"INSTANCE",json.loads((ROOT/"config/instance.example.json").read_text())), \
+             patch.object(d,"trusted_context"),patch.object(d,"lock",return_value=nullcontext()), \
+             patch.object(d,"remote",side_effect=remote),patch.object(d,"configuration",return_value=tmp_path/"deploy.yml"), \
+             patch.object(d,"devsy_payload",return_value={}), \
+             patch.object(d,"prove_images",return_value={}),patch.object(d,"_verified_cas_candidate",return_value=evidence), \
+             patch.object(d,"_pin_memoryd_before_core_change"),patch.object(d,"kamal") as kamal, \
+             patch.object(d,"smoke",side_effect=[{},{},{}]), \
+             patch.dict(os.environ,{"GITHUB_SHA":"b"*40}):
+            with pytest.raises(RuntimeError) as caught:
+                d.execute(args)
+        receipt=json_module.loads(str(caught.value))
+        assert receipt["automatic_rollback"]=="restored"
+        assert receipt["deployment_receipt"]["rollback_digest"]==current_manifest["images"]["cas"]["digest"]
+        assert receipt["deployment_receipt"]["rollback_source_revision"]==current_manifest["images"]["cas"]["revision"]
+        assert [call.args[2] for call in kamal.call_args_list]==[
+            "schema-proxy","cas","schema-proxy","cas"]
+        assert sum(action=="commit" for action,_data in calls)==1
+        assert calls[-1]==("set-current",generation)
+    finally:
+        d.ROOT=monkeypatch_root
 
 
 def test_devsy_payload_contains_reviewed_nonsecret_inputs_and_vm_starter_path():
@@ -226,19 +414,12 @@ def test_devsy_payload_contains_reviewed_nonsecret_inputs_and_vm_starter_path():
     assert "kubeconfig" not in payload["starter_source"]
 
 
-def test_bad_cas_digest_revision_and_repository_are_rejected():
-    m=json.loads((ROOT/'config/deploy-images.json').read_text())
-    for digest,revision in [('latest','a'*40),('sha256:'+'a'*64,''),('sha256:'+'a'*64,'wrong')]:
-        with pytest.raises(ValueError):d.choose_manifest(m,digest,revision)
-    m['images']['cas']['repository']='evil.example/image'
-    with pytest.raises(ValueError):d.choose_manifest(m,'','')
-
-
-def test_cas_only_selection_does_not_change_other_images():
-    m=json.loads((ROOT/'config/deploy-images.json').read_text())
-    result=d.choose_manifest(m,'sha256:'+'a'*64,'a'*40)
-    assert result['images']['cas']['digest']!=m['images']['cas']['digest']
-    assert all(result['images'][k]==m['images'][k] for k in ('executor','schema_proxy','tunnel'))
+def test_deployment_cli_rejects_manual_cas_digest_and_revision_inputs():
+    result=subprocess.run([sys.executable,str(ROOT/'scripts/deploy_control_plane.py'),
+        'cas','--cas-digest','sha256:'+'a'*64,'--cas-revision','a'*40],
+        capture_output=True,text=True)
+    assert result.returncode==2
+    assert 'unrecognized arguments' in result.stderr
 
 
 def test_kamal_cannot_invoke_unrelated_apps_or_registry(tmp_path):
@@ -266,29 +447,6 @@ def test_duplicate_tunnel_registration_blocks():
     rows=[{'Name':name,'Id':str(i),'State':{'Running':True},'Config':{'Image':'ghcr.io/openai/tunnel-client'},'Mounts':[]} for i,name in enumerate(['/codex-control-plane-tunnel-client-1','/other-tunnel'])]
     with patch.object(h,'run',side_effect=[b'a b',json.dumps(rows).encode(),b'CONTROL_PLANE_TUNNEL_ID=private\0',b'CONTROL_PLANE_TUNNEL_ID=private\0']),patch.object(h,'private',return_value=b'private'):
         with pytest.raises(ValueError,match='Duplicate production tunnel'):h.inspect()
-
-
-def test_failed_kamal_health_rolls_back_before_accepting():
-    before={'authority':'kamal','identity':'identity','source_sha':'a'*40,'inventory':{key:{'image':'image'} for key in ('executor','schema-proxy','cas','tunnel')}}
-    current={**before,'manifest':json.loads((ROOT/'config/deploy-images.json').read_text())}
-    calls=[]
-    def remote(action,data=None):
-        calls.append(action)
-        if action=='memoryd-inventory':return {'status':'ABSENT'}
-        if action=='snapshot':return before
-        if action=='current':return current
-        if action=='image-check':return {'image_ids':{key:'image' for key in ('cas','executor','schema_proxy','tunnel')}}
-        if action=='smoke':return {'native_read':{'status':'PASS'}}
-        if action=='wait':raise RuntimeError('health failure')
-        return {}
-    from contextlib import nullcontext
-    args=type('A',(),{'local':False,'operation':'cas','cas_digest':'','cas_revision':'','approve_full_stack':False,
-        'native_target':'local','native_cwd':'/home/operator/worktree/mcp-tunnel-kit',
-        'native_thread_id':'12345678-1234-5678-9abc-def012345678'})()
-    with patch.object(d,'prove_images',return_value={}),patch.object(d,'trusted_context'),patch.object(d,'lock',return_value=nullcontext()),patch.object(d,'remote',side_effect=remote),patch.object(d,'kamal'),patch.object(d,'sync_source'),patch.object(d,'restore_cas') as restore,patch.dict(os.environ,{'GITHUB_SHA':'b'*40}):
-        with pytest.raises(RuntimeError,match='previous generation restored'):d.execute(args)
-        restore.assert_called_once()
-        assert 'commit' not in calls
 
 
 def test_missing_production_secret_is_a_blocker(tmp_path):

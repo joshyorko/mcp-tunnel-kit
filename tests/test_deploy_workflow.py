@@ -121,7 +121,7 @@ class DeployWorkflowTests(unittest.TestCase):
                     return {}
 
                 args = SimpleNamespace(
-                    local=False, operation=operation, cas_digest="", cas_revision="",
+                    local=False, operation=operation,
                     approve_full_stack=False,
                 )
                 with patch.object(deploy, "trusted_context"), \

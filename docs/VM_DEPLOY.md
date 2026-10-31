@@ -116,9 +116,29 @@ and unrecognized states remain blocked.
   through its owning lifecycle before any Kamal writer/client starts. The
   independent private network and host Devsy bridge are then qualified, and
   Executor, proxy, CAS and tunnel boot serially with health gates.
-- `cas`: restart/update only CAS. With no image input, reuse its current pin.
-  To update, supply `sha256:<64hex>` and the matching CAS `<40hex>` source
-  revision. All other services retain their own image pins and containers.
+- `native-reconcile`: read the installed Codex CLI and running native daemon
+  versions from `dakota-cpu` and `dakota-nvidia`, then report the qualification
+  evidence attached to the deployed CAS generation. It sends only the two
+  exact version commands over the existing pinned read-only SSH endpoint.
+  Results distinguish CLI version, daemon version, and CAS method qualification.
+  Unavailable devices or an older forced-command helper remain individually
+  marked unknown; this operation never updates an endpoint or installs, starts,
+  or restarts a native daemon.
+- `cas`: read the merged `config/deploy-images.json` pair and its matching
+  `config/cas-promotion.json` receipt. The controller independently checks the
+  complete consumed-method matrix, successful qualification/CI/publisher runs,
+  source ancestry, image digest and Linux AMD64 provenance. It updates
+  schema-proxy first, then CAS, and verifies Executor and tunnel container
+  identities stayed unchanged. The previous CAS pair remains available for
+  automatic rollback. There are no manual digest or revision inputs.
+
+The scheduled **Propose qualified CAS image** workflow checks the CAS-owned
+versioned release receipt and opens or updates one automation-owned draft PR
+when a newer qualified image is available. An absent or invalid receipt cannot
+create a candidate. Merging that PR does not deploy production; the protected
+`cas` operation and `control-plane-production` environment approval remain the
+deployment gate. Native daemon upgrades have no installer in this lane and
+remain separately blocked pending an approved native lifecycle and rollback.
 - `deploy`: redeploy the recorded four-image generation. Check the full-stack
   approval box. Tunnel stops first; only one Executor writer is used. Tunnel
   starts last after upstream readiness.

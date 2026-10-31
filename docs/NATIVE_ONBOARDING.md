@@ -130,15 +130,25 @@ These operations use the same protected runner and transaction as the local CLI.
 
 ## Deploy an updated CAS image
 
-Device lifecycle changes do not build or update CAS images. If a separate CAS
-build changes the Action Server version, use the image digest and matching CAS
-source revision published by that build. A runtime version such as `1.0.4` is
-not an image digest or source revision.
+The scheduled **Propose qualified CAS image** workflow is gated on the
+CAS-owned immutable qualification handoff and opens a draft image-update PR
+only after its method, CI, source, digest and platform checks pass. The CAS #25
+producer has not yet published the handoff contract, so this lane remains
+blocked until its immutable source and schema are confirmed. Review the paired
+CAS and schema-proxy manifest update and its `config/cas-promotion.json`
+evidence. Merging the PR does not deploy production. Dispatch **Deploy VM
+control plane** with operation `cas` to consume the merged manifest and receipt
+through the existing production environment approval. The deployment
+controller resolves the current rollback generation itself; do not enter an
+image digest or source revision manually.
 
-Dispatch **Deploy VM control plane** with operation `cas`, the build's
-`cas_digest` and `cas_revision`, and a valid native acceptance target/cwd/thread.
-Use `local` if it is still registered, or the new name after renaming it. This
-updates CAS only; a full-stack redeploy is unnecessary for this change.
+Native Codex reconciliation is a separate read-only operation. It reports the
+installed CLI version, running daemon version and deployed CAS method
+qualification as independent facts. If an existing endpoint's forced-command
+helper does not yet allow the exact read-only CLI version command, that CLI
+field remains unavailable; this lane does not replace endpoint helpers or
+restart native services. The CAS image lane does not install or restart native
+daemons.
 
 ## Transaction and recovery
 

@@ -39,8 +39,6 @@ def args(operation, *, approve=False, host_approve=False, host_rollback=False, n
     return type("Args", (), {
         "local": False,
         "operation": operation,
-        "cas_digest": "",
-        "cas_revision": "",
         "approve_full_stack": approve,
         "approve_host_devsy_apply": host_approve,
         "approve_host_devsy_rollback": host_rollback,
@@ -94,54 +92,31 @@ def runtime_repo(tmp_path):
     return repo,source_sha
 
 
-def test_cas_failure_restores_only_cas_and_uses_cas_backup():
+def test_cas_without_merged_qualification_evidence_fails_closed_before_mutation():
     before = generation()
     current = dict(before)
-    after = dict(before)
     calls = []
-    smoke_count = 0
 
     def remote(action, data=None):
-        nonlocal smoke_count
         calls.append((action, data))
-        if action == 'memoryd-inventory':
-            return {'status':'ABSENT'}
-        if action == "snapshot":
-            return before if calls.count(("snapshot", None)) == 1 else after
+        if action == "snapshot":return before
         if action == "current":
             return current
-        if action in {"backup-cas", "profile", "network-check", "wait", "set-current"}:
+        if action in {"profile", "network-check"}:
             return {}
-        if action == "devsy-check":
-            return {"status": "current"}
-        if action in {"image-check", "images"}:
-            return {"image_ids": {"cas": "image-cas", "schema_proxy": "image-schema-proxy",
-                                  "executor": "image-executor", "tunnel": "image-tunnel"}}
-        if action == "smoke":
-            smoke_count += 1
-            if smoke_count == 2:
-                raise RuntimeError("new CAS smoke failed")
-            return {"native_read": {"status": "PASS"}}
         raise AssertionError(f"Unexpected VM action: {action}")
 
-    kamal_calls = []
-    with patch.object(d, "trusted_context"), patch.object(d, "lock", return_value=nullcontext()), \
+    with patch.object(d,"INSTANCE",json.loads((ROOT/"config/instance.example.json").read_text())), \
+         patch.object(d, "trusted_context"), patch.object(d, "lock", return_value=nullcontext()), \
          patch.object(d, "remote", side_effect=remote), \
-             patch.object(d, "prove_images", return_value={}), \
-         patch.object(d, "kamal", side_effect=lambda config, operation, name: kamal_calls.append((operation, name))), \
-         patch.object(d, "sync_source") as sync_source, \
+         patch.object(d, "prove_images", return_value={}), \
+         patch.object(d, "kamal") as kamal, \
          patch.dict(os.environ, {"GITHUB_SHA": "b" * 40}):
-        with pytest.raises(RuntimeError, match="previous generation restored"):
-            d.execute(args("cas", native={
-                "target": "local", "cwd": "/home/operator/worktree/mcp-tunnel-kit",
-                "thread_id": "12345678-1234-5678-9abc-def012345678",
-            }))
+        with pytest.raises(ValueError,match="Merged CAS qualification promotion evidence is unavailable"):
+            d.execute(args("cas"))
 
-    assert ("backup-cas", None) in calls
-    assert ("backup", None) not in calls
-    assert kamal_calls == [("reboot", "cas"), ("reboot", "cas")]
-    assert not {"compose-stop", "compose-start", "devsy-start"} & {action for action, _ in calls}
-    sync_source.assert_not_called()
+    assert [action for action,_data in calls]==["snapshot","profile","network-check","current"]
+    kamal.assert_not_called()
 
 
 def test_preflight_returns_devsy_plan_when_native_thread_tuple_is_mismatched(tmp_path):
