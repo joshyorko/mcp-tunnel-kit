@@ -85,6 +85,7 @@ ssh -T -i "$HOME/.ssh/native-codex-ssh" -o IdentitiesOnly=yes -o StrictHostKeyCh
 Use the `codex_bin` and `socket` values from the operator's profile. The forced command accepts exactly these argument vectors from that profile:
 
 - `codex_bin app-server daemon version`
+- `codex_bin --version`
 - `codex_bin app-server proxy --sock socket`
 
-The helper parses `SSH_ORIGINAL_COMMAND` but never evaluates a shell. Shell syntax, environment assignments, alternate sockets, daemon start commands, and all other commands exit with status `126`. The daemon grants no TTY, shell, agent, TCP, stream-local, X11, tunnel, user environment, or user RC access.
+The helper parses `SSH_ORIGINAL_COMMAND` but never evaluates a shell. Shell syntax, environment assignments, alternate sockets, daemon start commands, and all other commands exit with status `126`. The VM's `native-reconcile` operation uses only the two exact read-only version commands above; it does not restart the service. The daemon grants no TTY, shell, agent, TCP, stream-local, X11, tunnel, user environment, or user RC access.

@@ -1,0 +1,93 @@
+name: Propose qualified CAS image
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 7 * * *'
+permissions:
+  contents: write
+  pull-requests: write
+concurrency:
+  group: qualified-cas-promotion
+  cancel-in-progress: false
+jobs:
+  propose:
+    if: github.repository == 'joshyorko/mcp-tunnel-kit'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Validate promotion and rollback contracts
+        run: |
+          python -m pip install pytest==8.3.3
+          python -m pytest -q tests/test_cas_promotion.py tests/test_image_provenance.py tests/test_cas_promotion_branch.py
+      - name: Resolve the qualified release and create a deduplicated draft PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PROMOTION_BRANCH: automation/cas-promotion
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          python scripts/propose_cas_promotion.py
+          if git diff --quiet -- config/deploy-images.json config/cas-promotion.json; then
+            echo 'No new qualified CAS image candidate.'
+            exit 0
+          fi
+          temp_dir="$(mktemp -d)"
+          trap 'rm -rf "$temp_dir"' EXIT
+          cp config/deploy-images.json "$temp_dir/deploy-images.json"
+          cp config/cas-promotion.json "$temp_dir/cas-promotion.json"
+          git fetch origin main
+          expected_head="$(git ls-remote --heads origin "refs/heads/$PROMOTION_BRANCH" | cut -f1)"
+          if [ -n "$expected_head" ]; then
+            git fetch origin "refs/heads/$PROMOTION_BRANCH:refs/remotes/origin/$PROMOTION_BRANCH"
+            gh pr list --repo "$GITHUB_REPOSITORY" --head "$PROMOTION_BRANCH" --state open \
+              --json author,baseRefName,headRefName,isDraft > "$temp_dir/pull-requests.json"
+            python scripts/cas_promotion_branch.py \
+              --base-ref refs/remotes/origin/main \
+              --branch-ref "refs/remotes/origin/$PROMOTION_BRANCH" \
+              --pull-requests "$temp_dir/pull-requests.json"
+          else
+            printf '[]\n' > "$temp_dir/pull-requests.json"
+          fi
+          git checkout --force -B "$PROMOTION_BRANCH" refs/remotes/origin/main
+          cp "$temp_dir/deploy-images.json" config/deploy-images.json
+          cp "$temp_dir/cas-promotion.json" config/cas-promotion.json
+          git add config/deploy-images.json config/cas-promotion.json
+          if git diff --cached --quiet; then
+            echo 'The qualified candidate is already represented on the promotion branch.'
+            exit 0
+          fi
+          revision="$(python -c 'import json; print(json.load(open("config/cas-promotion.json"))["source_revision"])')"
+          git commit -m "Promote qualified CAS $revision"
+          git push --force-with-lease="refs/heads/$PROMOTION_BRANCH:$expected_head" \
+            origin "HEAD:refs/heads/$PROMOTION_BRANCH"
+          pull_requests="$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$PROMOTION_BRANCH" \
+            --state open --json number,author,baseRefName,headRefName,isDraft)"
+          if [ "$(python -c 'import json,sys; print(len(json.loads(sys.argv[1])))' "$pull_requests")" = 0 ]; then
+            qualification_url="$(python -c 'import json; print(json.load(open("config/cas-promotion.json"))["qualification"]["run_url"])')"
+            publisher_url="$(python -c 'import json; print(json.load(open("config/cas-promotion.json"))["publisher"]["run_url"])')"
+            cat > "$temp_dir/pr-body.md" <<EOF
+          This draft updates the CAS and schema-proxy image pins together from one qualified CAS release.
+
+          - CAS source: `$revision`
+          - Qualification evidence: $qualification_url
+          - Publisher evidence: $publisher_url
+          - Native daemon upgrades are not part of this promotion. Production deployment still uses the protected control-plane workflow and environment approval.
+
+          The candidate was independently checked against the consumed-method receipt, successful qualification/CI/publisher runs, merged-main ancestry, image digest, and Linux AMD64 provenance. Review `config/cas-promotion.json` for the complete evidence and recorded rollback digest.
+          EOF
+            gh pr create --repo "$GITHUB_REPOSITORY" --draft --base main --head "$PROMOTION_BRANCH" \
+              --title "[CAS] Promote qualified release $revision" --body-file "$temp_dir/pr-body.md"
+          else
+            python -c 'import json,sys; rows=json.loads(sys.argv[1]); assert len(rows)==1 and rows[0]["author"]["login"]=="github-actions[bot]" and rows[0]["baseRefName"]=="main" and rows[0]["headRefName"]=="automation/cas-promotion" and rows[0]["isDraft"] is True' "$pull_requests"
+            echo 'Updated the existing automation-owned draft CAS promotion PR.'
+          fi

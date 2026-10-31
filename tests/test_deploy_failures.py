@@ -39,8 +39,6 @@ def args(operation, *, approve=False, host_approve=False, host_rollback=False, n
     return type("Args", (), {
         "local": False,
         "operation": operation,
-        "cas_digest": "",
-        "cas_revision": "",
         "approve_full_stack": approve,
         "approve_host_devsy_apply": host_approve,
         "approve_host_devsy_rollback": host_rollback,

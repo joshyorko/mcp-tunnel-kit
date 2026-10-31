@@ -6,7 +6,7 @@ on:
         description: Controlled operation (adopt is one-time Compose to Kamal handoff)
         type: choice
         default: preflight
-        options: [onboard-native, remove-native, rename-native, devsy-bridge-path-check, devsy-bridge-path-apply, devsy-scope-rebind-check, devsy-scope-rebind, preflight, status, devsy-check, devsy-apply, devsy-rollback, devsy-tap-reconcile-check, devsy-tap-reconcile, devsy-tap-rollback-check, devsy-tap-rollback, adopt, cas, deploy, rollback]
+        options: [onboard-native, remove-native, rename-native, devsy-bridge-path-check, devsy-bridge-path-apply, devsy-scope-rebind-check, devsy-scope-rebind, preflight, status, native-reconcile, devsy-check, devsy-apply, devsy-rollback, devsy-tap-reconcile-check, devsy-tap-reconcile, devsy-tap-rollback-check, devsy-tap-rollback, adopt, cas, deploy, rollback]
         required: true
       native_name:
         description: Existing logical target to remove or rename
@@ -18,14 +18,6 @@ on:
         required: false
       native_descriptor:
         description: Public endpoint JSON from bin/onboard-native --prepare-only (onboard-native only)
-        type: string
-        required: false
-      cas_digest:
-        description: Optional approved CAS sha256 digest; revision must also be supplied
-        type: string
-        required: false
-      cas_revision:
-        description: CAS source commit matching the image OCI revision label
         type: string
         required: false
       native_target:
@@ -115,8 +107,6 @@ jobs:
         shell: bash
         env:
           OPERATION: ${{ inputs.operation }}
-          CAS_DIGEST: ${{ inputs.cas_digest }}
-          CAS_REVISION: ${{ inputs.cas_revision }}
           NATIVE_TARGET: ${{ inputs.native_target }}
           NATIVE_CWD: ${{ inputs.native_cwd }}
           NATIVE_THREAD_ID: ${{ inputs.native_thread_id }}
@@ -131,7 +121,7 @@ jobs:
           TAP_RECONCILIATION_RUN_ATTEMPT: ${{ inputs.tap_reconciliation_run_attempt }}
         run: |
           set -euo pipefail
-          args=("$OPERATION" --cas-digest "$CAS_DIGEST" --cas-revision "$CAS_REVISION")
+          args=("$OPERATION")
           if [ "$FULL_APPROVAL" = true ]; then args+=(--approve-full-stack); fi
           if [ "$BRIDGE_KUBECTL_PATH_APPROVAL" = true ]; then args+=(--approve-bridge-kubectl-path); fi
           if [ "$SCOPE_BINDING_APPROVAL" = true ]; then args+=(--approve-scope-binding-rebind); fi
@@ -141,7 +131,25 @@ jobs:
           if [ "$HOST_TAP_ROLLBACK_APPROVAL" = true ]; then args+=(--approve-host-tap-rollback); fi
           if [ -n "$TAP_RECONCILIATION_RUN_ID" ]; then args+=(--tap-reconciliation-run-id "$TAP_RECONCILIATION_RUN_ID"); fi
           if [ -n "$TAP_RECONCILIATION_RUN_ATTEMPT" ]; then args+=(--tap-reconciliation-run-attempt "$TAP_RECONCILIATION_RUN_ATTEMPT"); fi
-          python3 scripts/deploy_control_plane.py "${args[@]}" | tee "$RUNNER_TEMP/control-plane-receipt.json"
+          set +e
+          python3 scripts/deploy_control_plane.py "${args[@]}" \
+            > "$RUNNER_TEMP/control-plane-receipt.json" \
+            2> "$RUNNER_TEMP/control-plane-error.json"
+          status=$?
+          set -e
+          if [ "$status" -ne 0 ]; then
+            if [ "$OPERATION" = cas ]; then
+              {
+                printf '### CAS promotion or rollback result\n\n'
+                printf '```json\n'
+                cat "$RUNNER_TEMP/control-plane-error.json"
+                printf '\n```\n'
+              } >> "$GITHUB_STEP_SUMMARY"
+            fi
+            cat "$RUNNER_TEMP/control-plane-error.json" >&2
+            exit "$status"
+          fi
+          cat "$RUNNER_TEMP/control-plane-receipt.json"
           {
             printf '### Control-plane operation: %s\n\n' "$OPERATION"
             printf 'Source `%s`; runner `%s`; VM `kamal-test-deploy`.\n\n' "$GITHUB_SHA" "$RUNNER_NAME"

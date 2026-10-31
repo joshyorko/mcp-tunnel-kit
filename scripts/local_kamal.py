@@ -266,7 +266,7 @@ def main(argv=None):
                 confirm_import_quiescent=confirmed,
                 approve_legacy_abandon=legacy_approved,
                 rollout_id=rollout_id,
-                local=True, approve_full_stack=True, cas_digest='', cas_revision='',
+                local=True, approve_full_stack=True,
             ))
         print(json.dumps(result, indent=2))
         return 0
