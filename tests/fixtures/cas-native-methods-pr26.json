@@ -1,4 +1,6 @@
 {
+  "schema_version": 1,
+  "source_revision": "220079044461a50ba4cc557cf962801a04dd2f07",
   "methods": [
     {
       "access": "read_only",
@@ -3204,7 +3206,5 @@
       "response_schema": "TurnSteerResponse",
       "smoke_strategy": "disposable_mutation_fixture"
     }
-  ],
-  "schema_version": 1,
-  "source_revision": "361eb0b3aa7a47b6b92963294876bc4dc3b25f7d"
+  ]
 }

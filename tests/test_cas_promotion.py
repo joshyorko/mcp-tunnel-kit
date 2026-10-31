@@ -44,6 +44,10 @@ def producer_receipt_fixture():
     return json.loads((ROOT / "tests/fixtures/cas-qualified-release-v1-producer-361eb0b.json").read_text())
 
 
+def current_producer_contract_fixture():
+    return json.loads((ROOT / "tests/fixtures/cas-qualified-release-v1-producer-220079044.json").read_text())
+
+
 def receipt(method_names=None, *, revision="a" * 40):
     methods = method_names or ["codex.list_targets", "codex.list_models", "codex.start_turn"]
     value={
@@ -220,7 +224,9 @@ def proof(_manifest):
 def test_schema_is_a_strict_json_schema_contract():
     schema = json.loads((ROOT / ".github/schemas/cas-qualified-release-v1.schema.json").read_text())
     producer_schema = json.loads((ROOT / "tests/fixtures/cas-qualified-release-v1-producer-schema-361eb0b.json").read_text())
+    current_producer_schema = json.loads((ROOT / "tests/fixtures/cas-qualified-release-v1-producer-schema-220079044.json").read_text())
     assert schema == producer_schema
+    assert schema == current_producer_schema
     assert schema["properties"]["source"]["properties"]["merged"] == {"const": True}
     assert schema["properties"]["qualification"]["properties"]["withheld_methods"]["maxItems"] == 0
     assert schema["properties"]["publication"]["properties"]["platform"] == {"const": "linux/amd64"}
@@ -245,6 +251,22 @@ def test_pinned_producer_generator_receipt_fixture_validates_against_the_consume
     source_sha = candidate["source"]["revision"]
     run_id = candidate["publication"]["run_url"].rsplit("/", 1)[-1]
     assert module._publisher_artifact_name(source_sha, run_id) == f"cas-qualified-release-{source_sha}-{run_id}"
+
+
+def test_current_pr26_generated_contract_fixture_covers_the_source_pinned_catalog():
+    import jsonschema
+    module = helper()
+    candidate = current_producer_contract_fixture()
+    catalog = catalog_fixture()
+    schema = json.loads((ROOT / ".github/schemas/cas-qualified-release-v1.schema.json").read_text())
+    jsonschema.Draft202012Validator(schema, format_checker=jsonschema.FormatChecker()).validate(candidate)
+    assert module.validate_handoff(candidate) == candidate
+    module.validate_handoff_surface_against_catalog(candidate, catalog_payload(catalog))
+    assert candidate["source"]["revision"] == "e" * 40
+    assert len(candidate["qualification"]["surface"]["methods"]) == 58
+    assert module._publisher_artifact_name(candidate["source"]["revision"], "125") == (
+        "cas-qualified-release-" + candidate["source"]["revision"] + "-125"
+    )
 
 
 def test_valid_handoff_updates_only_the_cas_schema_proxy_pair_and_has_rollback_proof():
@@ -558,7 +580,7 @@ def test_surface_digest_rejects_a_changed_native_method_owner():
 def test_actual_pr26_catalog_of_58_slash_delimited_methods_is_accepted():
     module = helper()
     catalog = catalog_fixture()
-    assert catalog["source_revision"] == "361eb0b3aa7a47b6b92963294876bc4dc3b25f7d"
+    assert catalog["source_revision"] == "220079044461a50ba4cc557cf962801a04dd2f07"
     candidate = receipt([row["method"] for row in catalog["methods"]],
                         revision=catalog["source_revision"])
     source_qualification_fixture(candidate, catalog_payload(catalog))
