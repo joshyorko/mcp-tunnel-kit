@@ -414,6 +414,63 @@ def test_artifact_download_uses_cross_repo_read_token_only_for_github_api(monkey
     assert "Authorization" not in requests[1].headers
 
 
+def test_workflow_metadata_uses_existing_read_token_without_forwarding_it_on_redirect(monkeypatch):
+    module = helper()
+    monkeypatch.setenv("CAS_ARTIFACTS_READ_TOKEN", "opaque-test-token")
+    requests = []
+
+    class Response:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return None
+        def read(self, limit):
+            assert limit == 1024 * 1024 + 1
+            return b'{"sha":"fixture"}'
+
+    def open_url(request, timeout):
+        assert timeout == 15
+        requests.append(request)
+        return Response()
+
+    monkeypatch.setattr(module, "urlopen", open_url)
+    url = f"https://api.github.com/repos/{module.CAS_REPOSITORY}/commits/main"
+    assert module._github_json(url) == {"sha":"fixture"}
+    assert requests[0].get_header("Authorization") == "Bearer opaque-test-token"
+    redirected = module.HTTPRedirectHandler().redirect_request(
+        requests[0], None, 302, "Found", {}, "https://example.invalid/redirect")
+    assert redirected.get_header("Authorization") is None
+
+
+@pytest.mark.parametrize("url", ["https://example.invalid/main", "https://api.github.com/repos/other/repo/commits/main"])
+def test_workflow_metadata_refuses_other_hosts_or_repositories_before_network(monkeypatch, url):
+    module = helper()
+    monkeypatch.setenv("CAS_ARTIFACTS_READ_TOKEN", "opaque-test-token")
+    monkeypatch.setattr(module, "urlopen", lambda *_a, **_k: pytest.fail("unexpected network"))
+    with pytest.raises(module.PromotionError, match="approved CAS API"):
+        module._github_json(url)
+
+
+def test_workflow_metadata_reports_http_status_and_rate_limit_without_private_details(monkeypatch):
+    module = helper()
+    def denied(request, timeout):
+        raise module.HTTPError(request.full_url, 403, "PRIVATE_DETAIL", {"X-RateLimit-Remaining":"0"}, None)
+    monkeypatch.setattr(module, "urlopen", denied)
+    url = f"https://api.github.com/repos/{module.CAS_REPOSITORY}/commits/main"
+    with pytest.raises(module.PromotionError, match="HTTP 403.*rate limit") as caught:
+        module._github_json(url)
+    assert "PRIVATE_DETAIL" not in str(caught.value)
+
+
+@pytest.mark.parametrize("token", ["invalid\ntoken", "x" * 8193], ids=["newline", "too-long"])
+def test_workflow_metadata_refuses_invalid_token_before_network(monkeypatch, token):
+    module = helper()
+    monkeypatch.setenv("CAS_ARTIFACTS_READ_TOKEN", token)
+    monkeypatch.setattr(module, "urlopen", lambda *_a, **_k: pytest.fail("unexpected network"))
+    url = f"https://api.github.com/repos/{module.CAS_REPOSITORY}/commits/main"
+    with pytest.raises(module.PromotionError, match="read token is invalid") as caught:
+        module._github_json(url)
+    assert token not in str(caught.value)
+
+
 def test_artifact_download_rejects_unapproved_redirect_without_forwarding_token(monkeypatch):
     module = helper()
     monkeypatch.setenv("CAS_ARTIFACTS_READ_TOKEN", "opaque-test-token")
