@@ -11,11 +11,11 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PINNED_PRODUCER_SHA = "b95b1ba7d0d0e5bf8ee361ec7b28185c7bda3691"
-PRODUCER_RECEIPT_BLOB_SHA = "60335e8b6d63baccd6a98df6b969e6878e2ceedd"
+PINNED_PRODUCER_SHA = "a657ac07329f617305098f06847872bf38043193"
+PRODUCER_RECEIPT_BLOB_SHA = "6bbf7bb4516d42cd459c3adc099d8669afdd083d"
 PRODUCER_SCHEMA_BLOB_SHA = "ba72720b346a90ef7facd689852da498cfe32115"
-PRODUCER_CATALOG_BLOB_SHA = "22af4675d1fc36ebcdffaaebd146bf7760360823"
-PRODUCER_RECEIPT_SHA256 = "ce24db707c451fb98a9c367b382220a02c004c7c22f4deab48e7b79cd521c838"
+PRODUCER_CATALOG_BLOB_SHA = "583c0c118b9dd0d849431b3d6ce1c209e79e86d3"
+PRODUCER_RECEIPT_SHA256 = "0cdb36d579a61cacbd79269c299116e1d4528156786db2b23292293e523fe925"
 
 
 def git_blob_sha(path):
@@ -58,7 +58,7 @@ def producer_receipt_fixture():
 
 
 def current_producer_contract_fixture():
-    return json.loads((ROOT / "tests/fixtures/cas-qualified-release-v1-producer-b95b1ba7.json").read_text())
+    return json.loads((ROOT / "tests/fixtures/cas-qualified-release-v1-producer-current.json").read_text())
 
 
 def receipt(method_names=None, *, revision="a" * 40):
@@ -237,7 +237,7 @@ def proof(_manifest):
 def test_schema_is_a_strict_json_schema_contract():
     schema = json.loads((ROOT / ".github/schemas/cas-qualified-release-v1.schema.json").read_text())
     producer_schema = json.loads((ROOT / "tests/fixtures/cas-qualified-release-v1-producer-schema-361eb0b.json").read_text())
-    current_schema_path = ROOT / "tests/fixtures/cas-qualified-release-v1-producer-schema-b95b1ba7.json"
+    current_schema_path = ROOT / "tests/fixtures/cas-qualified-release-v1-producer-schema-current.json"
     current_producer_schema = json.loads(current_schema_path.read_text())
     assert schema == producer_schema
     assert schema == current_producer_schema
@@ -271,7 +271,7 @@ def test_pinned_producer_generator_receipt_fixture_validates_against_the_consume
 def test_current_pr26_generated_fixture_matches_pinned_producer_and_catalog_contract():
     import jsonschema
     module = helper()
-    receipt_path = ROOT / "tests/fixtures/cas-qualified-release-v1-producer-b95b1ba7.json"
+    receipt_path = ROOT / "tests/fixtures/cas-qualified-release-v1-producer-current.json"
     catalog_path = ROOT / "tests/fixtures/cas-native-methods-pr26.json"
     candidate = current_producer_contract_fixture()
     catalog = catalog_fixture()

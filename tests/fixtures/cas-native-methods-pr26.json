@@ -257,6 +257,7 @@
         "call_mcp_tool"
       ],
       "regression_tests": [
+        "tests/test_codex_qualification.py",
         "tests/test_mcp_annotations.py",
         "tests/test_native_operator_surfaces.py",
         "tests/test_package_composition.py",
@@ -334,6 +335,7 @@
       ],
       "regression_tests": [
         "tests/test_action_server_validation.py",
+        "tests/test_codex_qualification.py",
         "tests/test_control_actions.py",
         "tests/test_mcp_annotations.py",
         "tests/test_package_composition.py",
@@ -2487,6 +2489,7 @@
       ],
       "regression_tests": [
         "tests/test_mcp_annotations.py",
+        "tests/test_method_qualification_manifest.py",
         "tests/test_native_capabilities.py",
         "tests/test_native_wire_contract_fixtures.py",
         "tests/test_package_composition.py",
@@ -2529,6 +2532,7 @@
       ],
       "regression_tests": [
         "tests/test_mcp_annotations.py",
+        "tests/test_method_qualification_manifest.py",
         "tests/test_native_wire_contract_fixtures.py",
         "tests/test_package_composition.py",
         "tests/test_protocol_contracts.py",

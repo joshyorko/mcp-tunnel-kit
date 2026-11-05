@@ -4,9 +4,51 @@ permissions:
   contents: read
 jobs:
   test:
+    permissions:
+      contents: read
+      actions: read
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      - name: Read-only public CAS artifact token probe
+        env:
+          PROBE_GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PYPROBE'
+          import hashlib,json,os
+          from urllib.error import HTTPError
+          from urllib.parse import urlsplit
+          from urllib.request import HTTPRedirectHandler,Request,build_opener,urlopen
+          class StopRedirect(HTTPRedirectHandler):
+              def redirect_request(self,*args):return None
+          url='https://api.github.com/repos/joshyorko/codex-action-server/actions/artifacts/13437550029/zip'
+          request=Request(url,headers={'Accept':'application/vnd.github+json','Authorization':'Bearer '+os.environ['PROBE_GITHUB_TOKEN']})
+          report={'authentication':'workflow_github_token','scope':'mcp-tunnel-kit repository Actions read'}
+          try:
+              try:
+                  response=build_opener(StopRedirect).open(request,timeout=20)
+                  report['api_status']=response.status
+              except HTTPError as error:
+                  report['api_status']=error.code
+                  if error.code!=302:raise
+                  location=error.headers.get('Location','')
+                  parsed=urlsplit(location)
+                  allowed={'release-assets.githubusercontent.com','objects.githubusercontent.com','github-cloud.s3.amazonaws.com'}
+                  if parsed.scheme!='https' or (parsed.hostname not in allowed and not (parsed.hostname or '').endswith('.blob.core.windows.net')):
+                      raise ValueError('unapproved redirect host')
+                  response=urlopen(Request(location,headers={'User-Agent':'cas-artifact-access-probe'}),timeout=20)
+              with response:
+                  raw=response.read(8193)
+              digest='sha256:'+hashlib.sha256(raw).hexdigest()
+              report.update(download_status=response.status,bytes=len(raw),digest=digest,digest_matches=digest=='sha256:611d773b072d46ccfbcf8fe44c540b9ba788152fea3a684ef6942cda083e4d60')
+          except HTTPError as error:
+              report['http_status']=error.code
+              try:report['message']=json.loads(error.read(8193)).get('message')
+              except ValueError:pass
+          except Exception as error:
+              report['error_type']=type(error).__name__
+          print(json.dumps(report,sort_keys=True))
+          PYPROBE
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
