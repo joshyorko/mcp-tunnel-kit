@@ -69,6 +69,34 @@ locked Kamal bundle under the user's data directory using installed Ruby 3.4.8;
 Fizzy's bundle/configuration is not modified. The environment file is parsed as
 data, never executed as shell code.
 
+## Tunnel API key rotation
+
+Update `CONTROL_PLANE_API_KEY` in the controller's ignored `.env`, then run
+`bin/kamal deploy` (or `make deploy`). Exported input takes precedence; absent
+input retains the VM key and invalid input fails before VM changes. CAS-only
+deployment and diagnostics do not rotate credentials.
+
+The shared controller transfers the key through pinned SSH stdin, stops the
+existing tunnel for atomic replacement, requires successful polling, and updates
+current/previous identity receipts. Retry interrupted rotations with the same
+command. An accepted key survives a later image deployment failure or rollback.
+Native/Devsy gates remain required; local commands forward `NATIVE_TARGET`,
+`NATIVE_CWD`, and `NATIVE_THREAD_ID` from the process environment.
+
+Full deployments reuse the VM's private `deployment/native-acceptance.json`
+when no explicit native tuple is supplied. Each deployment still checks that
+exact native target, worktree and thread for authoritative inactive state.
+A successful explicit native check during full deployment records the tuple
+for subsequent controllers and CI runners. Missing settings fail before key
+staging and name the three required inputs. Partial or invalid explicit input
+never falls back to saved settings.
+
+For CI rotation, optionally add `CONTROL_PLANE_API_KEY` as a secret on the
+protected `control-plane-production` GitHub Environment. The self-hosted runner
+uses the same controller and its existing pinned SSH access. When the secret is
+absent, CI redeployments retain the VM key. Credentials never enter process
+arguments or deployment receipts.
+
 ## GitHub operations
 
 Open Actions → **Deploy VM control plane** → **Run workflow**, select **main**.
