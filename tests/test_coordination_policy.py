@@ -267,3 +267,57 @@ def test_remote_transfer_envelope_is_bounded_and_rejects_duplicate_keys():
     assert module.read_transfer(io.StringIO('{"policy_json":"{\\"pairs\\":[]}"}')) == {
         "policy_json": '{"pairs":[]}'
     }
+
+
+def test_same_image_policy_optin_redeploys_only_pair_and_records_selection(tmp_path, monkeypatch):
+    from test_deploy_control_plane import cas_promotion_fixture
+    _old, images, evidence = cas_promotion_fixture()
+    repo = tmp_path / "repo"
+    (repo / "config").mkdir(parents=True)
+    (repo / "config/deploy-images.json").write_text(json.dumps(images))
+    (repo / "config/cas-promotion.json").write_text(json.dumps(evidence))
+    instance = json.loads((ROOT / "config/instance.example.json").read_text())
+    selected = instance["vm"]["state_dir"] + "/cas-coordination"
+    instance["vm"]["cas_coordination_policy_dir"] = selected
+    ids = {name: "image-" + name for name in images["images"]}
+    inventory = {
+        ("schema-proxy" if name == "schema_proxy" else name): {
+            "container_id": "old-" + name, "started_at": "old", "image": image,
+            "state": "running", "health": "healthy",
+        } for name, image in ids.items()
+    }
+    before = {"authority": "kamal", "identity": "fixture-identity", "source_sha": "a" * 40,
+              "inventory": inventory}
+    after = copy.deepcopy(before)
+    for name in ("cas", "schema-proxy"):
+        after["inventory"][name].update(container_id="new-" + name, started_at="new")
+    current = {**before, "manifest": images}
+    snapshots = iter((before, after))
+    calls = []
+    restarts = []
+    def remote(action, data=None):
+        calls.append((action, data))
+        if action == "snapshot": return next(snapshots)
+        if action == "current": return current
+        if action == "image-check": return {"image_ids": ids}
+        return {}
+    monkeypatch.setattr(deploy, "ROOT", repo)
+    monkeypatch.setattr(deploy, "INSTANCE", instance)
+    monkeypatch.setattr(deploy, "HOST", instance["deploy_host"]["alias"])
+    monkeypatch.setattr(deploy, "VMROOT", instance["vm"]["repo_dir"])
+    monkeypatch.setattr(deploy, "trusted_context", lambda *_a, **_k: None)
+    monkeypatch.setattr(deploy, "lock", lambda: nullcontext())
+    monkeypatch.setattr(deploy, "remote", remote)
+    monkeypatch.setattr(deploy, "prove_images", lambda *_a: {})
+    monkeypatch.setattr(deploy, "_verified_cas_candidate", lambda *_a: evidence)
+    monkeypatch.setattr(deploy, "_pin_memoryd_before_core_change", lambda: None)
+    monkeypatch.setattr(deploy, "devsy_payload", lambda: {})
+    monkeypatch.setattr(deploy, "smoke", lambda *_a, **_k: {})
+    monkeypatch.setattr(deploy, "kamal", lambda config, operation, name: restarts.append((operation, name)))
+    monkeypatch.setenv("GITHUB_SHA", "b" * 40)
+    result = deploy.execute(SimpleNamespace(local=False, operation="cas", approve_full_stack=False))
+    assert result["status"] == "deployed"
+    assert restarts == [("reboot", "schema-proxy"), ("reboot", "cas")]
+    committed = next(data for action, data in calls if action == "commit")
+    assert committed["cas_coordination_policy_dir"] == selected
+    assert committed["identity"] == before["identity"]
