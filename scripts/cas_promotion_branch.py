@@ -13,6 +13,13 @@ BRANCH = "automation/cas-promotion"
 ALLOWED_FILES = {"config/deploy-images.json", "config/cas-promotion.json"}
 
 
+def _is_workflow_bot(author: dict) -> bool:
+    if not isinstance(author, dict):
+        return False
+    return ((author.get("login") == BOT_NAME and author.get("is_bot") is not False)
+            or (author.get("login") == "app/github-actions" and author.get("is_bot") is True))
+
+
 def validate_branch(*, commits: list[dict], changed_files: list[str], pull_requests: list[dict]) -> None:
     for commit in commits:
         if (commit.get("author_name") != BOT_NAME or commit.get("author_email") != BOT_EMAIL
@@ -25,7 +32,7 @@ def validate_branch(*, commits: list[dict], changed_files: list[str], pull_reque
         raise ValueError("Multiple open CAS promotion PRs use the automation branch")
     if pull_requests:
         request = pull_requests[0]
-        if (request.get("author", {}).get("login") != BOT_NAME
+        if (not _is_workflow_bot(request.get("author"))
                 or request.get("baseRefName") != "main"
                 or request.get("headRefName") != BRANCH
                 or request.get("isDraft") is not True):

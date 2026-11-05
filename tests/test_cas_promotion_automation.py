@@ -16,7 +16,7 @@ import cas_promotion
 import propose_cas_promotion
 
 
-def run_promotion_workflow(tmp_path, *, existing_pr, advance_main=False):
+def run_promotion_workflow(tmp_path, *, existing_pr, advance_main=False, advance_base=False, stale_candidate=False):
     """Run the checked-in shell with local Git and fixture-only GitHub inputs."""
     origin = tmp_path / "origin.git"
     checkout = tmp_path / "checkout"
@@ -50,10 +50,17 @@ def run_promotion_workflow(tmp_path, *, existing_pr, advance_main=False):
         git("checkout", "-b", "automation/cas-promotion")
         (checkout / "config/deploy-images.json").write_text('{"candidate":true}\n')
         shutil.copyfile(candidate_file, checkout / "config/cas-promotion.json")
+        if stale_candidate:
+            (checkout / "config/cas-promotion.json").write_text(json.dumps({**candidate,"source_revision":"b"*40}))
         git("add", "config")
         git("commit", "-m", "Existing candidate")
         git("push", "origin", "automation/cas-promotion")
         git("checkout", "main")
+    if advance_base:
+        (checkout / "trusted-main.txt").write_text("new reviewed base\n")
+        git("add", "trusted-main.txt")
+        git("commit", "-m", "New reviewed base")
+        git("push", "origin", "main")
     if advance_main:
         git("checkout", "-b", "concurrent-main")
         (checkout / "config/deploy-images.json").write_text('{"executor":"new-approved-pin"}\n')
@@ -77,7 +84,7 @@ def run_promotion_workflow(tmp_path, *, existing_pr, advance_main=False):
     gh.write_text(f"#!{sys.executable}\n" + textwrap.dedent('''\
         import json, os, pathlib, shutil, sys
         if sys.argv[1:3] == ["pr", "list"]:
-            print(json.dumps([{"number": 1, "author": {"login": "github-actions[bot]"},
+            print(json.dumps([{"number": 1, "author": {"login": "app/github-actions", "is_bot": True},
                  "baseRefName": "main", "headRefName": "automation/cas-promotion",
                  "isDraft": True}] if os.environ["EXISTING_PR"] == "1" else []))
         elif sys.argv[1:3] == ["pr", "create"]:
@@ -109,6 +116,26 @@ def test_promotion_rerun_keeps_existing_candidate_commit_and_ci(tmp_path):
     result, before, after, _body, _revision = run_promotion_workflow(tmp_path, existing_pr=True)
     assert result.returncode == 0, result.stderr
     assert after == before
+
+
+def test_promotion_syncs_unchanged_candidate_to_new_reviewed_main(tmp_path):
+    result, before, after, body, _revision = run_promotion_workflow(
+        tmp_path, existing_pr=True, advance_base=True)
+    assert result.returncode == 0, result.stderr
+    assert after != before
+    source = subprocess.run(["git","show",after.split()[0]+":trusted-main.txt"],
+                            cwd=tmp_path/"checkout",check=True,capture_output=True,text=True)
+    assert source.stdout == "new reviewed base\n"
+    assert not body.exists()
+
+
+def test_promotion_updates_existing_draft_using_real_cli_bot_identity(tmp_path):
+    result, before, after, body, revision = run_promotion_workflow(
+        tmp_path, existing_pr=True, stale_candidate=True)
+    assert result.returncode == 0, result.stderr
+    assert after != before
+    assert json.loads((tmp_path/"checkout/config/cas-promotion.json").read_text())["source_revision"] == revision
+    assert not body.exists()
 
 
 def test_promotion_pr_body_preserves_literal_revision_and_file_references(tmp_path):

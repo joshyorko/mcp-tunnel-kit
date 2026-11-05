@@ -22,6 +22,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: main
+          fetch-depth: 0
           persist-credentials: true
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
@@ -65,7 +66,9 @@ jobs:
               --base-ref refs/remotes/origin/main \
               --branch-ref "refs/remotes/origin/$PROMOTION_BRANCH" \
               --pull-requests "$temp_dir/pull-requests.json"
-            if [ "$(python -c 'import json,sys; print(len(json.load(open(sys.argv[1]))))' "$temp_dir/pull-requests.json")" = 1 ] \
+            branch_base="$(git merge-base "$base_revision" "refs/remotes/origin/$PROMOTION_BRANCH")"
+            if [ "$branch_base" = "$base_revision" ] \
+              && [ "$(python -c 'import json,sys; print(len(json.load(open(sys.argv[1]))))' "$temp_dir/pull-requests.json")" = 1 ] \
               && git show "refs/remotes/origin/$PROMOTION_BRANCH:config/deploy-images.json" | cmp -s "$temp_dir/deploy-images.json" - \
               && git show "refs/remotes/origin/$PROMOTION_BRANCH:config/cas-promotion.json" | cmp -s "$temp_dir/cas-promotion.json" -; then
               echo 'The existing draft already contains this qualified candidate; preserving its commit and CI.'
@@ -106,6 +109,6 @@ jobs:
             gh pr create --repo "$GITHUB_REPOSITORY" --draft --base main --head "$PROMOTION_BRANCH" \
               --title "[CAS] Promote qualified release $revision" --body-file "$temp_dir/pr-body.md"
           else
-            python -c 'import json,sys; rows=json.loads(sys.argv[1]); assert len(rows)==1 and rows[0]["author"]["login"]=="github-actions[bot]" and rows[0]["baseRefName"]=="main" and rows[0]["headRefName"]=="automation/cas-promotion" and rows[0]["isDraft"] is True' "$pull_requests"
+            python -c 'import json,sys; sys.path.insert(0,"scripts"); from cas_promotion_branch import validate_branch; validate_branch(commits=[],changed_files=[],pull_requests=json.loads(sys.argv[1]))' "$pull_requests"
             echo 'Updated the existing automation-owned draft CAS promotion PR.'
           fi

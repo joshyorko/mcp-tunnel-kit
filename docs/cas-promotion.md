@@ -18,6 +18,8 @@ The receipt's own `receipt_sha256` covers canonical compact JSON without that fi
 
 The CAS/schema-proxy pair is promoted together in one draft PR. The production deploy path repeats the receipt, catalog, workflow artifact and image checks before the existing environment approval gate. The deployment does not update native Codex daemons.
 
+Retries accept only the GitHub Actions bot identity in its REST or GitHub CLI representation, alongside the existing commit, file, branch, and draft checks. An older draft is refreshed through the normal writer when trusted main advances, so its CI includes the current code. Repeating the same base and qualified candidate preserves the draft commit and CI.
+
 `native-reconcile` independently checks each registered Dakota CLI/daemon over the pinned SSH endpoint and probes only `read_server_diagnostics` through Executor/CAS. Each RPC result must identify the requested target; failures remain per-device and the report omits raw diagnostic data. This probe does not wake, steer, or interrupt a thread.
 
 ## Producer availability

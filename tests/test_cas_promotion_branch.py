@@ -21,10 +21,15 @@ def draft_pr():
             "headRefName":branch.BRANCH,"isDraft":True}
 
 
-def test_update_accepts_only_bot_authored_manifest_and_evidence_branch():
+@pytest.mark.parametrize("author", [
+    {"login":"github-actions[bot]"},
+    {"login":"github-actions[bot]","is_bot":True},
+    {"login":"app/github-actions","is_bot":True},
+])
+def test_update_accepts_only_bot_authored_manifest_and_evidence_branch(author):
     branch.validate_branch(commits=[bot_commit()],
         changed_files=["config/deploy-images.json","config/cas-promotion.json"],
-        pull_requests=[draft_pr()])
+        pull_requests=[{**draft_pr(),"author":author}])
 
 
 @pytest.mark.parametrize("commits,files,prs",[
@@ -32,6 +37,10 @@ def test_update_accepts_only_bot_authored_manifest_and_evidence_branch():
     ([bot_commit()], ["scripts/deploy_control_plane.py"], []),
     ([bot_commit()], ["config/deploy-images.json"], [{**draft_pr(),"isDraft":False}]),
     ([bot_commit()], ["config/deploy-images.json"], [{**draft_pr(),"author":{"login":"human"}}]),
+    ([bot_commit()], ["config/deploy-images.json"], [{**draft_pr(),"author":{"login":"app/github-actions"}}]),
+    ([bot_commit()], ["config/deploy-images.json"], [{**draft_pr(),"author":{"login":"app/github-actions","is_bot":False}}]),
+    ([bot_commit()], ["config/deploy-images.json"], [{**draft_pr(),"author":{"login":"github-actions[bot]","is_bot":False}}]),
+    ([bot_commit()], ["config/deploy-images.json"], [{**draft_pr(),"author":{"login":"app/other-bot","is_bot":True}}]),
 ])
 def test_update_refuses_human_edits_or_non_draft_pr(commits,files,prs):
     with pytest.raises(ValueError):
