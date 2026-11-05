@@ -331,12 +331,40 @@ def status():
 
 
 def native_drift(data):
-    """Run only the fixed read-only version checks against registered Dakota endpoints."""
+    """Read fixed version checks and target-bound diagnostics; never wake a thread."""
     if data != {}:
         raise ValueError('Native drift accepts no caller-supplied target or command')
     validate_profile()
     targets = json.loads(private(STATE / 'cas-targets.json'))
-    return reconcile_native_drift(targets, NATIVE_SSH)
+    result = reconcile_native_drift(targets, NATIVE_SSH)
+    os.environ.update(EXECUTOR_URL='http://127.0.0.1:4312',
+                      EXECUTOR_PAT_FILE=str(STATE/'secrets/executor-pat'))
+    sys.path.insert(0, str(ROOT/'scripts'))
+    import compose_control as client
+    try:
+        _, session = client.executor_session()
+    except Exception:
+        session = None
+    for name, row in result['targets'].items():
+        probe = {'status': 'UNAVAILABLE', 'method': 'server/diagnostics', 'target': name}
+        row['native_rpc_smoke'] = probe
+        if row['connection'] in ('not_registered', 'blocked_or_unavailable'):
+            probe['status'] = 'BLOCKED'
+            continue
+        if session is None:
+            continue
+        diagnostics, error = _codex_tool(client, session, 'read_server_diagnostics',
+                                         {'payload': {'target': name}})
+        if error:
+            probe.update(status='FAIL', error_code=error)
+        elif (diagnostics.get('operation') != 'server/diagnostics'
+                or not isinstance(diagnostics.get('connection'), dict)
+                or diagnostics.get('connection', {}).get('target') != name
+                or not isinstance(diagnostics.get('result'), dict)):
+            probe.update(status='FAIL', error_code='NATIVE_TARGET_RESPONSE_MISMATCH')
+        else:
+            probe['status'] = 'PASS'
+    return result
 
 
 def _tunnel_key_inventory():

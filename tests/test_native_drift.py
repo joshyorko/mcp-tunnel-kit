@@ -2,7 +2,9 @@
 import importlib.util
 import json
 from pathlib import Path
+import re
 import subprocess
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -17,6 +19,52 @@ def helper():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+@pytest.mark.parametrize("cpu_response,cpu_status", [("offline", "FAIL"), ("wrong_target", "FAIL"), ("ok", "PASS")])
+def test_vm_reconciliation_checks_each_native_target_through_executor_without_emitting_diagnostics(
+        monkeypatch, cpu_response, cpu_status):
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import vm_deploy_host as host
+    targets = {"targets": {name: {} for name in ("dakota-cpu", "dakota-nvidia")}}
+    calls = []
+
+    class Session:
+        def call(self, method, request):
+            assert method == "tools/call" and request["name"] == "execute"
+            match = re.fullmatch(r"return await tools\.codex\.read_server_diagnostics\((.*)\);",
+                                 request["arguments"]["code"])
+            assert match
+            arguments = json.loads(match[1])
+            assert set(arguments) == {"payload"} and set(arguments["payload"]) == {"target"}
+            target = arguments["payload"]["target"]
+            calls.append(target)
+            if target == "dakota-cpu" and cpu_response == "offline":
+                raise TimeoutError("PRIVATE_DEVICE_DETAIL")
+            response_target = "wrong-target" if target == "dakota-cpu" and cpu_response == "wrong_target" else target
+            return {"structuredContent": {"status": "completed", "execution": {"ok": True,
+                "value": {"structuredContent": {"error": None, "result": {
+                    "operation": "server/diagnostics", "connection": {"target": response_target},
+                    "result": {"private_diagnostic": "PRIVATE_DEVICE_DETAIL"}}}}}}}
+
+    fake = SimpleNamespace(executor_session=lambda: (object(), Session()),
+                           execution=lambda response: response["structuredContent"])
+    monkeypatch.setitem(sys.modules, "compose_control", fake)
+    monkeypatch.setattr(host, "STATE", Path("/fixture/state"))
+    monkeypatch.setattr(host, "ROOT", ROOT)
+    monkeypatch.setattr(host, "validate_profile", lambda: None)
+    monkeypatch.setattr(host, "private", lambda _path: json.dumps(targets).encode())
+    monkeypatch.setattr(host, "reconcile_native_drift", lambda *_args: {
+        "mutated": False, "targets": {name: {"connection": "available"} for name in targets["targets"]}})
+    monkeypatch.setenv("EXECUTOR_URL", "fixture")
+    monkeypatch.setenv("EXECUTOR_PAT_FILE", "fixture")
+    result = host.native_drift({})
+    assert result["targets"]["dakota-cpu"]["native_rpc_smoke"]["status"] == cpu_status
+    assert result["targets"]["dakota-nvidia"]["native_rpc_smoke"] == {
+        "status": "PASS", "method": "server/diagnostics", "target": "dakota-nvidia"}
+    assert calls == ["dakota-cpu", "dakota-nvidia"]
+    assert "PRIVATE_DEVICE_DETAIL" not in json.dumps(result)
+    assert result["mutated"] is False
 
 
 def fixtures(tmp_path):

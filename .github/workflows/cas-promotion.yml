@@ -4,6 +4,7 @@ on:
   schedule:
     - cron: '17 7 * * *'
 permissions:
+  actions: write
   contents: write
   pull-requests: write
 concurrency:
@@ -38,6 +39,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          base_revision="$(git rev-parse HEAD)"
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           python scripts/propose_cas_promotion.py
@@ -50,6 +52,10 @@ jobs:
           cp config/deploy-images.json "$temp_dir/deploy-images.json"
           cp config/cas-promotion.json "$temp_dir/cas-promotion.json"
           git fetch origin main
+          if [ "$(git rev-parse refs/remotes/origin/main)" != "$base_revision" ]; then
+            echo 'Main changed during candidate generation; rerun against its current manifest.' >&2
+            exit 1
+          fi
           expected_head="$(git ls-remote --heads origin "refs/heads/$PROMOTION_BRANCH" | cut -f1)"
           if [ -n "$expected_head" ]; then
             git fetch origin "refs/heads/$PROMOTION_BRANCH:refs/remotes/origin/$PROMOTION_BRANCH"
@@ -80,6 +86,8 @@ jobs:
           git commit -m "Promote qualified CAS $revision"
           git push --force-with-lease="refs/heads/$PROMOTION_BRANCH:$expected_head" \
             origin "HEAD:refs/heads/$PROMOTION_BRANCH"
+          # Explicit dispatch avoids an extra approval for token-created PR CI.
+          gh workflow run test.yml --repo "$GITHUB_REPOSITORY" --ref "$PROMOTION_BRANCH"
           pull_requests="$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$PROMOTION_BRANCH" \
             --state open --json number,author,baseRefName,headRefName,isDraft)"
           if [ "$(python -c 'import json,sys; print(len(json.loads(sys.argv[1])))' "$pull_requests")" = 0 ]; then

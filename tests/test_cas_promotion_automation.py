@@ -16,7 +16,7 @@ import cas_promotion
 import propose_cas_promotion
 
 
-def run_promotion_workflow(tmp_path, *, existing_pr):
+def run_promotion_workflow(tmp_path, *, existing_pr, advance_main=False):
     """Run the checked-in shell with local Git and fixture-only GitHub inputs."""
     origin = tmp_path / "origin.git"
     checkout = tmp_path / "checkout"
@@ -54,6 +54,13 @@ def run_promotion_workflow(tmp_path, *, existing_pr):
         git("commit", "-m", "Existing candidate")
         git("push", "origin", "automation/cas-promotion")
         git("checkout", "main")
+    if advance_main:
+        git("checkout", "-b", "concurrent-main")
+        (checkout / "config/deploy-images.json").write_text('{"executor":"new-approved-pin"}\n')
+        git("add", "config/deploy-images.json")
+        git("commit", "-m", "Concurrent approved Executor pin")
+        git("push", "origin", "HEAD:main")
+        git("checkout", "main")
     before = git("ls-remote", "--heads", "origin", "automation/cas-promotion")
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -75,6 +82,8 @@ def run_promotion_workflow(tmp_path, *, existing_pr):
                  "isDraft": True}] if os.environ["EXISTING_PR"] == "1" else []))
         elif sys.argv[1:3] == ["pr", "create"]:
             shutil.copyfile(sys.argv[sys.argv.index("--body-file") + 1], os.environ["PR_BODY"])
+        elif sys.argv[1:4] == ["workflow", "run", "test.yml"]:
+            pathlib.Path(os.environ["CANDIDATE_CI"]).write_text(json.dumps(sys.argv[1:]))
         else:
             raise SystemExit("Unexpected GitHub fixture command")
     '''))
@@ -86,7 +95,8 @@ def run_promotion_workflow(tmp_path, *, existing_pr):
     run_environment = {**environment, "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
                        "PROMOTION_BRANCH": "automation/cas-promotion", "EXISTING_PR": str(int(existing_pr)),
                        "GITHUB_REPOSITORY": "fixture/repo", "CANDIDATE_FILE": str(candidate_file),
-                       "PR_BODY": str(body), "TMPDIR": str(tmp_path),
+                       "PR_BODY": str(body), "CANDIDATE_CI": str(tmp_path / "candidate-ci.json"),
+                       "TMPDIR": str(tmp_path),
                        "GIT_AUTHOR_DATE": "2001-01-01T00:00:00Z",
                        "GIT_COMMITTER_DATE": "2001-01-01T00:00:00Z"}
     result = subprocess.run(["bash", "-c", shell], cwd=checkout, env=run_environment,
@@ -107,6 +117,23 @@ def test_promotion_pr_body_preserves_literal_revision_and_file_references(tmp_pa
     text = body.read_text()
     assert f"`{revision}`" in text
     assert "`config/cas-promotion.json`" in text
+
+
+def test_promotion_does_not_overwrite_concurrent_main_image_updates(tmp_path):
+    result, before, after, body, _revision = run_promotion_workflow(
+        tmp_path, existing_pr=False, advance_main=True)
+    assert result.returncode != 0
+    assert after == before == ""
+    assert not body.exists()
+
+
+def test_bot_published_candidate_explicitly_dispatches_its_ci(tmp_path):
+    result, _before, _after, body, _revision = run_promotion_workflow(tmp_path, existing_pr=False)
+    assert result.returncode == 0, result.stderr
+    assert json.loads((body.parent / "candidate-ci.json").read_text()) == [
+        "workflow", "run", "test.yml", "--repo", "fixture/repo", "--ref", "automation/cas-promotion"]
+    event_line = (ROOT / ".github/workflows/test.yml").read_text().splitlines()[1]
+    assert "workflow_dispatch" in event_line
 
 
 def promotion_fixture():

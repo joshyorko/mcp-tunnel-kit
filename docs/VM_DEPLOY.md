@@ -147,8 +147,11 @@ and unrecognized states remain blocked.
 - `native-reconcile`: read the installed Codex CLI and running native daemon
   versions from `dakota-cpu` and `dakota-nvidia`, then report the qualification
   evidence attached to the deployed CAS generation. It sends only the two
-  exact version commands over the existing pinned read-only SSH endpoint.
-  Results distinguish CLI version, daemon version, and CAS method qualification.
+  exact version commands over the existing pinned read-only SSH endpoint,
+  plus a fixed `read_server_diagnostics` probe through Executor/CAS for each
+  registered target. Results distinguish CLI version, daemon version, recorded
+  CAS method qualification, and target-bound RPC availability. Probe output
+  contains only status and fixed error codes; native diagnostics are not emitted.
   Unavailable devices or an older forced-command helper remain individually
   marked unknown; this operation never updates an endpoint or installs, starts,
   or restarts a native daemon.

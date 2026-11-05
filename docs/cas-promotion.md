@@ -14,6 +14,8 @@ The receipt's own `receipt_sha256` covers canonical compact JSON without that fi
 
 The CAS/schema-proxy pair is promoted together in one draft PR. The production deploy path repeats the receipt, catalog, workflow artifact and image checks before the existing environment approval gate. The deployment does not update native Codex daemons.
 
+`native-reconcile` independently checks each registered Dakota CLI/daemon over the pinned SSH endpoint and probes only `read_server_diagnostics` through Executor/CAS. Each RPC result must identify the requested target; failures remain per-device and the report omits raw diagnostic data. This probe does not wake, steer, or interrupt a thread.
+
 ## Producer availability
 
 The consumer reports no candidate if the successful current-main publisher run has no qualified receipt artifact, which is the producer's expected outcome when qualification is partial or withheld. It blocks on an expired, malformed, or inconsistent artifact. Existing approvals for exposed experimental methods do not qualify the entire consumed-method catalog. A live promotion requires the CAS producer to publish the complete qualified receipt from trusted main and an owner-provided read-only cross-repository Actions credential.

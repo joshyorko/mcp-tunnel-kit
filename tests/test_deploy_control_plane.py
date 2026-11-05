@@ -336,6 +336,43 @@ def test_cas_rollback_refuses_to_accept_changed_executor_or_tunnel(tmp_path):
         d._assert_cas_pair_rollout({"inventory":old},after,ids)
 
 
+def test_current_cas_manifest_is_noop_before_memoryd_pinning(tmp_path):
+    _old_manifest, manifest, evidence = cas_promotion_fixture()
+    repo = tmp_path / "repo"
+    (repo / "config").mkdir(parents=True)
+    (repo / "config/deploy-images.json").write_text(json.dumps(manifest))
+    (repo / "config/cas-promotion.json").write_text(json.dumps(evidence))
+    ids = {name: "image-" + name for name in manifest["images"]}
+    before = {"authority": "kamal", "identity": "fixture-identity", "source_sha": "a" * 40,
+              "inventory": {("schema-proxy" if name == "schema_proxy" else name): {"image": image}
+                            for name, image in ids.items()}}
+    current = {**before, "manifest": manifest}
+    calls = []
+
+    def remote(action, data=None):
+        calls.append(action)
+        if action == "snapshot": return before
+        if action == "current": return current
+        if action == "image-check": return {"image_ids": ids}
+        if action in ("profile", "network-check", "devsy-check"): return {}
+        raise AssertionError("Unexpected mutation or VM operation: " + action)
+
+    args = SimpleNamespace(local=False, operation="cas", approve_full_stack=False)
+    with patch.object(d, "ROOT", repo), \
+         patch.object(d, "INSTANCE", json.loads((ROOT / "config/instance.example.json").read_text())), \
+         patch.object(d, "trusted_context"), patch.object(d, "lock", return_value=nullcontext()), \
+         patch.object(d, "remote", side_effect=remote), patch.object(d, "prove_images", return_value={}), \
+         patch.object(d, "configuration", return_value=tmp_path / "deploy.yml"), \
+         patch.object(d, "devsy_payload", return_value={}), patch.object(d, "smoke", return_value={}), \
+         patch.object(d, "_verified_cas_candidate", return_value=evidence), \
+         patch.object(d, "_pin_memoryd_before_core_change", side_effect=AssertionError("Unrelated MemoryD pin")), \
+         patch.object(d, "kamal", side_effect=AssertionError("Unexpected service restart")), \
+         patch.dict(os.environ, {"GITHUB_SHA": "b" * 40}):
+        result = d.execute(args)
+    assert result["status"] == "already-current" and result["mutated"] is False
+    assert "images" not in calls and "backup-cas" not in calls
+
+
 def test_cas_deploy_updates_pair_and_rolls_back_after_receipt_commit_failure(tmp_path):
     import json as json_module
     current_manifest,candidate_manifest,evidence=cas_promotion_fixture()

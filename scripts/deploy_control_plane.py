@@ -1872,12 +1872,12 @@ def execute(args):
         smoke(native_tuple, require_native=args.operation!='cas')
         if args.operation == 'deploy':
             remote('native-acceptance-record', native_tuple)
-        _pin_memoryd_before_core_change()
         if args.operation=='cas' and manifest==current['manifest']:
             return {'operation':'cas','status':'already-current','mutated':False,
                     'source_revision':manifest['images']['cas']['revision'],
                     'image_digest':manifest['images']['cas']['digest'],
                     'cas_method_qualification':_cas_qualification_snapshot(current)}
+        _pin_memoryd_before_core_change()
         remote('images',manifest)
         if needs_baseline:remote('baseline',current)
         backup=remote('backup-cas' if args.operation=='cas' else 'backup')
