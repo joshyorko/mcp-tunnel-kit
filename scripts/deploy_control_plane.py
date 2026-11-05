@@ -880,13 +880,16 @@ def _cas_deployment_receipt(current,manifest,evidence,*,status,failure_reason=No
     attempt=os.environ.get('GITHUB_RUN_ATTEMPT','')
     deploy_url=(f'https://github.com/joshyorko/mcp-tunnel-kit/actions/runs/{run_id}'
                 + (f'/attempts/{attempt}' if attempt else '')) if re.fullmatch(r'[1-9][0-9]*',run_id) else None
-    old=(current or {}).get('manifest',{}).get('images',{}).get('cas',{})
+    old_images=(current or {}).get('manifest',{}).get('images',{})
+    old=old_images.get('cas',{})
     new=manifest.get('images',{}).get('cas',{})
     return {'schema_version':1,'status':status,'source_revision':new.get('revision'),
             'image_digest':new.get('digest'),'qualification_run_url':qualification.get('run_url'),
             'required_ci_url':qualification.get('required_ci_url'),
             'publisher_run_url':publication.get('run_url'),'deploy_run_url':deploy_url,
             'rollback_digest':old.get('digest'),'rollback_source_revision':old.get('revision'),
+            'rollback_images':{key:copy.deepcopy(old_images.get(key,{})) for key in ('cas','schema_proxy')},
+            'rollback_generation_source_sha':(current or {}).get('source_sha'),
             'rollback_status':rollback_status,'failure_reason':failure_reason}
 
 
@@ -895,8 +898,6 @@ def _verified_cas_candidate(current_manifest,manifest,evidence):
     from kamal_model import validate_manifest
     validate_manifest(current_manifest)
     validate_manifest(manifest)
-    if current_manifest['images']['cas']!=current_manifest['images']['schema_proxy']:
-        raise ValueError('Current CAS/schema-proxy rollback generation is not a coherent pair')
     if manifest['images']['cas']!=manifest['images']['schema_proxy']:
         raise ValueError('Merged CAS/schema-proxy production pins are not a coherent pair')
     for name in ('executor','tunnel'):
@@ -907,11 +908,16 @@ def _verified_cas_candidate(current_manifest,manifest,evidence):
     source_proof=cas_promotion.verify_handoff_source(handoff,validated['handoff_source'])
     if evidence.get('comparison',{}).get('schema_proxy_promoted_together') is not True:
         raise ValueError('CAS promotion evidence does not record the paired image update')
-    cas_promotion.verify_candidate_is_current_or_newer(
-        current_manifest['images']['cas']['revision'],manifest['images']['cas']['revision'])
-    if (manifest['images']['cas']['revision']==current_manifest['images']['cas']['revision']
-            and manifest['images']['cas']['digest']!=current_manifest['images']['cas']['digest']):
-        raise ValueError('CAS source revision was republished with a different image digest')
+    checked_revisions=set()
+    for key in ('cas','schema_proxy'):
+        previous=current_manifest['images'][key]
+        if previous['revision'] not in checked_revisions:
+            cas_promotion.verify_candidate_is_current_or_newer(
+                previous['revision'],manifest['images']['cas']['revision'])
+            checked_revisions.add(previous['revision'])
+        if (manifest['images']['cas']['revision']==previous['revision']
+                and manifest['images']['cas']['digest']!=previous['digest']):
+            raise ValueError('CAS source revision was republished with a different image digest')
     run_proof=cas_promotion.verify_action_runs(handoff)
     if (not isinstance(source_proof,dict) or not isinstance(run_proof,dict)
             or source_proof.get('artifact')!=validated['handoff_source'].get('artifact')

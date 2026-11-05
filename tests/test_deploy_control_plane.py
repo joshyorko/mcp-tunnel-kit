@@ -140,8 +140,11 @@ def test_cas_workflow_resolves_merged_pins_and_has_no_manual_digest_or_native_up
     assert "cas-promotion.json" in (ROOT / "scripts/deploy_control_plane.py").read_text()
 
 
-def test_deployment_candidate_rechecks_receipt_provenance_and_rejects_unrelated_image_change():
+@pytest.mark.parametrize("legacy", [False, True])
+def test_deployment_candidate_rechecks_receipt_provenance_and_rejects_unrelated_image_change(legacy):
     current,manifest,evidence=cas_promotion_fixture()
+    if legacy:
+        current['images']['schema_proxy'].update(revision='d'*40,digest='sha256:'+'d'*64)
     verified={key:{"digest":manifest["images"]["cas"]["digest"],
                    "revision":manifest["images"]["cas"]["revision"],
                    "platform":"linux/amd64"}
@@ -155,7 +158,9 @@ def test_deployment_candidate_rechecks_receipt_provenance_and_rejects_unrelated_
         source.return_value={"artifact":evidence["handoff_source"]["artifact"]}
         assert d._verified_cas_candidate(current,manifest,evidence)==evidence
         source.assert_called_once()
-    ancestry.assert_called_once()
+    assert [call.args for call in ancestry.call_args_list] == [
+        (revision, manifest['images']['cas']['revision'])
+        for revision in dict.fromkeys(current['images'][name]['revision'] for name in ('cas','schema_proxy'))]
     runs.assert_called_once_with(evidence["handoff"])
     publisher.assert_called_once_with(evidence["handoff"])
     unrelated=json.loads(json.dumps(manifest))
@@ -373,9 +378,13 @@ def test_current_cas_manifest_is_noop_before_memoryd_pinning(tmp_path):
     assert "images" not in calls and "backup-cas" not in calls
 
 
-def test_cas_deploy_updates_pair_and_rolls_back_after_receipt_commit_failure(tmp_path):
+@pytest.mark.parametrize("legacy,drift_service", [
+    (False,None),(True,None),(True,'cas'),(True,'schema-proxy')])
+def test_cas_deploy_updates_pair_and_rolls_back_after_receipt_commit_failure(tmp_path,legacy,drift_service):
     import json as json_module
     current_manifest,candidate_manifest,evidence=cas_promotion_fixture()
+    if legacy:
+        current_manifest['images']['cas'].update(revision='f'*40,digest='sha256:'+'f'*64)
     repo=tmp_path/"repo";config=repo/"config";config.mkdir(parents=True)
     (config/"deploy-images.json").write_text(json_module.dumps(candidate_manifest))
     (config/"cas-promotion.json").write_text(json_module.dumps(evidence))
@@ -388,6 +397,8 @@ def test_cas_deploy_updates_pair_and_rolls_back_after_receipt_commit_failure(tmp
         "schema-proxy":{"container_id":"old-schema","started_at":"schema-old-start","image":"old-schema-image","state":"running","health":"healthy"}}
     before={"authority":"kamal","identity":"exec-identity","source_sha":"a"*40,
             "inventory":before_inventory}
+    if drift_service:
+        before_inventory[drift_service]['image']='unrecorded-image'
     promoted_inventory={**before_inventory,
         "cas":{"container_id":"new-cas","started_at":"cas-new-start","image":"new-cas-image","state":"running","health":"healthy"},
         "schema-proxy":{"container_id":"new-schema","started_at":"schema-new-start","image":"new-schema-image","state":"running","health":"healthy"}}
@@ -416,22 +427,32 @@ def test_cas_deploy_updates_pair_and_rolls_back_after_receipt_commit_failure(tmp
     try:
         with patch.object(d,"INSTANCE",json.loads((ROOT/"config/instance.example.json").read_text())), \
              patch.object(d,"trusted_context"),patch.object(d,"lock",return_value=nullcontext()), \
-             patch.object(d,"remote",side_effect=remote),patch.object(d,"configuration",return_value=tmp_path/"deploy.yml"), \
+             patch.object(d,"remote",side_effect=remote),patch.object(d,"configuration",return_value=tmp_path/"deploy.yml") as configuration, \
              patch.object(d,"devsy_payload",return_value={}), \
              patch.object(d,"prove_images",return_value={}),patch.object(d,"_verified_cas_candidate",return_value=evidence), \
-             patch.object(d,"_pin_memoryd_before_core_change"),patch.object(d,"kamal") as kamal, \
+             patch.object(d,"_pin_memoryd_before_core_change") as memoryd_pin,patch.object(d,"kamal") as kamal, \
              patch.object(d,"smoke",side_effect=[{},{},{}]), \
              patch.dict(os.environ,{"GITHUB_SHA":"b"*40}):
-            with pytest.raises(RuntimeError) as caught:
+            with pytest.raises(ValueError if drift_service else RuntimeError) as caught:
                 d.execute(args)
+        if drift_service:
+            assert 'Current managed image differs from recorded generation' in str(caught.value)
+            kamal.assert_not_called()
+            memoryd_pin.assert_not_called()
+            assert not any(action in ('images','backup-cas','commit','set-current') for action,_data in calls)
+            return
         receipt=json_module.loads(str(caught.value))
         assert receipt["automatic_rollback"]=="restored"
         assert receipt["deployment_receipt"]["rollback_digest"]==current_manifest["images"]["cas"]["digest"]
         assert receipt["deployment_receipt"]["rollback_source_revision"]==current_manifest["images"]["cas"]["revision"]
+        assert receipt["deployment_receipt"]["rollback_images"]=={
+            name:current_manifest['images'][name] for name in ('cas','schema_proxy')}
+        assert receipt['deployment_receipt']['rollback_generation_source_sha']==generation['source_sha']
         assert [call.args[2] for call in kamal.call_args_list]==[
             "schema-proxy","cas","schema-proxy","cas"]
         assert sum(action=="commit" for action,_data in calls)==1
         assert calls[-1]==("set-current",generation)
+        assert configuration.call_args_list[-1].args[1]==current_manifest
     finally:
         d.ROOT=monkeypatch_root
 
