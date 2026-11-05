@@ -5,6 +5,7 @@ import hashlib
 import re
 import sys
 from pathlib import Path, PurePosixPath
+from instance_profile import coordination_directory
 
 _REPOSITORIES = {
     "cas": "ghcr.io/joshyorko/codex-action-server",
@@ -96,8 +97,11 @@ def validate_manifest(manifest):
 
 
 def _validate_profile(profile):
-    if not _keys(profile, _PROFILE_KEYS):
+    if (not isinstance(profile, dict) or not _PROFILE_KEYS <= set(profile)
+            or set(profile) - _PROFILE_KEYS - {"cas_coordination_policy_dir"}):
         _invalid()
+    if "cas_coordination_policy_dir" in profile:
+        coordination_directory(profile["cas_coordination_policy_dir"], profile)
     if not isinstance(profile.get("host"), str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", profile["host"]):
         _invalid()
     if not isinstance(profile.get("ssh_user"), str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]{0,63}", profile["ssh_user"]):
@@ -294,6 +298,9 @@ def render(profile, manifest, *, allow_memoryd_mcp=True, memoryd_recovery=None):
         },
         volumes=cas_volumes,
     )
+    if "cas_coordination_policy_dir" in profile:
+        cas["volumes"].append(profile["cas_coordination_policy_dir"] + ":/run/cas-coordination:ro")
+        cas["env"]["clear"]["CODEX_ACTION_COORDINATION_POLICY"] = "/run/cas-coordination/policy.json"
 
     tunnel = _accessory(
         "mcp-control-plane-tunnel",

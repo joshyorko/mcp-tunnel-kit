@@ -25,6 +25,18 @@ def _path(value):
     return value
 
 
+def coordination_directory(value, vm):
+    """A single private policy directory, never a caller-defined mount specification."""
+    value = _path(value)
+    path = PurePosixPath(value)
+    if ":" in value or path == PurePosixPath("/"):
+        raise ValueError("CAS coordination policy directory is invalid")
+    for protected in (vm["repo_dir"], str(PurePosixPath(vm["state_dir"]) / "cas")):
+        if path == PurePosixPath(protected) or path.is_relative_to(protected):
+            raise ValueError("CAS coordination policy must be outside source and writable CAS data")
+    return value
+
+
 def validate(value):
     """Validate and return the exact supported schema without reading host files."""
     if not _keys(value, {"schema_version", "deploy_host", "vm"}) or type(value["schema_version"]) is not int or value["schema_version"] != 1:
@@ -44,10 +56,14 @@ def validate(value):
         raise ValueError("Instance profile host-key fingerprint is invalid")
 
     vm = value["vm"]
-    if not _keys(vm, {"repo_dir", "state_dir", "network", "native_ssh_dir", "devsy"}):
+    required = {"repo_dir", "state_dir", "network", "native_ssh_dir", "devsy"}
+    if (not isinstance(vm, dict) or not required <= set(vm)
+            or set(vm) - required - {"cas_coordination_policy_dir"}):
         raise ValueError("Instance profile VM configuration is incomplete")
     for key in ("repo_dir", "state_dir", "native_ssh_dir"):
         _path(vm[key])
+    if "cas_coordination_policy_dir" in vm:
+        coordination_directory(vm["cas_coordination_policy_dir"], vm)
     network = vm["network"]
     if not _keys(network, {"name", "subnet", "gateway"}) or not isinstance(network["name"], str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,63}", network["name"]):
         raise ValueError("Instance profile network is invalid")

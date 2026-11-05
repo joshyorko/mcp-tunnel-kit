@@ -26,6 +26,7 @@ import uuid
 from kamal_model import render,validate_manifest
 from image_provenance import verify as verify_provenance
 import cas_promotion
+import coordination_policy
 from instance_profile import DEFAULT_PATH as DEFAULT_INSTANCE_PROFILE, encode as encode_instance_profile, load as load_instance_profile
 from devsy_vm_bootstrap import MISSING_KUBECTL_REASON
 ROOT=Path(__file__).resolve().parents[1]
@@ -178,7 +179,7 @@ def lock():
 
 def remote_source():
     bootstrap='import sys,types\n'
-    for name in ('instance_profile','prepare_recovery_generation','devsy_vm_bootstrap','scope_binding_rebind','bridge_kubectl_path','compose_control','native_drift'):
+    for name in ('instance_profile','coordination_policy','prepare_recovery_generation','devsy_vm_bootstrap','scope_binding_rebind','bridge_kubectl_path','compose_control','native_drift'):
         source=(ROOT/'scripts'/(name+'.py')).read_text()
         bootstrap+=('_module=types.ModuleType('+repr(name)+')\n'
                     +'_module.__file__='+repr(str(ROOT/'scripts'/(name+'.py')))+'\n'
@@ -209,9 +210,44 @@ def devsy_payload():
 def profile():
     if INSTANCE is None:raise ValueError('Private instance profile must be loaded before rendering deployment configuration')
     vm=INSTANCE['vm'];native=Path(vm['native_ssh_dir']);devsy=vm['devsy']
-    return {'host':HOST,'network':vm['network'],'ssh_user':INSTANCE['deploy_host']['user'],'ssh_key':str(KEY),'ssh_known_hosts':str(KNOWN),'ssh_config':str(SSH),'state_dir':vm['state_dir'],'repo_dir':VMROOT,
+    result = {'host':HOST,'network':vm['network'],'ssh_user':INSTANCE['deploy_host']['user'],'ssh_key':str(KEY),'ssh_known_hosts':str(KNOWN),'ssh_config':str(SSH),'state_dir':vm['state_dir'],'repo_dir':VMROOT,
             'cas_ssh_config_source':str(native/'ssh_config.native'),'cas_ssh_known_hosts_source':str(native/'known_hosts.native'),'cas_identity_source':str(native/'identity'),
             'devsy':devsy}
+    if 'cas_coordination_policy_dir' in vm:
+        result['cas_coordination_policy_dir'] = vm['cas_coordination_policy_dir']
+    return result
+
+
+def coordination_policy_override(directory):
+    """Overlay only the owner-selected policy directory without rewriting its profile."""
+    if directory is None or directory == '':
+        return
+    if INSTANCE is None:
+        raise ValueError('Private instance profile must be loaded before policy opt-in')
+    selected = copy.deepcopy(INSTANCE)
+    selected['vm']['cas_coordination_policy_dir'] = directory
+    configure_instance(selected)
+
+
+def install_coordination_policy(path):
+    if INSTANCE is None or 'cas_coordination_policy_dir' not in INSTANCE['vm']:
+        raise ValueError('CAS coordination policy directory is not opted in')
+    raw = coordination_policy.read_file(path, owner=os.geteuid())
+    return remote('coordination-policy-install', {'policy_json': raw.decode('utf-8')})
+
+
+def require_coordination_policy(current):
+    recorded = current.get('cas_coordination_policy_dir')
+    desired = INSTANCE['vm'].get('cas_coordination_policy_dir')
+    if recorded is not None and recorded != desired:
+        raise ValueError('Existing CAS coordination policy must be preserved; supply its --cas-coordination-policy-dir')
+
+
+def generation_configuration(directory, generation):
+    recorded = generation.get('cas_coordination_policy_dir')
+    if recorded is None and 'cas_coordination_policy_dir' not in INSTANCE['vm']:
+        return configuration(directory, generation['manifest'])
+    return configuration(directory, generation['manifest'], coordination_policy_dir=recorded)
 
 
 def kamal(config,operation,name):
@@ -283,8 +319,16 @@ def memoryd_rollout_recovery_lock(rollout_id):
         except subprocess.TimeoutExpired:process.terminate();process.wait(timeout=5)
 
 
-def configuration(directory,manifest,*,allow_memoryd_mcp=True,memoryd_recovery=None):
-    p=Path(directory)/'deploy.yml';p.write_text(render(profile(),manifest,allow_memoryd_mcp=allow_memoryd_mcp,memoryd_recovery=memoryd_recovery));p.chmod(0o600);return p
+_PROFILE_POLICY = object()
+
+
+def configuration(directory,manifest,*,allow_memoryd_mcp=True,memoryd_recovery=None,coordination_policy_dir=_PROFILE_POLICY):
+    selected = profile()
+    if coordination_policy_dir is not _PROFILE_POLICY:
+        selected.pop('cas_coordination_policy_dir', None)
+        if coordination_policy_dir is not None:
+            selected['cas_coordination_policy_dir'] = coordination_policy_dir
+    p=Path(directory)/'deploy.yml';p.write_text(render(selected,manifest,allow_memoryd_mcp=allow_memoryd_mcp,memoryd_recovery=memoryd_recovery));p.chmod(0o600);return p
 
 
 def native_codex_tuple(args, *, require_valid=True):
@@ -790,7 +834,7 @@ def stop_owned(config):
 
 
 def restore(previous,directory,native_tuple=None):
-    config=configuration(directory,previous['manifest'])
+    config=generation_configuration(directory,previous)
     current=remote('inventory')
     if current['kamal_present']:stop_owned(config)
     sync_source(previous['source_sha'])
@@ -812,7 +856,7 @@ def restore(previous,directory,native_tuple=None):
 
 
 def restore_cas(previous,directory,native_tuple=None,*,before=None):
-    config=configuration(directory,previous['manifest'])
+    config=generation_configuration(directory,previous)
     for service in ('schema-proxy','cas'):
         kamal(config,'reboot',service);remote('wait',{'owner':'kamal','service':service})
     smoke(native_tuple);after=remote('snapshot')
@@ -1718,6 +1762,7 @@ def execute(args):
         raise ValueError('qualified native Codex tuple is required for protected Homebrew tap operations')
     if INSTANCE is None:
         configure_instance(getattr(args,'instance_profile',None) or os.environ.get('KAMAL_INSTANCE_PROFILE',DEFAULT_INSTANCE_PROFILE))
+    coordination_policy_override(getattr(args, 'cas_coordination_policy_dir', None))
     trusted_context(os.environ,args.local,args.operation)
     if args.operation in ('adopt','deploy','rollback') and not args.approve_full_stack:raise ValueError('Explicit full-stack approval input required')
     sha=os.environ.get('GITHUB_SHA') or subprocess.check_output(['git','rev-parse','HEAD'],cwd=ROOT,text=True).strip()
@@ -1822,6 +1867,8 @@ def execute(args):
         if args.operation=='rollback':
             current=remote('current');previous=remote('rollback-target')
             if current is None:raise ValueError('No recorded deployment generation exists')
+            require_coordination_policy(current)
+            require_coordination_policy(previous)
             _pin_memoryd_before_core_change()
             remote('profile')
             previous['publication_proof']=prove_images(previous['manifest'],previous)
@@ -1848,6 +1895,7 @@ def execute(args):
         defaults=json.loads((ROOT/'config/deploy-images.json').read_text())
         if current is None:
             current={'authority':before['authority'],'source_sha':before['source_sha'],'manifest':defaults,'identity':before['identity']}
+        require_coordination_policy(current)
         if before['identity']!=current['identity']:raise ValueError('Executor identity drift')
         current['publication_proof']=prove_images(current['manifest'],current)
         promotion_evidence=None
@@ -1878,7 +1926,8 @@ def execute(args):
         smoke(native_tuple, require_native=args.operation!='cas')
         if args.operation == 'deploy':
             remote('native-acceptance-record', native_tuple)
-        if args.operation=='cas' and manifest==current['manifest']:
+        if (args.operation=='cas' and manifest==current['manifest']
+                and current.get('cas_coordination_policy_dir') == INSTANCE['vm'].get('cas_coordination_policy_dir')):
             return {'operation':'cas','status':'already-current','mutated':False,
                     'source_revision':manifest['images']['cas']['revision'],
                     'image_digest':manifest['images']['cas']['digest'],
@@ -1927,6 +1976,8 @@ def execute(args):
                 deploy_receipt=None
                 generation={'authority':'kamal','source_sha':deployed_source,'manifest':manifest,
                             'identity':after['identity'],'publication_proof':publication}
+            if 'cas_coordination_policy_dir' in INSTANCE['vm']:
+                generation['cas_coordination_policy_dir'] = INSTANCE['vm']['cas_coordination_policy_dir']
             remote('commit',generation)
             result={'operation':args.operation,'authority':'kamal','inventory':after['inventory'],
                     'smoke':smoke_result,'identity_preserved':True,'backup':backup,
@@ -1961,6 +2012,7 @@ def main():
     p=argparse.ArgumentParser();p.add_argument('operation',choices=('devsy-bridge-path-check','devsy-bridge-path-apply','devsy-scope-rebind-check','devsy-scope-rebind','preflight','status','native-reconcile','memoryd','memoryd-transfer','memoryd-network','memoryd-register','memoryd-registration-reconcile','memoryd-legacy-reconcile','adopt','cas','deploy','rollback','devsy-check','devsy-apply','devsy-rollback','devsy-tap-reconcile-check','devsy-tap-reconcile','devsy-tap-rollback-check','devsy-tap-rollback'));p.add_argument('--approve-bridge-kubectl-path',action='store_true');p.add_argument('--approve-scope-binding-rebind',action='store_true');p.add_argument('--approve-full-stack',action='store_true');p.add_argument('--approve-host-devsy-apply',action='store_true');p.add_argument('--approve-host-devsy-rollback',action='store_true');p.add_argument('--approve-host-tap-reconciliation',action='store_true');p.add_argument('--approve-host-tap-rollback',action='store_true');p.add_argument('--tap-reconciliation-run-id',default=os.environ.get('TAP_RECONCILIATION_RUN_ID'));p.add_argument('--tap-reconciliation-run-attempt',default=os.environ.get('TAP_RECONCILIATION_RUN_ATTEMPT'));p.add_argument('--instance-profile',help='Absolute path to an owned mode-0600 private instance profile');p.add_argument('--native-target',default=os.environ.get('NATIVE_TARGET'));p.add_argument('--native-cwd',default=os.environ.get('NATIVE_CWD'));p.add_argument('--native-thread-id',default=os.environ.get('NATIVE_THREAD_ID'));p.add_argument('--local',action='store_true',help='Approved Pi break-glass, or bin/kamal with explicit private local config')
     p.add_argument('--confirm-import-quiescent',action='store_true')
     p.add_argument('--approve-legacy-abandon',action='store_true')
+    p.add_argument('--cas-coordination-policy-dir', help='Owner-selected private VM policy directory; no profile or credential rewrite')
     args=p.parse_args()
     try:print(json.dumps(execute(args),indent=2))
     except Exception as e:print(str(e),file=sys.stderr);sys.exit(1)

@@ -28,6 +28,7 @@ import uuid
 import zipfile
 from instance_profile import decode, load as load_instance_profile, validate
 from native_drift import reconcile as reconcile_native_drift
+import coordination_policy
 
 ROOT = None
 STATE = None
@@ -36,6 +37,7 @@ PUBLIC_DOCKER_CONFIG = None
 NETWORK = None
 NATIVE_SSH = None
 DEVSY = None
+COORDINATION_POLICY_DIR = None
 NAMES = {'compose': {'executor':'codex-control-plane-executor-1','schema-proxy':'codex-control-plane-executor-schema-proxy-1','cas':'codex-control-plane-codex-action-server-1','tunnel':'codex-control-plane-tunnel-client-1'},
          'kamal': {name:'mcp-control-plane-'+name for name in ('executor','schema-proxy','cas','tunnel')}}
 MEMORYD_MIN_AVAILABLE_KB = 1_572_864
@@ -82,7 +84,7 @@ with tempfile.TemporaryDirectory(prefix='memoryd-readonly-', dir='/tmp') as dire
 
 def configure_profile(profile):
     """Bind this standalone remote script to validated instance paths."""
-    global ROOT,STATE,STORE,PUBLIC_DOCKER_CONFIG,NETWORK,NATIVE_SSH,DEVSY
+    global ROOT,STATE,STORE,PUBLIC_DOCKER_CONFIG,NETWORK,NATIVE_SSH,DEVSY,COORDINATION_POLICY_DIR
     profile=validate(profile)
     ROOT=Path(profile['vm']['repo_dir'])
     STATE=Path(profile['vm']['state_dir'])
@@ -91,6 +93,17 @@ def configure_profile(profile):
     NETWORK=profile['vm']['network']
     NATIVE_SSH=Path(profile['vm']['native_ssh_dir'])
     DEVSY=profile['vm']['devsy']
+    COORDINATION_POLICY_DIR = profile['vm'].get('cas_coordination_policy_dir')
+
+
+def install_coordination_policy(data):
+    if COORDINATION_POLICY_DIR is None:
+        raise ValueError('CAS coordination policy directory is not opted in')
+    if (not isinstance(data, dict) or set(data) != {'policy_json'}
+            or not isinstance(data['policy_json'], str)
+            or len(data['policy_json'].encode('utf-8')) > coordination_policy.MAX_BYTES):
+        raise ValueError('CAS coordination policy transfer is invalid')
+    return coordination_policy.install(COORDINATION_POLICY_DIR, data['policy_json'].encode('utf-8'))
 
 
 def run(args, timeout=180, env=None):
@@ -3316,6 +3329,8 @@ def lifecycle_check():
 
 
 def validate_profile():
+    if COORDINATION_POLICY_DIR is not None:
+        coordination_policy.check(COORDINATION_POLICY_DIR)
     for path in (STATE/'cas-targets.json',Path(DEVSY['config_source']),Path(DEVSY['kubeconfig_source'])):
         private(path)
     ssh=NATIVE_SSH
@@ -4557,7 +4572,8 @@ def main():
     if action == 'backup':
         raw = sys.stdin.read()
         data = json.loads(raw) if raw else {}
-    if action=='native-acceptance':result=saved_native_acceptance()
+    if action=='coordination-policy-install':result=install_coordination_policy(json.load(sys.stdin))
+    elif action=='native-acceptance':result=saved_native_acceptance()
     elif action=='native-acceptance-record':result=record_native_acceptance(data)
     elif action=='tunnel-key-prepare':result=tunnel_key_prepare(data)
     elif action=='tunnel-key-apply':result=tunnel_key_apply()

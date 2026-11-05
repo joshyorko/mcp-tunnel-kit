@@ -32,6 +32,10 @@ on:
         description: Operator-verified persistent Dakota thread id for full acceptance
         type: string
         required: false
+      cas_coordination_policy_dir:
+        description: Optional private VM CAS policy directory (preserve existing opt-in on later promotions)
+        type: string
+        required: false
       approve_full_stack:
         description: Explicitly approve bounded downtime for adopt, deploy, or rollback
         type: boolean
@@ -112,6 +116,7 @@ jobs:
           NATIVE_TARGET: ${{ inputs.native_target }}
           NATIVE_CWD: ${{ inputs.native_cwd }}
           NATIVE_THREAD_ID: ${{ inputs.native_thread_id }}
+          CAS_COORDINATION_POLICY_DIR: ${{ inputs.cas_coordination_policy_dir }}
           FULL_APPROVAL: ${{ inputs.approve_full_stack }}
           BRIDGE_KUBECTL_PATH_APPROVAL: ${{ inputs.approve_bridge_kubectl_path }}
           SCOPE_BINDING_APPROVAL: ${{ inputs.approve_scope_binding_rebind }}
@@ -126,6 +131,7 @@ jobs:
           set -euo pipefail
           if [ -n "${OPTIONAL_TUNNEL_API_KEY:-}" ]; then export CONTROL_PLANE_API_KEY="$OPTIONAL_TUNNEL_API_KEY"; fi
           args=("$OPERATION")
+          if [ -n "$CAS_COORDINATION_POLICY_DIR" ]; then args+=(--cas-coordination-policy-dir "$CAS_COORDINATION_POLICY_DIR"); fi
           if [ "$FULL_APPROVAL" = true ]; then args+=(--approve-full-stack); fi
           if [ "$BRIDGE_KUBECTL_PATH_APPROVAL" = true ]; then args+=(--approve-bridge-kubectl-path); fi
           if [ "$SCOPE_BINDING_APPROVAL" = true ]; then args+=(--approve-scope-binding-rebind); fi
