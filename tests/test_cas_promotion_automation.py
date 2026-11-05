@@ -224,3 +224,15 @@ def test_local_patchraptor_policy_inherits_central_rules_and_excludes_cas_pair()
     images=next(rule for rule in rules if "ghcr.io/usefulsoftwareco/executor-selfhost" in rule.get("matchPackageNames",[]))
     assert images["groupName"]=="Tunnel-kit deployment images"
     assert images["dependencyDashboardApproval"] is True
+
+
+def test_vulnerability_updates_keep_approval_and_ci_before_pr_creation():
+    config=json.loads((ROOT/".github/renovate.json5").read_text())
+    # Renovate 43 forces these vulnerability defaults after ordinary package rules.
+    forced={"dependencyDashboardApproval":False, "prCreation":"immediate",
+            **config.get("vulnerabilityAlerts",{})}
+    effective={**config, **forced}
+    assert effective["dependencyDashboardApproval"] is True
+    assert effective["prCreation"]=="status-success"
+    assert effective["automerge"] is False
+    assert effective["platformAutomerge"] is False
