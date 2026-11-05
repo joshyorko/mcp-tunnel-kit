@@ -11,11 +11,11 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PINNED_PRODUCER_SHA = "a657ac07329f617305098f06847872bf38043193"
-PRODUCER_RECEIPT_BLOB_SHA = "6bbf7bb4516d42cd459c3adc099d8669afdd083d"
+PINNED_PRODUCER_SHA = "b8b50c866323116c4a6598dfd8a65e7b8cc5e1c3"
+PRODUCER_RECEIPT_BLOB_SHA = "fb525200b39070fea3da7c2dc52a44e2ce0b1efa"
 PRODUCER_SCHEMA_BLOB_SHA = "ba72720b346a90ef7facd689852da498cfe32115"
-PRODUCER_CATALOG_BLOB_SHA = "583c0c118b9dd0d849431b3d6ce1c209e79e86d3"
-PRODUCER_RECEIPT_SHA256 = "0cdb36d579a61cacbd79269c299116e1d4528156786db2b23292293e523fe925"
+PRODUCER_CATALOG_BLOB_SHA = "205ed86bf555c5e1e507621a6dc0d0a91c5ae99c"
+PRODUCER_RECEIPT_SHA256 = "ce1b7fe8ee2f51f3ccaf81a6d3d448efde703aefe2c55694f73f7efb5c55e1ca"
 
 
 def git_blob_sha(path):
@@ -434,12 +434,12 @@ def test_artifact_download_rejects_unapproved_redirect_without_forwarding_token(
     assert requests[0].headers["Authorization"] == "Bearer opaque-test-token"
 
 
-def test_artifact_download_fails_closed_without_cross_repository_read_credential(monkeypatch):
+def test_artifact_download_fails_closed_without_authenticated_read_token(monkeypatch):
     module = helper()
     monkeypatch.delenv("CAS_ARTIFACTS_READ_TOKEN", raising=False)
     monkeypatch.setattr(module, "build_opener", lambda *_args: pytest.fail("network before credential check"))
     url = f"https://api.github.com/repos/{module.CAS_REPOSITORY}/actions/artifacts/91/zip"
-    with pytest.raises(module.PromotionError, match="cross-repository Actions read credential"):
+    with pytest.raises(module.PromotionError, match="authenticated Actions read token"):
         module._github_bytes(url)
 
 

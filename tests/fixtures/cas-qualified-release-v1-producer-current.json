@@ -310,7 +310,7 @@
       "asset_url": "https://github.com/openai/codex/releases/download/rust-v9.9.9/codex-x86_64-unknown-linux-musl.tar.gz",
       "binary_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
       "fixture_path": "tests/fixtures/protocol/codex_9.9.9_native_methods.json",
-      "fixture_sha256": "e8ee18a7a7c3dde6fda2bb6678bfa91c00855bb9add4dc3245b7836b0f689ebc",
+      "fixture_sha256": "292a6028f8bd5fa582f70b6fb73de3b20a7aa4db2af4a886b2044f478a50a298",
       "qualification_run_url": "https://github.com/joshyorko/codex-action-server/actions/runs/999999999",
       "tag": "rust-v9.9.9",
       "version": "9.9.9"
@@ -558,7 +558,7 @@
     },
     "withheld_methods": []
   },
-  "receipt_sha256": "0cdb36d579a61cacbd79269c299116e1d4528156786db2b23292293e523fe925",
+  "receipt_sha256": "ce1b7fe8ee2f51f3ccaf81a6d3d448efde703aefe2c55694f73f7efb5c55e1ca",
   "schema_version": 1,
   "source": {
     "commit_url": "https://github.com/joshyorko/codex-action-server/commit/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",

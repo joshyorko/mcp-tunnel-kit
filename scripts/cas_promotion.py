@@ -432,7 +432,7 @@ def _github_bytes(url: str) -> bytes:
     token = os.environ.get("CAS_ARTIFACTS_READ_TOKEN")
     if (not token or len(token) > 8192
             or any(ord(char) < 0x21 or ord(char) > 0x7e for char in token)):
-        raise PromotionError("CAS artifact download needs a cross-repository Actions read credential")
+        raise PromotionError("CAS artifact download needs an authenticated Actions read token")
 
     class StopRedirect(HTTPRedirectHandler):
         def redirect_request(self, _req, _fp, _code, _msg, _headers, _newurl):

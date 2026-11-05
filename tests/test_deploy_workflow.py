@@ -27,7 +27,7 @@ class DeployWorkflowTests(unittest.TestCase):
         self.assertIn("if: github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch'", text)
         self.assertIn("runs-on: [self-hosted, Linux, ARM64, pi5-01, kamal, mcp-control-plane]", text)
         self.assertIn("environment: control-plane-production", text)
-        self.assertRegex(text, r"(?ms)^permissions:\n  contents: read\nconcurrency:")
+        self.assertRegex(text, r"(?ms)^permissions:\n  actions: read\n  contents: read\nconcurrency:")
         self.assertIn("cancel-in-progress: false", text)
         self.assertIn("uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd", text)
         self.assertIn("ref: ${{ github.sha }}", text)

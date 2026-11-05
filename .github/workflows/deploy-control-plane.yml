@@ -69,6 +69,7 @@ on:
         type: string
         required: false
 permissions:
+  actions: read
   contents: read
 concurrency:
   group: mcp-control-plane-production
@@ -120,7 +121,7 @@ jobs:
           HOST_TAP_ROLLBACK_APPROVAL: ${{ inputs.approve_host_tap_rollback }}
           TAP_RECONCILIATION_RUN_ID: ${{ inputs.tap_reconciliation_run_id }}
           TAP_RECONCILIATION_RUN_ATTEMPT: ${{ inputs.tap_reconciliation_run_attempt }}
-          CAS_ARTIFACTS_READ_TOKEN: ${{ inputs.operation == 'cas' && secrets.CAS_ARTIFACTS_READ_TOKEN || '' }}
+          CAS_ARTIFACTS_READ_TOKEN: ${{ inputs.operation == 'cas' && (secrets.CAS_ARTIFACTS_READ_TOKEN || github.token) || '' }}
         run: |
           set -euo pipefail
           if [ -n "${OPTIONAL_TUNNEL_API_KEY:-}" ]; then export CONTROL_PLANE_API_KEY="$OPTIONAL_TUNNEL_API_KEY"; fi

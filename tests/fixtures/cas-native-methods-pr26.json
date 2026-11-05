@@ -296,8 +296,10 @@
       ],
       "regression_tests": [
         "tests/test_action_server_validation.py",
+        "tests/test_action_transport_failures.py",
         "tests/test_control_actions.py",
         "tests/test_mcp_annotations.py",
+        "tests/test_mcp_status_bounds.py",
         "tests/test_package_composition.py",
         "tests/test_protocol_contracts.py",
         "tests/test_rpc_lifecycle.py"
@@ -2313,6 +2315,7 @@
       ],
       "regression_tests": [
         "tests/test_action_server_validation.py",
+        "tests/test_action_transport_failures.py",
         "tests/test_actions.py",
         "tests/test_capability_metadata.py",
         "tests/test_container_image.py",
@@ -2643,6 +2646,7 @@
       ],
       "regression_tests": [
         "tests/test_action_server_validation.py",
+        "tests/test_action_transport_failures.py",
         "tests/test_actions.py",
         "tests/test_control_actions.py",
         "tests/test_dispatch_policy.py",
@@ -2705,6 +2709,7 @@
       ],
       "regression_tests": [
         "tests/test_action_server_validation.py",
+        "tests/test_action_transport_failures.py",
         "tests/test_actions.py",
         "tests/test_capability_metadata.py",
         "tests/test_container_image.py",

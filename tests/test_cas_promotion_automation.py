@@ -196,17 +196,18 @@ def test_pr_lane_is_daily_and_deduplicates_only_a_draft_automation_branch():
     assert "--force-with-lease" in workflow
     assert "gh pr create" in workflow and "--draft" in workflow
     assert "enable-auto-merge" not in workflow
-    assert "CAS_ARTIFACTS_READ_TOKEN: ${{ secrets.CAS_ARTIFACTS_READ_TOKEN }}" in workflow
+    assert "CAS_ARTIFACTS_READ_TOKEN: ${{ secrets.CAS_ARTIFACTS_READ_TOKEN || github.token }}" in workflow
 
 
 def test_production_workflow_remains_manual_approval_gated_and_does_not_auto_deploy():
     workflow=(ROOT/".github/workflows/deploy-control-plane.yml").read_text()
     assert "on:\n  workflow_dispatch:" in workflow
     assert "environment: control-plane-production" in workflow
+    assert "actions: read" in workflow
     assert "refs/heads/main" in workflow
     assert "cas_digest:" not in workflow and "cas_revision:" not in workflow
     assert "push:" not in workflow and "workflow_run:" not in workflow
-    assert "CAS_ARTIFACTS_READ_TOKEN: ${{ inputs.operation == 'cas' && secrets.CAS_ARTIFACTS_READ_TOKEN || '' }}" in workflow
+    assert "CAS_ARTIFACTS_READ_TOKEN: ${{ inputs.operation == 'cas' && (secrets.CAS_ARTIFACTS_READ_TOKEN || github.token) || '' }}" in workflow
 
 
 def test_local_patchraptor_policy_inherits_central_rules_and_excludes_cas_pair():
