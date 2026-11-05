@@ -311,6 +311,20 @@ def smoke_request(native_tuple, *, require_native=False):
     return {"native_codex": native_tuple, "require_native": bool(require_native)}
 
 
+def resolve_native_acceptance(native_tuple):
+    if native_tuple is not None:
+        return native_tuple
+    saved = remote('native-acceptance')
+    try:
+        if not isinstance(saved, dict) or set(saved) != {'target', 'cwd', 'thread_id'}:
+            raise ValueError('missing acceptance')
+        return native_codex_tuple(argparse.Namespace(
+            native_target=saved['target'], native_cwd=saved['cwd'],
+            native_thread_id=saved['thread_id']))
+    except ValueError:
+        raise RuntimeError('Native acceptance is not configured: supply NATIVE_TARGET, NATIVE_CWD and NATIVE_THREAD_ID once to save verified VM settings') from None
+
+
 def smoke(native_tuple, *, require_native=False):
     result = remote("smoke", smoke_request(native_tuple, require_native=require_native))
     if require_native and result.get("native_read", {}).get("status") != "PASS":
@@ -1620,7 +1634,63 @@ def _pin_memoryd_before_core_change():
         raise ValueError('MemoryD adapter image could not be pinned before the core deployment')
 
 
+def deployment_tunnel_key(*, local=False):
+    import compose_control as c
+    values = c.credential_dotenv() if local else {}
+    value = os.environ.get('CONTROL_PLANE_API_KEY', values.get('CONTROL_PLANE_API_KEY'))
+    if value is not None and (not isinstance(value, str)
+            or not re.fullmatch(r'[!-~]{1,8192}', value)
+            or any(char in value for char in '\\"\'')):
+        raise ValueError('Set CONTROL_PLANE_API_KEY to one nonempty literal token')
+    return value
+
+
+def rotate_tunnel_key(key, current, directory, native_tuple):
+    if native_tuple is None:
+        raise RuntimeError('Native acceptance is not configured: supply NATIVE_TARGET, NATIVE_CWD and NATIVE_THREAD_ID before staging credentials')
+    request = {'api_key': key}
+    plan = remote('tunnel-key-prepare', request)
+    if not plan['changed']:
+        return False
+    config = configuration(directory, current.get('manifest', {}))
+    phase = 'Devsy preflight'
+    try:
+        remote('devsy-check', devsy_payload())
+        phase = 'native acceptance'
+        smoke(native_tuple, require_native=True)
+        phase = 'rotation'
+        kamal(config, 'stop', 'tunnel')
+        remote('tunnel-key-apply')
+        kamal(config, 'start', 'tunnel')
+        remote('wait', {'owner': 'kamal', 'service': 'tunnel'})
+        remote('tunnel-key-accept')
+        return True
+    except Exception:
+        if phase != 'rotation':
+            raise RuntimeError('Key rotation blocked by ' + phase + '; live credentials unchanged; run bin/kamal preflight for details') from None
+        try:
+            # A lost acceptance reply must never roll back an accepted key.
+            pending = remote('tunnel-key-prepare', request)
+            if not pending['changed']:
+                return True
+            kamal(config, 'stop', 'tunnel')
+            restored = remote('tunnel-key-restore')
+            if restored.get('accepted'):
+                kamal(config, 'start', 'tunnel')
+                return True
+            if restored['was_running']:
+                kamal(config, 'start', 'tunnel')
+                if restored['was_healthy']:
+                    remote('wait', {'owner': 'kamal', 'service': 'tunnel'})
+        except Exception:
+            raise RuntimeError('Tunnel key rotation is incomplete; private recovery state retained; rerun bin/kamal deploy') from None
+        raise RuntimeError('Tunnel key rotation failed; original key and running state restored') from None
+
+
 def execute(args):
+    tunnel_api_key = getattr(args, 'tunnel_api_key', None)
+    if args.operation == 'deploy' and not hasattr(args, 'tunnel_api_key'):
+        tunnel_api_key = deployment_tunnel_key()
     if getattr(args,'approve_legacy_abandon',False) and args.operation!='memoryd-legacy-reconcile':
         raise ValueError('Legacy abandonment approval is only valid for MemoryD legacy reconciliation')
     if args.operation=='memoryd-legacy-reconcile' and not getattr(args,'approve_legacy_abandon',False):
@@ -1654,6 +1724,8 @@ def execute(args):
             with memoryd_rollout_recovery_lock(rollout_id), tempfile.TemporaryDirectory(prefix='mcp-kamal-rollout-recovery-') as directory:
                 return recover_memoryd_rollout(args.operation,rollout_id,directory)
     with lock(), tempfile.TemporaryDirectory(prefix='mcp-kamal-') as directory:
+        if args.operation == 'deploy':
+            native_tuple = resolve_native_acceptance(native_tuple)
         if args.operation=='memoryd-rollout-release':
             return release_memoryd_rollout(rollout_id,directory)
         if args.operation in ('devsy-bridge-path-check', 'devsy-bridge-path-apply'):
@@ -1753,6 +1825,14 @@ def execute(args):
             after=restore(previous,directory,native_tuple)
             remote('rollback-commit',{'current':previous,'previous':current})
             return {'operation':'rollback','authority':after['authority'],'inventory':after['inventory'],'identity_preserved':True}
+        credentials_updated = False
+        if args.operation == 'deploy' and tunnel_api_key is not None:
+            recorded = remote('current')
+            if not recorded or recorded.get('authority') != 'kamal':
+                raise ValueError('Key rotation requires recorded Kamal ownership')
+            credentials_updated = rotate_tunnel_key(tunnel_api_key, recorded, directory, native_tuple)
+            if credentials_updated:
+                print('Tunnel key accepted; subsequent image deployment failures or rollbacks retain the accepted key.', file=sys.stderr)
         before=remote('snapshot')
         remote('profile')
         remote('network-check',profile()['network'])
@@ -1790,6 +1870,8 @@ def execute(args):
         if args.operation=='deploy' and before['authority']!='kamal':raise ValueError('Use explicit adoption first')
         remote('devsy-check',devsy_payload())
         smoke(native_tuple, require_native=args.operation!='cas')
+        if args.operation == 'deploy':
+            remote('native-acceptance-record', native_tuple)
         _pin_memoryd_before_core_change()
         if args.operation=='cas' and manifest==current['manifest']:
             return {'operation':'cas','status':'already-current','mutated':False,
@@ -1842,7 +1924,7 @@ def execute(args):
             remote('commit',generation)
             result={'operation':args.operation,'authority':'kamal','inventory':after['inventory'],
                     'smoke':smoke_result,'identity_preserved':True,'backup':backup,
-                    'source_sha':deployed_source,'controller_sha':sha}
+                    'source_sha':deployed_source,'controller_sha':sha,'credentials_updated':credentials_updated}
             if deploy_receipt is not None:result.update(status='deployed',deployment_receipt=deploy_receipt)
             return result
         except Exception:

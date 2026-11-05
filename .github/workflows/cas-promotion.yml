@@ -59,6 +59,12 @@ jobs:
               --base-ref refs/remotes/origin/main \
               --branch-ref "refs/remotes/origin/$PROMOTION_BRANCH" \
               --pull-requests "$temp_dir/pull-requests.json"
+            if [ "$(python -c 'import json,sys; print(len(json.load(open(sys.argv[1]))))' "$temp_dir/pull-requests.json")" = 1 ] \
+              && git show "refs/remotes/origin/$PROMOTION_BRANCH:config/deploy-images.json" | cmp -s "$temp_dir/deploy-images.json" - \
+              && git show "refs/remotes/origin/$PROMOTION_BRANCH:config/cas-promotion.json" | cmp -s "$temp_dir/cas-promotion.json" -; then
+              echo 'The existing draft already contains this qualified candidate; preserving its commit and CI.'
+              exit 0
+            fi
           else
             printf '[]\n' > "$temp_dir/pull-requests.json"
           fi
@@ -82,12 +88,12 @@ jobs:
             cat > "$temp_dir/pr-body.md" <<EOF
           This draft updates the CAS and schema-proxy image pins together from one qualified CAS release.
 
-          - CAS source: `$revision`
+          - CAS source: \`$revision\`
           - Qualification evidence: $qualification_url
           - Publisher evidence: $publisher_url
           - Native daemon upgrades are not part of this promotion. Production deployment still uses the protected control-plane workflow and environment approval.
 
-          The candidate was independently checked against the consumed-method receipt, successful qualification/CI/publisher runs, merged-main ancestry, image digest, and Linux AMD64 provenance. Review `config/cas-promotion.json` for the complete evidence and recorded rollback digest.
+          The candidate was independently checked against the consumed-method receipt, successful qualification/CI/publisher runs, merged-main ancestry, image digest, and Linux AMD64 provenance. Review \`config/cas-promotion.json\` for the complete evidence and recorded rollback digest.
           EOF
             gh pr create --repo "$GITHUB_REPOSITORY" --draft --base main --head "$PROMOTION_BRANCH" \
               --title "[CAS] Promote qualified release $revision" --body-file "$temp_dir/pr-body.md"

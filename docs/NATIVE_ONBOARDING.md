@@ -133,8 +133,8 @@ These operations use the same protected runner and transaction as the local CLI.
 The scheduled **Propose qualified CAS image** workflow is gated on the
 CAS-owned immutable qualification handoff and opens a draft image-update PR
 only after its method, CI, source, digest and platform checks pass. The CAS #25
-producer has not yet published the handoff contract, so this lane remains
-blocked until its immutable source and schema are confirmed. Review the paired
+producer defines the v1 contract but emits a receipt only for a fully qualified
+consumed-method surface; partial qualification produces no candidate. Review the paired
 CAS and schema-proxy manifest update and its `config/cas-promotion.json`
 evidence. Merging the PR does not deploy production. Dispatch **Deploy VM
 control plane** with operation `cas` to consume the merged manifest and receipt

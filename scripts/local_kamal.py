@@ -242,6 +242,7 @@ def main(argv=None):
         recovery_operations=('reconcile-update','abort-update','complete-update','release-update')
         if (operation in recovery_operations) != (rollout_id is not None):
             raise ValueError('MemoryD rollout recovery requires exactly one --rollout-id')
+        tunnel_api_key = deploy.deployment_tunnel_key(local=True) if operation == 'deploy' and target == 'all' else None
         bundle_environment()
         if operation == 'setup-local':
             return subprocess.run(['bundle', '_2.6.9_', 'install'], cwd=deploy.ROOT).returncode
@@ -267,6 +268,10 @@ def main(argv=None):
                 approve_legacy_abandon=legacy_approved,
                 rollout_id=rollout_id,
                 local=True, approve_full_stack=True,
+                tunnel_api_key=tunnel_api_key,
+                native_target=os.environ.get('NATIVE_TARGET'),
+                native_cwd=os.environ.get('NATIVE_CWD'),
+                native_thread_id=os.environ.get('NATIVE_THREAD_ID'),
             ))
         print(json.dumps(result, indent=2))
         return 0

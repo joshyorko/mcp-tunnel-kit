@@ -106,6 +106,7 @@ jobs:
         if: inputs.operation != 'onboard-native' && inputs.operation != 'remove-native' && inputs.operation != 'rename-native'
         shell: bash
         env:
+          OPTIONAL_TUNNEL_API_KEY: ${{ secrets.CONTROL_PLANE_API_KEY }}
           OPERATION: ${{ inputs.operation }}
           NATIVE_TARGET: ${{ inputs.native_target }}
           NATIVE_CWD: ${{ inputs.native_cwd }}
@@ -122,6 +123,7 @@ jobs:
           CAS_ARTIFACTS_READ_TOKEN: ${{ inputs.operation == 'cas' && secrets.CAS_ARTIFACTS_READ_TOKEN || '' }}
         run: |
           set -euo pipefail
+          if [ -n "${OPTIONAL_TUNNEL_API_KEY:-}" ]; then export CONTROL_PLANE_API_KEY="$OPTIONAL_TUNNEL_API_KEY"; fi
           args=("$OPERATION")
           if [ "$FULL_APPROVAL" = true ]; then args+=(--approve-full-stack); fi
           if [ "$BRIDGE_KUBECTL_PATH_APPROVAL" = true ]; then args+=(--approve-bridge-kubectl-path); fi

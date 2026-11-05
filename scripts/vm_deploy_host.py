@@ -270,7 +270,8 @@ def _memoryd_pending_app(intent,org,apps,get):
     return {'organization':org,'id':app['id'],'url':url}
 
 
-def identity(executor, *, exclude_memoryd=False, require_memoryd_absent=False, require_memoryd_active=False):
+def identity(executor, *, exclude_memoryd=False, require_memoryd_absent=False, require_memoryd_active=False,
+             tunnel_api_key=None):
     from urllib.request import Request,urlopen
     pat = private(STATE/'secrets/executor-pat').decode().strip()
     def get(path):
@@ -304,7 +305,8 @@ def identity(executor, *, exclude_memoryd=False, require_memoryd_absent=False, r
         with tarfile.open(fileobj=io.BytesIO(raw)) as archive: data=archive.extractfile(archive.getmembers()[0]).read()
         proof['keys'][name]=hashlib.sha256(data).hexdigest()
     for name in ('control-plane-api-key','control-plane-tunnel-id','executor-auth-header','executor-pat'):
-        proof['secrets'][name]=hashlib.sha256(private(STATE/'secrets'/name)).hexdigest()
+        value = tunnel_api_key if name == 'control-plane-api-key' and tunnel_api_key is not None else private(STATE/'secrets'/name)
+        proof['secrets'][name]=hashlib.sha256(value).hexdigest()
     digest=hashlib.sha256(json.dumps(proof,sort_keys=True).encode()).hexdigest()
     if has_intent and digest!=intent['base_identity']:
         raise ValueError('Executor identity drift prevents MemoryD registration recovery')
@@ -335,6 +337,156 @@ def native_drift(data):
     validate_profile()
     targets = json.loads(private(STATE / 'cas-targets.json'))
     return reconcile_native_drift(targets, NATIVE_SSH)
+
+
+def _tunnel_key_inventory():
+    lifecycle_check()
+    _, groups, tunnels = inspect()
+    rows = groups['kamal']
+    if any(not row or not row['State']['Running'] or row['State'].get('Paused')
+           or row['State'].get('Health', {}).get('Status') != 'healthy'
+           for name, row in rows.items() if name != 'tunnel'):
+        raise ValueError('Key rotation requires healthy Executor, schema proxy and CAS')
+    tunnel = rows['tunnel']
+    if tunnel['State'].get('Paused') or len(tunnels) != int(tunnel['State']['Running']):
+        raise ValueError('Key rotation requires the sole owned tunnel')
+    if (STATE / 'bootstrap/memoryd-registration-pending.json').exists():
+        raise ValueError('Finish pending MemoryD registration before rotating the tunnel key')
+    return rows
+
+
+def _tunnel_key_documents():
+    return {name: json.loads(private(STORE / (name + '.json')))
+            for name in ('current', 'previous')
+            if (STORE / (name + '.json')).exists() or (STORE / (name + '.json')).is_symlink()}
+
+
+def _tunnel_key_cleanup():
+    directory = STORE / 'tunnel-key-rotation'
+    for name in ('old-key', 'new-key', 'receipt.json'):
+        path = directory / name
+        if path.exists() or path.is_symlink():
+            private(path)
+            path.unlink()
+    directory.rmdir()
+
+
+def _tunnel_key_pending():
+    import compose_control as c
+    directory = STORE / 'tunnel-key-rotation'
+    c.private_directory(directory)
+    if set(path.name for path in directory.iterdir()) - {'old-key', 'new-key', 'receipt.json'}:
+        raise ValueError('Unexpected tunnel key recovery files')
+    receipt = json.loads(private(directory / 'receipt.json'))
+    rows = _tunnel_key_inventory()
+    if {name: row['Id'] for name, row in rows.items()} != receipt['containers']:
+        raise ValueError('Control-plane containers changed during key rotation')
+    documents = _tunnel_key_documents()
+    if set(documents) != set(receipt['documents']):
+        raise ValueError('Deployment receipts changed during key rotation')
+    for name, original in receipt['documents'].items():
+        if documents[name] not in (original, {**original, 'identity': receipt['new_identity']}):
+            raise ValueError('Deployment receipts changed during key rotation')
+    if receipt['status'] == 'accepted':
+        if (identity(NAMES['kamal']['executor']) != receipt['new_identity']
+                or any(document['identity'] != receipt['new_identity'] for document in documents.values())):
+            raise ValueError('Accepted tunnel key identity changed')
+    else:
+        old = private(directory / 'old-key')
+        new = private(directory / 'new-key')
+        if (private(STATE / 'secrets/control-plane-api-key') not in (old, new)
+                or identity(NAMES['kamal']['executor'], tunnel_api_key=old) != receipt['old_identity']
+                or identity(NAMES['kamal']['executor'], tunnel_api_key=new) != receipt['new_identity']):
+            raise ValueError('Executor identity drift during key rotation')
+    return directory, receipt, rows
+
+
+def tunnel_key_prepare(data):
+    import compose_control as c
+    key = data.get('api_key') if isinstance(data, dict) else None
+    if (not isinstance(key, str) or not re.fullmatch(r'[!-~]{1,8192}', key)
+            or any(char in key for char in '\\"\'')):
+        raise ValueError('Set CONTROL_PLANE_API_KEY to one nonempty literal token')
+    wanted = (key + '\n').encode()
+    rows = _tunnel_key_inventory()
+    directory = STORE / 'tunnel-key-rotation'
+    if directory.exists() or directory.is_symlink():
+        c.private_directory(directory)
+        if (directory / 'receipt.json').exists():
+            _, receipt, _ = _tunnel_key_pending()
+            if receipt['status'] == 'accepted':
+                _tunnel_key_cleanup()
+            elif receipt['status'] == 'rolled-back':
+                if private(STATE / 'secrets/control-plane-api-key') != private(directory / 'old-key'):
+                    raise ValueError('Rolled-back tunnel key changed')
+                _tunnel_key_cleanup()
+            else:
+                if private(directory / 'new-key') != wanted:
+                    raise ValueError('Retry the pending rotation with the same CONTROL_PLANE_API_KEY')
+                return {'changed': True, 'was_running': receipt['was_running'],
+                        'was_healthy': receipt['was_healthy']}
+        else:
+            # No live key is changed until the complete journal exists.
+            current = _tunnel_key_documents()['current']
+            if identity(NAMES['kamal']['executor']) != current['identity']:
+                raise ValueError('Executor identity drift before key rotation')
+            _tunnel_key_cleanup()
+    documents = _tunnel_key_documents()
+    old_identity = identity(NAMES['kamal']['executor'])
+    if any(document['identity'] != old_identity for document in documents.values()):
+        raise ValueError('Executor identity drift before key rotation')
+    old = private(STATE / 'secrets/control-plane-api-key')
+    if old.strip() == wanted.strip():
+        return {'changed': False}
+    c.private_directory(directory)
+    c.write_private(directory / 'old-key', old.decode())
+    c.write_private(directory / 'new-key', wanted.decode())
+    tunnel = rows['tunnel']['State']
+    receipt = {'status': 'pending', 'documents': documents,
+               'containers': {name: row['Id'] for name, row in rows.items()},
+               'old_identity': old_identity,
+               'new_identity': identity(NAMES['kamal']['executor'], tunnel_api_key=wanted),
+               'was_running': tunnel['Running'],
+               'was_healthy': tunnel.get('Health', {}).get('Status') == 'healthy'}
+    write(directory / 'receipt.json', receipt)
+    return {'changed': True, 'was_running': receipt['was_running'], 'was_healthy': receipt['was_healthy']}
+
+
+def tunnel_key_apply():
+    import compose_control as c
+    directory, receipt, rows = _tunnel_key_pending()
+    if receipt['status'] == 'accepted' or rows['tunnel']['State']['Running']:
+        raise ValueError('Tunnel must be stopped before replacing its key')
+    c.write_private(STATE / 'secrets/control-plane-api-key', private(directory / 'new-key').decode())
+    return {'applied': True}
+
+
+def tunnel_key_accept():
+    directory, receipt, rows = _tunnel_key_pending()
+    tunnel = rows['tunnel']['State']
+    if (not tunnel['Running'] or tunnel.get('Health', {}).get('Status') != 'healthy'
+            or identity(NAMES['kamal']['executor']) != receipt['new_identity']):
+        raise ValueError('Updated tunnel must be healthy before accepting its key')
+    for name, document in receipt['documents'].items():
+        write(STORE / (name + '.json'), {**document, 'identity': receipt['new_identity']})
+    write(directory / 'receipt.json', {**receipt, 'status': 'accepted'})
+    _tunnel_key_cleanup()
+    return {'updated': True}
+
+
+def tunnel_key_restore():
+    import compose_control as c
+    directory, receipt, rows = _tunnel_key_pending()
+    if receipt['status'] == 'accepted':
+        _tunnel_key_cleanup()
+        return {'accepted': True}
+    if rows['tunnel']['State']['Running']:
+        raise ValueError('Tunnel must be stopped before restoring its key')
+    c.write_private(STATE / 'secrets/control-plane-api-key', private(directory / 'old-key').decode())
+    for name, document in receipt['documents'].items():
+        write(STORE / (name + '.json'), document)
+    write(directory / 'receipt.json', {**receipt, 'status': 'rolled-back'})
+    return {'restored': True, 'was_running': receipt['was_running'], 'was_healthy': receipt['was_healthy']}
 
 
 def memoryd_resource_gate(raw_meminfo):
@@ -4200,6 +4352,27 @@ def native_thread_read(client, session, supplied):
     return {"status": "PASS", "target": identity["target"]}
 
 
+def saved_native_acceptance():
+    path = STORE / 'native-acceptance.json'
+    if not path.exists() and not path.is_symlink():
+        return None
+    value = json.loads(private(path))
+    if _codex_read_payload(value) is None:
+        raise ValueError('Saved native acceptance settings are invalid')
+    return value
+
+
+def record_native_acceptance(value):
+    supplied = _codex_read_payload(value)
+    if supplied is None:
+        raise ValueError('Saved native acceptance settings are invalid')
+    result = smoke({'native_codex': supplied, 'require_native': True})
+    if result.get('native_read', {}).get('status') != 'PASS':
+        raise ValueError('Qualified native verification is required before saving acceptance')
+    write(STORE / 'native-acceptance.json', supplied)
+    return {'native_acceptance_saved': True}
+
+
 def _recovery_memoryd_absent():
     ids=run(['docker','ps','-aq']).decode().split()
     rows=json.loads(run(['docker','inspect',*ids])) if ids else []
@@ -4352,11 +4525,17 @@ def main():
                         'devsy-tap-reconcile-plan','devsy-tap-reconcile',
                         'devsy-tap-rollback-plan','devsy-tap-rollback'):
         STORE.mkdir(mode=0o700,exist_ok=True)
-    data=json.load(sys.stdin) if action in ('images','image-check','network','network-check','wait','commit','baseline','set-current','rollback-commit','restart-local','activation-plan','activation-preflight','activation-begin','activation-pull-images','activation-install','activation-track','activation-seed','activation-network','activation-identity','activation-cleanup','activation-record','activation-memoryd-wait','activation-memoryd-network','activation-memoryd-restore','smoke','native-drift','memoryd-adapter-prepare','memoryd-adapter-finalize','memoryd-transfer-prepare','memoryd-import-bundles','memoryd-network-allow','memoryd-app-register','memoryd-registration-reconcile','memoryd-legacy-reconcile','memoryd-identity-reconcile','memoryd-rollout-lock-check','memoryd-rollout-begin','memoryd-rollout-wait','memoryd-rollout-select','memoryd-rollout-accept','memoryd-rollout-finish','memoryd-rollout-abort','memoryd-rollout-reconcile','memoryd-rollout-release-check','devsy-plan','devsy-check','devsy-rollback-plan','devsy-apply','devsy-rollback','devsy-scope-rebind-check','devsy-scope-rebind','devsy-bridge-path-check','devsy-bridge-path-apply','devsy-tap-reconcile-plan','devsy-tap-reconcile','devsy-tap-rollback-plan','devsy-tap-rollback') else {}
+    data=json.load(sys.stdin) if action in ('native-acceptance-record','tunnel-key-prepare','images','image-check','network','network-check','wait','commit','baseline','set-current','rollback-commit','restart-local','activation-plan','activation-preflight','activation-begin','activation-pull-images','activation-install','activation-track','activation-seed','activation-network','activation-identity','activation-cleanup','activation-record','activation-memoryd-wait','activation-memoryd-network','activation-memoryd-restore','smoke','native-drift','memoryd-adapter-prepare','memoryd-adapter-finalize','memoryd-transfer-prepare','memoryd-import-bundles','memoryd-network-allow','memoryd-app-register','memoryd-registration-reconcile','memoryd-legacy-reconcile','memoryd-identity-reconcile','memoryd-rollout-lock-check','memoryd-rollout-begin','memoryd-rollout-wait','memoryd-rollout-select','memoryd-rollout-accept','memoryd-rollout-finish','memoryd-rollout-abort','memoryd-rollout-reconcile','memoryd-rollout-release-check','devsy-plan','devsy-check','devsy-rollback-plan','devsy-apply','devsy-rollback','devsy-scope-rebind-check','devsy-scope-rebind','devsy-bridge-path-check','devsy-bridge-path-apply','devsy-tap-reconcile-plan','devsy-tap-reconcile','devsy-tap-rollback-plan','devsy-tap-rollback') else {}
     if action == 'backup':
         raw = sys.stdin.read()
         data = json.loads(raw) if raw else {}
-    if action=='activation-plan':result=activation_plan(data['generation_dir'])
+    if action=='native-acceptance':result=saved_native_acceptance()
+    elif action=='native-acceptance-record':result=record_native_acceptance(data)
+    elif action=='tunnel-key-prepare':result=tunnel_key_prepare(data)
+    elif action=='tunnel-key-apply':result=tunnel_key_apply()
+    elif action=='tunnel-key-accept':result=tunnel_key_accept()
+    elif action=='tunnel-key-restore':result=tunnel_key_restore()
+    elif action=='activation-plan':result=activation_plan(data['generation_dir'])
     elif action=='activation-preflight':
         info=_ensure_empty_activation_target(data['generation_dir'],allow_lock=True)
         result={'ready':True,'expected_identity':info['expected_identity'],'prepared_manifest_sha256':info['manifest_sha256'],

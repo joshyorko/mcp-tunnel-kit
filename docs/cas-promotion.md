@@ -16,4 +16,4 @@ The CAS/schema-proxy pair is promoted together in one draft PR. The production d
 
 ## Producer availability
 
-The current consumer reports no candidate if the successful current-main publisher run has no qualified receipt artifact, which is the producer's expected outcome when qualification is partial or withheld. It blocks on an expired, malformed, or inconsistent artifact. CAS PR #26 currently reports only 1/58 methods compatible and 57 withheld, so it cannot generate a promotion PR. End-to-end promotion also requires a read-only cross-repository Actions credential.
+The consumer reports no candidate if the successful current-main publisher run has no qualified receipt artifact, which is the producer's expected outcome when qualification is partial or withheld. It blocks on an expired, malformed, or inconsistent artifact. Existing approvals for exposed experimental methods do not qualify the entire consumed-method catalog. A live promotion requires the CAS producer to publish the complete qualified receipt from trusted main and an owner-provided read-only cross-repository Actions credential.
