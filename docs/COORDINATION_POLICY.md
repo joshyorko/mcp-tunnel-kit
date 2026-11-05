@@ -10,8 +10,9 @@ The default has no coordination environment setting or mount. Opt in with the
 optional owner-profile field `vm.cas_coordination_policy_dir`, or the protected
 workflow's `cas_coordination_policy_dir` input. The input overlays only that
 field in memory without rewriting the existing profile or credentials. Choose
-a private directory outside the checkout and writable CAS data, normally
-`<vm.state_dir>/cas-coordination`.
+the dedicated directory `<vm.state_dir>/cas-coordination`, outside the checkout
+and writable CAS data. Other sources are refused, including the state root or
+SSH directories; this is not an arbitrary private-directory mount.
 
 ## Install and enable
 
@@ -19,7 +20,7 @@ a private directory outside the checkout and writable CAS data, normally
    current operator and mode 0600 or 0400. Start with an empty `pairs` list
    if native root IDs have not been collected yet.
 2. From the owning checkout with its existing private `.env.kamal.local`, run
-   `bin/kamal coordination-policy install --directory /absolute/vm/policy-directory --file /absolute/local/policy.json`.
+   `bin/kamal coordination-policy install --directory <vm.state_dir>/cas-coordination --file /absolute/local/policy.json`.
    The VM directory's existing parent must be UID 1000 and mode 0700. The
    pinned, locked controller creates the selected directory if missing and
    atomically installs only `policy.json`. It prints a digest and pair count,

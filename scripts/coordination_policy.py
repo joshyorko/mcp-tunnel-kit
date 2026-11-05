@@ -95,6 +95,19 @@ def check(directory):
     return {"sha256": hashlib.sha256(raw).hexdigest(), "pairs": len(parse(raw)["pairs"])}
 
 
+def read_transfer(source):
+    """Bound the JSON-escaped SSH envelope before parsing it."""
+    limit = MAX_BYTES * 6 + 1024
+    raw = source.read(limit + 1)
+    if len(raw) > limit:
+        _invalid()
+    try:
+        value = json.loads(raw, object_pairs_hook=_unique)
+    except (ValueError, UnicodeError):
+        _invalid()
+    return value
+
+
 def install(directory, raw, *, owner=OWNER_UID):
     """Atomically replace only policy.json in an unchanged private mount directory."""
     value = parse(raw)

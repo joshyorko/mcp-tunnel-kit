@@ -4572,7 +4572,7 @@ def main():
     if action == 'backup':
         raw = sys.stdin.read()
         data = json.loads(raw) if raw else {}
-    if action=='coordination-policy-install':result=install_coordination_policy(json.load(sys.stdin))
+    if action=='coordination-policy-install':result=install_coordination_policy(coordination_policy.read_transfer(sys.stdin))
     elif action=='native-acceptance':result=saved_native_acceptance()
     elif action=='native-acceptance-record':result=record_native_acceptance(data)
     elif action=='tunnel-key-prepare':result=tunnel_key_prepare(data)

@@ -3,6 +3,7 @@
 import copy
 import importlib
 import json
+import io
 import os
 from pathlib import Path
 import sys
@@ -46,7 +47,8 @@ def test_optional_profile_optin_round_trips_without_changing_existing_fields():
     assert value == original
 
 
-@pytest.mark.parametrize("directory", ["relative", "/tmp/../policy", "/tmp/policy:rw", True, "", None])
+@pytest.mark.parametrize("directory", ["relative", "/tmp/../policy", "/tmp/policy:rw", True, "", None,
+                                       "/home/operator/.local/share/codex-control-plane", "/home/operator/.ssh"])
 def test_owner_profile_rejects_unsafe_optin_directory(directory):
     value = json.loads((ROOT / "config/instance.example.json").read_text())
     value["vm"]["cas_coordination_policy_dir"] = directory
@@ -254,3 +256,14 @@ def test_upgrade_without_recorded_policy_directory_refuses_before_any_service_ch
     with pytest.raises(ValueError, match="must be preserved"):
         deploy.execute(SimpleNamespace(local=False, operation="cas", approve_full_stack=False))
     assert calls == ["snapshot", "profile", "network-check", "current"]
+
+
+def test_remote_transfer_envelope_is_bounded_and_rejects_duplicate_keys():
+    module = importlib.import_module("coordination_policy")
+    with pytest.raises(ValueError):
+        module.read_transfer(io.StringIO(" " * (module.MAX_BYTES * 6 + 1025)))
+    with pytest.raises(ValueError):
+        module.read_transfer(io.StringIO('{"policy_json":"{}","policy_json":"{}"}'))
+    assert module.read_transfer(io.StringIO('{"policy_json":"{\\"pairs\\":[]}"}')) == {
+        "policy_json": '{"pairs":[]}'
+    }

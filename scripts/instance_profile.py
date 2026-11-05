@@ -29,7 +29,8 @@ def coordination_directory(value, vm):
     """A single private policy directory, never a caller-defined mount specification."""
     value = _path(value)
     path = PurePosixPath(value)
-    if ":" in value or path == PurePosixPath("/"):
+    expected = PurePosixPath(vm["state_dir"]) / "cas-coordination"
+    if ":" in value or path != expected:
         raise ValueError("CAS coordination policy directory is invalid")
     for protected in (vm["repo_dir"], str(PurePosixPath(vm["state_dir"]) / "cas")):
         if path == PurePosixPath(protected) or path.is_relative_to(protected):
