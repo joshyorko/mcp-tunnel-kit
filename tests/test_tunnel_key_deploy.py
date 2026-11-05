@@ -225,7 +225,7 @@ def test_controller_recovers_tunnel_before_full_deployment_snapshot(rotation, mo
     monkeypatch.setattr(d, 'configuration', lambda *_: Path('/fixture/config'))
     monkeypatch.setattr(d, 'devsy_payload', lambda: {})
     monkeypatch.setattr(d, 'smoke', lambda *_a, **_kw: events.append('native-smoke'))
-    assert d.rotate_tunnel_key('new-fixture-key', {}, '/fixture', None) is True
+    assert d.rotate_tunnel_key('new-fixture-key', {}, '/fixture', {'target': 'local'}) is True
     assert events.index('devsy-check') < events.index('stop')
     assert events.index('native-smoke') < events.index('stop')
     assert documents(rotation)['current']['identity'] == 'new-identity'

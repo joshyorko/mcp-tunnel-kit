@@ -83,6 +83,14 @@ command. An accepted key survives a later image deployment failure or rollback.
 Native/Devsy gates remain required; local commands forward `NATIVE_TARGET`,
 `NATIVE_CWD`, and `NATIVE_THREAD_ID` from the process environment.
 
+Full deployments reuse the VM's private `deployment/native-acceptance.json`
+when no explicit native tuple is supplied. Each deployment still checks that
+exact native target, worktree and thread for authoritative inactive state.
+A successful explicit native check during full deployment records the tuple
+for subsequent controllers and CI runners. Missing settings fail before key
+staging and name the three required inputs. Partial or invalid explicit input
+never falls back to saved settings.
+
 For CI rotation, optionally add `CONTROL_PLANE_API_KEY` as a secret on the
 protected `control-plane-production` GitHub Environment. The self-hosted runner
 uses the same controller and its existing pinned SSH access. When the secret is

@@ -318,6 +318,20 @@ def smoke_request(native_tuple, *, require_native=False):
     return {"native_codex": native_tuple, "require_native": bool(require_native)}
 
 
+def resolve_native_acceptance(native_tuple):
+    if native_tuple is not None:
+        return native_tuple
+    saved = remote('native-acceptance')
+    try:
+        if not isinstance(saved, dict) or set(saved) != {'target', 'cwd', 'thread_id'}:
+            raise ValueError('missing acceptance')
+        return native_codex_tuple(argparse.Namespace(
+            native_target=saved['target'], native_cwd=saved['cwd'],
+            native_thread_id=saved['thread_id']))
+    except ValueError:
+        raise RuntimeError('Native acceptance is not configured: supply NATIVE_TARGET, NATIVE_CWD and NATIVE_THREAD_ID once to save verified VM settings') from None
+
+
 def smoke(native_tuple, *, require_native=False):
     result = remote("smoke", smoke_request(native_tuple, require_native=require_native))
     if require_native and result.get("native_read", {}).get("status") != "PASS":
@@ -1534,14 +1548,17 @@ def deployment_tunnel_key(*, local=False):
 
 
 def rotate_tunnel_key(key, current, directory, native_tuple):
+    if native_tuple is None:
+        raise RuntimeError('Native acceptance is not configured: supply NATIVE_TARGET, NATIVE_CWD and NATIVE_THREAD_ID before staging credentials')
     request = {'api_key': key}
     plan = remote('tunnel-key-prepare', request)
     if not plan['changed']:
         return False
     config = configuration(directory, current.get('manifest', {}))
-    phase = 'preflight'
+    phase = 'Devsy preflight'
     try:
         remote('devsy-check', devsy_payload())
+        phase = 'native acceptance'
         smoke(native_tuple, require_native=True)
         phase = 'rotation'
         kamal(config, 'stop', 'tunnel')
@@ -1551,8 +1568,8 @@ def rotate_tunnel_key(key, current, directory, native_tuple):
         remote('tunnel-key-accept')
         return True
     except Exception:
-        if phase == 'preflight':
-            raise RuntimeError('Key rotation preflight failed; live credentials unchanged; retry deployment after resolving the gate') from None
+        if phase != 'rotation':
+            raise RuntimeError('Key rotation blocked by ' + phase + '; live credentials unchanged; run bin/kamal preflight for details') from None
         try:
             # A lost acceptance reply must never roll back an accepted key.
             pending = remote('tunnel-key-prepare', request)
@@ -1609,6 +1626,8 @@ def execute(args):
             with memoryd_rollout_recovery_lock(rollout_id), tempfile.TemporaryDirectory(prefix='mcp-kamal-rollout-recovery-') as directory:
                 return recover_memoryd_rollout(args.operation,rollout_id,directory)
     with lock(), tempfile.TemporaryDirectory(prefix='mcp-kamal-') as directory:
+        if args.operation == 'deploy':
+            native_tuple = resolve_native_acceptance(native_tuple)
         if args.operation=='memoryd-rollout-release':
             return release_memoryd_rollout(rollout_id,directory)
         if args.operation in ('devsy-bridge-path-check', 'devsy-bridge-path-apply'):
@@ -1735,6 +1754,8 @@ def execute(args):
         if args.operation=='deploy' and before['authority']!='kamal':raise ValueError('Use explicit adoption first')
         remote('devsy-check',devsy_payload())
         smoke(native_tuple, require_native=True)
+        if args.operation == 'deploy':
+            remote('native-acceptance-record', native_tuple)
         _pin_memoryd_before_core_change()
         remote('images',manifest)
         if needs_baseline:remote('baseline',current)

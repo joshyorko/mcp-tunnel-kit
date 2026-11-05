@@ -4342,6 +4342,27 @@ def native_thread_read(client, session, supplied):
     return {"status": "PASS", "target": identity["target"]}
 
 
+def saved_native_acceptance():
+    path = STORE / 'native-acceptance.json'
+    if not path.exists() and not path.is_symlink():
+        return None
+    value = json.loads(private(path))
+    if _codex_read_payload(value) is None:
+        raise ValueError('Saved native acceptance settings are invalid')
+    return value
+
+
+def record_native_acceptance(value):
+    supplied = _codex_read_payload(value)
+    if supplied is None:
+        raise ValueError('Saved native acceptance settings are invalid')
+    result = smoke({'native_codex': supplied, 'require_native': True})
+    if result.get('native_read', {}).get('status') != 'PASS':
+        raise ValueError('Qualified native verification is required before saving acceptance')
+    write(STORE / 'native-acceptance.json', supplied)
+    return {'native_acceptance_saved': True}
+
+
 def _recovery_memoryd_absent():
     ids=run(['docker','ps','-aq']).decode().split()
     rows=json.loads(run(['docker','inspect',*ids])) if ids else []
@@ -4494,11 +4515,13 @@ def main():
                         'devsy-tap-reconcile-plan','devsy-tap-reconcile',
                         'devsy-tap-rollback-plan','devsy-tap-rollback'):
         STORE.mkdir(mode=0o700,exist_ok=True)
-    data=json.load(sys.stdin) if action in ('tunnel-key-prepare','images','image-check','network','network-check','wait','commit','baseline','set-current','rollback-commit','restart-local','activation-plan','activation-preflight','activation-begin','activation-pull-images','activation-install','activation-track','activation-seed','activation-network','activation-identity','activation-cleanup','activation-record','activation-memoryd-wait','activation-memoryd-network','activation-memoryd-restore','smoke','memoryd-adapter-prepare','memoryd-adapter-finalize','memoryd-transfer-prepare','memoryd-import-bundles','memoryd-network-allow','memoryd-app-register','memoryd-registration-reconcile','memoryd-legacy-reconcile','memoryd-identity-reconcile','memoryd-rollout-lock-check','memoryd-rollout-begin','memoryd-rollout-wait','memoryd-rollout-select','memoryd-rollout-accept','memoryd-rollout-finish','memoryd-rollout-abort','memoryd-rollout-reconcile','memoryd-rollout-release-check','devsy-plan','devsy-check','devsy-rollback-plan','devsy-apply','devsy-rollback','devsy-scope-rebind-check','devsy-scope-rebind','devsy-bridge-path-check','devsy-bridge-path-apply','devsy-tap-reconcile-plan','devsy-tap-reconcile','devsy-tap-rollback-plan','devsy-tap-rollback') else {}
+    data=json.load(sys.stdin) if action in ('native-acceptance-record','tunnel-key-prepare','images','image-check','network','network-check','wait','commit','baseline','set-current','rollback-commit','restart-local','activation-plan','activation-preflight','activation-begin','activation-pull-images','activation-install','activation-track','activation-seed','activation-network','activation-identity','activation-cleanup','activation-record','activation-memoryd-wait','activation-memoryd-network','activation-memoryd-restore','smoke','memoryd-adapter-prepare','memoryd-adapter-finalize','memoryd-transfer-prepare','memoryd-import-bundles','memoryd-network-allow','memoryd-app-register','memoryd-registration-reconcile','memoryd-legacy-reconcile','memoryd-identity-reconcile','memoryd-rollout-lock-check','memoryd-rollout-begin','memoryd-rollout-wait','memoryd-rollout-select','memoryd-rollout-accept','memoryd-rollout-finish','memoryd-rollout-abort','memoryd-rollout-reconcile','memoryd-rollout-release-check','devsy-plan','devsy-check','devsy-rollback-plan','devsy-apply','devsy-rollback','devsy-scope-rebind-check','devsy-scope-rebind','devsy-bridge-path-check','devsy-bridge-path-apply','devsy-tap-reconcile-plan','devsy-tap-reconcile','devsy-tap-rollback-plan','devsy-tap-rollback') else {}
     if action == 'backup':
         raw = sys.stdin.read()
         data = json.loads(raw) if raw else {}
-    if action=='tunnel-key-prepare':result=tunnel_key_prepare(data)
+    if action=='native-acceptance':result=saved_native_acceptance()
+    elif action=='native-acceptance-record':result=record_native_acceptance(data)
+    elif action=='tunnel-key-prepare':result=tunnel_key_prepare(data)
     elif action=='tunnel-key-apply':result=tunnel_key_apply()
     elif action=='tunnel-key-accept':result=tunnel_key_accept()
     elif action=='tunnel-key-restore':result=tunnel_key_restore()
