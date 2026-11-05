@@ -160,8 +160,12 @@ and unrecognized states remain blocked.
   complete consumed-method matrix, successful qualification/CI/publisher runs,
   source ancestry, image digest and Linux AMD64 provenance. It updates
   schema-proxy first, then CAS, and verifies Executor and tunnel container
-  identities stayed unchanged. The previous CAS pair remains available for
-  automatic rollback. There are no manual digest or revision inputs.
+  identities stayed unchanged. An older recorded generation can have different
+  CAS and schema-proxy pins. Both actual old pins must match the fresh inventory
+  and retain their provenance, and the candidate must descend from each old
+  source revision. Automatic rollback restores those exact per-service pins.
+  The deployment receipt records both under `rollback_images` and binds them
+  to `rollback_generation_source_sha`. There are no manual digest or revision inputs.
 
 The scheduled **Propose qualified CAS image** workflow checks the CAS-owned
 versioned release receipt and opens or updates one automation-owned draft PR
