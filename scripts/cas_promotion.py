@@ -365,14 +365,26 @@ def verify_publisher(handoff: dict, *, verifier=verify_image_provenance) -> dict
 
 
 def _github_json(url: str) -> dict:
-    """Read bounded public GitHub Actions evidence without a credential."""
+    """Read bounded CAS evidence using the configured read token when available."""
+    if not isinstance(url, str) or not url.startswith(f"https://api.github.com/repos/{CAS_REPOSITORY}/"):
+        raise PromotionError("CAS workflow evidence URL is not from the approved CAS API")
     request = Request(url, headers={"Accept": "application/vnd.github+json",
                                     "X-GitHub-Api-Version": "2022-11-28",
                                     "User-Agent": "mcp-tunnel-kit-cas-promotion"}, method="GET")
+    token = os.environ.get("CAS_ARTIFACTS_READ_TOKEN")
+    if token:
+        if len(token) > 8192 or any(ord(char) < 0x21 or ord(char) > 0x7e for char in token):
+            raise PromotionError("CAS workflow evidence read token is invalid")
+        request.add_unredirected_header("Authorization", "Bearer " + token)
     try:
         with urlopen(request, timeout=15) as response:
             raw = response.read(1024 * 1024 + 1)
-    except (HTTPError, URLError, TimeoutError, OSError):
+    except HTTPError as error:
+        reason = f"CAS workflow evidence could not be verified: HTTP {error.code}"
+        if error.headers and error.headers.get("X-RateLimit-Remaining") == "0":
+            reason += ", API rate limit exhausted"
+        raise PromotionError(reason) from None
+    except (URLError, TimeoutError, OSError):
         raise PromotionError("CAS workflow evidence could not be verified") from None
     if len(raw) > 1024 * 1024:
         raise PromotionError("CAS workflow evidence response is too large")

@@ -32,7 +32,11 @@ class ProvenanceError(ValueError):
 
 
 def _json_get(url: str, headers: dict[str, str]) -> dict:
-    request = Request(url, headers=headers, method="GET")
+    request_headers = dict(headers)
+    authorization = request_headers.pop("Authorization", None)
+    request = Request(url, headers=request_headers, method="GET")
+    if authorization:
+        request.add_unredirected_header("Authorization", authorization)
     try:
         with urlopen(request, timeout=TIMEOUT_SECONDS) as response:
             body = response.read(2 * 1024 * 1024 + 1)
@@ -50,7 +54,7 @@ def _json_get(url: str, headers: dict[str, str]) -> dict:
 
 def _publisher_main(revision: str) -> str:
     headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
-    token = os.environ.get("GITHUB_TOKEN")
+    token = os.environ.get("CAS_ARTIFACTS_READ_TOKEN") or os.environ.get("GITHUB_TOKEN")
     if token:
         headers["Authorization"] = "Bearer " + token
     head = _json_get(f"{GITHUB_API}/repos/{GITHUB_REPOSITORY}/commits/main", headers)
