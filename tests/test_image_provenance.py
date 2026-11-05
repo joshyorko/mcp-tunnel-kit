@@ -31,10 +31,24 @@ class Response:
         return self.body
 
 
-def fixture(manifest=None, compare=None):
+def fixture(manifest=None, compare=None, revision_label=None):
     data = json.loads((ROOT / "config/deploy-images.json").read_text())
     calls = []
-    manifest_body = json.dumps(manifest or {"schemaVersion": 2, "mediaType": "application/vnd.oci.image.index.v1+json"}).encode()
+    revision=data["images"]["cas"]["revision"]
+    config_body=json.dumps({"architecture":"amd64","os":"linux","config":{"Labels":{
+        "org.opencontainers.image.revision":revision_label or revision}}}).encode()
+    config_digest="sha256:"+hashlib.sha256(config_body).hexdigest()
+    platform_body=json.dumps({"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json",
+                              "config":{"digest":config_digest}}).encode()
+    platform_digest="sha256:"+hashlib.sha256(platform_body).hexdigest()
+    top=manifest or {"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json",
+                     "manifests":[{"digest":platform_digest,
+                                   "platform":{"os":"linux","architecture":"amd64"}}]}
+    if isinstance(top.get("manifests"),list) and top["manifests"]:
+        for row in top["manifests"]:
+            if row.get("platform",{}).get("os")=="linux" and row.get("platform",{}).get("architecture")=="amd64":
+                row["digest"]=platform_digest
+    manifest_body = json.dumps(top).encode()
     manifest_digest = "sha256:" + hashlib.sha256(manifest_body).hexdigest()
     for name in ("cas", "schema_proxy"):
         data["images"][name]["digest"] = manifest_digest
@@ -55,6 +69,10 @@ def fixture(manifest=None, compare=None):
             return Response({"token": "registry-fixture-token"})
         if "/manifests/sha-" in url:
             return Response(manifest_body, {"Docker-Content-Digest": manifest_digest})
+        if url.endswith("/manifests/"+platform_digest):
+            return Response(platform_body)
+        if url.endswith("/blobs/"+config_digest):
+            return Response(config_body)
         raise AssertionError("Unexpected provenance URL")
 
     return data, calls, open_url, manifest_digest
@@ -79,6 +97,41 @@ class ImageProvenanceTests(unittest.TestCase):
         self.assertEqual(proof["cas"], expected)
         self.assertEqual(proof["schema_proxy"], expected)
         self.assertEqual(set(proof["cas"]), set(expected))
+
+    def test_promotion_verifies_linux_amd64_in_the_published_oci_index(self):
+        manifest, calls, open_url, digest = fixture({
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.index.v1+json",
+            "manifests": [{"digest": "sha256:" + "1" * 64,
+                           "platform": {"os": "linux", "architecture": "amd64"}}],
+        })
+        with patch.object(provenance, "urlopen", side_effect=open_url), \
+                patch.dict(os.environ, {}, clear=True):
+            proof = provenance.verify(manifest, required_platform="linux/amd64",
+                                      required_revision=manifest["images"]["cas"]["revision"])
+        self.assertEqual(proof["cas"]["digest"], digest)
+        self.assertEqual(proof["cas"]["platform"], "linux/amd64")
+        self.assertEqual(len(calls), 6)
+
+    def test_promotion_rejects_oci_revision_label_that_differs_from_handoff(self):
+        manifest, _calls, open_url, _digest = fixture()
+        with patch.object(provenance, "urlopen", side_effect=open_url), \
+                patch.dict(os.environ, {}, clear=True):
+            with self.assertRaisesRegex(provenance.ProvenanceError, "revision label"):
+                provenance.verify(manifest, required_platform="linux/amd64",
+                                  required_revision="f" * 40)
+
+    def test_promotion_rejects_published_image_without_amd64_descriptor(self):
+        manifest, _calls, open_url, _digest = fixture({
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.index.v1+json",
+            "manifests": [{"digest": "sha256:" + "1" * 64,
+                           "platform": {"os": "linux", "architecture": "arm64"}}],
+        })
+        with patch.object(provenance, "urlopen", side_effect=open_url), \
+                patch.dict(os.environ, {}, clear=True):
+            with self.assertRaisesRegex(provenance.ProvenanceError, "linux/amd64"):
+                provenance.verify(manifest, required_platform="linux/amd64")
 
     def test_verify_rejects_digest_that_does_not_match_publisher_tag(self):
         manifest, _calls, open_url, _digest = fixture()

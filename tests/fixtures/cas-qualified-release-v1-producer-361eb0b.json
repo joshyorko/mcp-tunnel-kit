@@ -1,0 +1,56 @@
+{
+  "publication": {
+    "digest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "image_repository": "ghcr.io/joshyorko/codex-action-server",
+    "image_tag": "sha-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "platform": "linux/amd64",
+    "revision": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "run_url": "https://github.com/joshyorko/codex-action-server/actions/runs/125",
+    "status": "published"
+  },
+  "qualification": {
+    "behavior_coverage": {
+      "app/read": {
+        "result": "passed",
+        "strategy": "isolated_fixture"
+      }
+    },
+    "comparison_url": "https://github.com/joshyorko/codex-action-server/compare/dddddddddddddddddddddddddddddddddddddddd...eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "method_verdicts": {
+      "app/read": "already_approved"
+    },
+    "native_release": {
+      "asset_id": "42",
+      "asset_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "asset_url": "https://github.com/openai/codex/releases/download/rust-v0.166.0/codex-x86_64-unknown-linux-musl.tar.gz",
+      "binary_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "fixture_path": "tests/fixtures/protocol/codex_0.166.0_native_methods.json",
+      "fixture_sha256": "2baee7386cb82cd620bf3bee6e8e5cefbb7675ebcd0e71a0e8f0bafd7502ad18",
+      "qualification_run_url": "https://github.com/joshyorko/codex-action-server/actions/runs/123",
+      "tag": "rust-v0.166.0",
+      "version": "0.166.0"
+    },
+    "required_ci_url": "https://github.com/joshyorko/codex-action-server/actions/runs/124",
+    "run_url": "https://github.com/joshyorko/codex-action-server/actions/runs/123",
+    "status": "qualified",
+    "surface": {
+      "complete": true,
+      "methods": [
+        {
+          "name": "app/read",
+          "owner": "typed_action"
+        }
+      ],
+      "sha256": "eed9829efb195e5df8f52b8d78f173e15e0468c46952372292f5e9163487fdfe"
+    },
+    "withheld_methods": []
+  },
+  "receipt_sha256": "16edb3d0fc28890ba2936e16f839577707c843111db3d411604d5020663a8a1b",
+  "schema_version": 1,
+  "source": {
+    "commit_url": "https://github.com/joshyorko/codex-action-server/commit/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "merged": true,
+    "repository": "joshyorko/codex-action-server",
+    "revision": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+  }
+}

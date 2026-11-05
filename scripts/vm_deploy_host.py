@@ -27,6 +27,7 @@ import time
 import uuid
 import zipfile
 from instance_profile import decode, load as load_instance_profile, validate
+from native_drift import reconcile as reconcile_native_drift
 
 ROOT = None
 STATE = None
@@ -315,7 +316,7 @@ def identity(executor, *, exclude_memoryd=False, require_memoryd_absent=False, r
 def snapshot():
     owner,groups,tunnels=inspect()
     for name in ('control-plane-api-key','control-plane-tunnel-id','executor-auth-header','executor-pat'): private(STATE/'secrets'/name)
-    inventory={key:{'name':r['Name'].lstrip('/'),'state':r['State']['Status'],'health':r['State'].get('Health',{}).get('Status'),'image':r['Image'],'restart':r['HostConfig']['RestartPolicy']['Name']} for key,r in groups[owner].items() if r}
+    inventory={key:{'name':r['Name'].lstrip('/'),'container_id':r['Id'],'started_at':r['State']['StartedAt'],'state':r['State']['Status'],'health':r['State'].get('Health',{}).get('Status'),'image':r['Image'],'restart':r['HostConfig']['RestartPolicy']['Name']} for key,r in groups[owner].items() if r}
     if set(inventory)!=set(NAMES[owner]): raise ValueError('Incomplete current control-plane inventory')
     if any(r['health']!='healthy' for r in inventory.values()): raise ValueError('Current production health failed; do not stop it')
     if len(tunnels)!=1: raise ValueError('Production tunnel count must be exactly one')
@@ -327,6 +328,43 @@ def status():
     if (STORE/'current.json').exists():owner=json.loads(private(STORE/'current.json'))['authority']
     inventory={key:{'name':r['Name'].lstrip('/'),'state':r['State']['Status'],'health':r['State'].get('Health',{}).get('Status'),'image':r['Image'],'restart':r['HostConfig']['RestartPolicy']['Name']} for key,r in groups[owner].items() if r}
     return {'authority':owner,'inventory':inventory,'tunnel_count':len(tunnels),'healthy':len(inventory)==4 and all(x['health']=='healthy' and x['state']=='running' for x in inventory.values())}
+
+
+def native_drift(data):
+    """Read fixed version checks and target-bound diagnostics; never wake a thread."""
+    if data != {}:
+        raise ValueError('Native drift accepts no caller-supplied target or command')
+    validate_profile()
+    targets = json.loads(private(STATE / 'cas-targets.json'))
+    result = reconcile_native_drift(targets, NATIVE_SSH)
+    os.environ.update(EXECUTOR_URL='http://127.0.0.1:4312',
+                      EXECUTOR_PAT_FILE=str(STATE/'secrets/executor-pat'))
+    sys.path.insert(0, str(ROOT/'scripts'))
+    import compose_control as client
+    try:
+        _, session = client.executor_session()
+    except Exception:
+        session = None
+    for name, row in result['targets'].items():
+        probe = {'status': 'UNAVAILABLE', 'method': 'server/diagnostics', 'target': name}
+        row['native_rpc_smoke'] = probe
+        if row['connection'] in ('not_registered', 'blocked_or_unavailable'):
+            probe['status'] = 'BLOCKED'
+            continue
+        if session is None:
+            continue
+        diagnostics, error = _codex_tool(client, session, 'read_server_diagnostics',
+                                         {'payload': {'target': name}})
+        if error:
+            probe.update(status='FAIL', error_code=error)
+        elif (diagnostics.get('operation') != 'server/diagnostics'
+                or not isinstance(diagnostics.get('connection'), dict)
+                or diagnostics.get('connection', {}).get('target') != name
+                or not isinstance(diagnostics.get('result'), dict)):
+            probe.update(status='FAIL', error_code='NATIVE_TARGET_RESPONSE_MISMATCH')
+        else:
+            probe['status'] = 'PASS'
+    return result
 
 
 def _tunnel_key_inventory():
@@ -4510,12 +4548,12 @@ def main():
     if action=='lock':_ensure_private_state_store()
     elif action!='activation-plan' and action.startswith('activation-'):
         _verify_private_directory(STATE);_verify_private_directory(STORE)
-    elif action not in ('activation-plan','memoryd-preflight','memoryd-health','memoryd-wait','memoryd-status','memoryd-inventory','memoryd-transfer-preflight','memoryd-executor-origin-check',
+    elif action not in ('activation-plan','memoryd-preflight','memoryd-health','memoryd-wait','memoryd-status','memoryd-inventory','memoryd-transfer-preflight','memoryd-executor-origin-check','native-drift',
                         'devsy-plan','devsy-check','devsy-rollback-plan',
                         'devsy-tap-reconcile-plan','devsy-tap-reconcile',
                         'devsy-tap-rollback-plan','devsy-tap-rollback'):
         STORE.mkdir(mode=0o700,exist_ok=True)
-    data=json.load(sys.stdin) if action in ('native-acceptance-record','tunnel-key-prepare','images','image-check','network','network-check','wait','commit','baseline','set-current','rollback-commit','restart-local','activation-plan','activation-preflight','activation-begin','activation-pull-images','activation-install','activation-track','activation-seed','activation-network','activation-identity','activation-cleanup','activation-record','activation-memoryd-wait','activation-memoryd-network','activation-memoryd-restore','smoke','memoryd-adapter-prepare','memoryd-adapter-finalize','memoryd-transfer-prepare','memoryd-import-bundles','memoryd-network-allow','memoryd-app-register','memoryd-registration-reconcile','memoryd-legacy-reconcile','memoryd-identity-reconcile','memoryd-rollout-lock-check','memoryd-rollout-begin','memoryd-rollout-wait','memoryd-rollout-select','memoryd-rollout-accept','memoryd-rollout-finish','memoryd-rollout-abort','memoryd-rollout-reconcile','memoryd-rollout-release-check','devsy-plan','devsy-check','devsy-rollback-plan','devsy-apply','devsy-rollback','devsy-scope-rebind-check','devsy-scope-rebind','devsy-bridge-path-check','devsy-bridge-path-apply','devsy-tap-reconcile-plan','devsy-tap-reconcile','devsy-tap-rollback-plan','devsy-tap-rollback') else {}
+    data=json.load(sys.stdin) if action in ('native-acceptance-record','tunnel-key-prepare','images','image-check','network','network-check','wait','commit','baseline','set-current','rollback-commit','restart-local','activation-plan','activation-preflight','activation-begin','activation-pull-images','activation-install','activation-track','activation-seed','activation-network','activation-identity','activation-cleanup','activation-record','activation-memoryd-wait','activation-memoryd-network','activation-memoryd-restore','smoke','native-drift','memoryd-adapter-prepare','memoryd-adapter-finalize','memoryd-transfer-prepare','memoryd-import-bundles','memoryd-network-allow','memoryd-app-register','memoryd-registration-reconcile','memoryd-legacy-reconcile','memoryd-identity-reconcile','memoryd-rollout-lock-check','memoryd-rollout-begin','memoryd-rollout-wait','memoryd-rollout-select','memoryd-rollout-accept','memoryd-rollout-finish','memoryd-rollout-abort','memoryd-rollout-reconcile','memoryd-rollout-release-check','devsy-plan','devsy-check','devsy-rollback-plan','devsy-apply','devsy-rollback','devsy-scope-rebind-check','devsy-scope-rebind','devsy-bridge-path-check','devsy-bridge-path-apply','devsy-tap-reconcile-plan','devsy-tap-reconcile','devsy-tap-rollback-plan','devsy-tap-rollback') else {}
     if action == 'backup':
         raw = sys.stdin.read()
         data = json.loads(raw) if raw else {}
@@ -4552,6 +4590,7 @@ def main():
         fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB);print('LOCKED',flush=True);sys.stdin.read();return
     elif action=='snapshot':result=snapshot()
     elif action=='status':result=status()
+    elif action=='native-drift':result=native_drift(data)
     elif action=='memoryd-preflight':result=memoryd_preflight()
     elif action=='memoryd-health':result=memoryd_health()
     elif action=='memoryd-pin-adapter-image':result=memoryd_pin_adapter_image()

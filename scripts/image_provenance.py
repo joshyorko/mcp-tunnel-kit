@@ -69,7 +69,7 @@ def _publisher_main(revision: str) -> str:
     return current_main
 
 
-def _publisher_digest(revision: str) -> str:
+def _publisher_digest(revision: str) -> tuple[str, dict, str]:
     token_result = _json_get(
         f"{REGISTRY}/token?service=ghcr.io&scope=repository:joshyorko/codex-action-server:pull",
         {"Accept": "application/json"},
@@ -97,10 +97,73 @@ def _publisher_digest(revision: str) -> str:
         raise ProvenanceError("publisher image manifest is invalid") from None
     if not isinstance(document, dict) or document.get("schemaVersion") != 2:
         raise ProvenanceError("publisher image manifest is invalid")
-    return digest
+    return digest, document, token
 
 
-def verify(manifest: dict) -> dict[str, dict[str, str]]:
+def _linux_amd64(document: dict, token: str, required_revision: str | None = None) -> bool:
+    """Resolve the amd64 image config and verify its OCI revision label."""
+    if "manifests" in document:
+        descriptors = document.get("manifests")
+        if not isinstance(descriptors, list):
+            raise ProvenanceError("publisher image platform index is invalid")
+        matches = [row for row in descriptors if isinstance(row, dict)
+                   and isinstance(row.get("platform"), dict)
+                   and row["platform"].get("os") == "linux"
+                   and row["platform"].get("architecture") == "amd64"]
+        if len(matches) != 1:
+            raise ProvenanceError("publisher image does not contain one linux/amd64 platform")
+        descriptor = matches[0]
+        digest = descriptor.get("digest")
+        if not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+            raise ProvenanceError("publisher image platform descriptor is invalid")
+        request = Request(f"{REGISTRY}/v2/joshyorko/codex-action-server/manifests/{digest}",
+                          headers={"Authorization": "Bearer " + token, "Accept": MANIFEST_ACCEPT},
+                          method="GET")
+        try:
+            with urlopen(request, timeout=TIMEOUT_SECONDS) as response:
+                raw = response.read(8 * 1024 * 1024 + 1)
+        except (HTTPError, URLError, TimeoutError, OSError):
+            raise ProvenanceError("publisher amd64 image manifest could not be read") from None
+        if len(raw) > 8 * 1024 * 1024 or "sha256:" + hashlib.sha256(raw).hexdigest() != digest:
+            raise ProvenanceError("publisher amd64 image manifest digest is inconsistent")
+        try:
+            document = json.loads(raw)
+        except (UnicodeDecodeError, ValueError):
+            raise ProvenanceError("publisher amd64 image manifest is invalid") from None
+        if not isinstance(document, dict) or document.get("schemaVersion") != 2:
+            raise ProvenanceError("publisher amd64 image manifest is invalid")
+
+    config = document.get("config")
+    digest = config.get("digest") if isinstance(config, dict) else None
+    if not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+        raise ProvenanceError("publisher image config descriptor is invalid")
+    request = Request(f"{REGISTRY}/v2/joshyorko/codex-action-server/blobs/{digest}",
+                      headers={"Authorization": "Bearer " + token,
+                               "Accept": "application/vnd.oci.image.config.v1+json, application/vnd.docker.container.image.v1+json"},
+                      method="GET")
+    try:
+        with urlopen(request, timeout=TIMEOUT_SECONDS) as response:
+            raw = response.read(4 * 1024 * 1024 + 1)
+    except (HTTPError, URLError, TimeoutError, OSError):
+        raise ProvenanceError("publisher image platform config could not be read") from None
+    if len(raw) > 4 * 1024 * 1024:
+        raise ProvenanceError("publisher image platform config is too large")
+    if "sha256:" + hashlib.sha256(raw).hexdigest() != digest:
+        raise ProvenanceError("publisher image platform config digest is inconsistent")
+    try:
+        value = json.loads(raw)
+    except (UnicodeDecodeError, ValueError):
+        raise ProvenanceError("publisher image platform config is invalid") from None
+    if not isinstance(value, dict) or value.get("os") != "linux" or value.get("architecture") != "amd64":
+        raise ProvenanceError("publisher image is not linux/amd64")
+    labels = value.get("config", {}).get("Labels", {})
+    if required_revision is not None and labels.get("org.opencontainers.image.revision") != required_revision:
+        raise ProvenanceError("publisher OCI revision label does not match the qualified CAS source")
+    return True
+
+
+def verify(manifest: dict, *, required_platform: str | None = None,
+           required_revision: str | None = None) -> dict[str, dict[str, str]]:
     """Return immutable proof for CAS and schema proxy pins, making GETs only."""
     images = manifest.get("images") if isinstance(manifest, dict) else None
     if not isinstance(images, dict):
@@ -125,9 +188,15 @@ def verify(manifest: dict) -> dict[str, dict[str, str]]:
     checked: dict[tuple[str, str], tuple[str, str]] = {}
     for repository, revision in pins:
         current_main = _publisher_main(revision)
-        publisher_digest = _publisher_digest(revision)
+        publisher_digest, publisher_manifest, registry_token = _publisher_digest(revision)
         if publisher_digest != pins[(repository, revision)]:
             raise ProvenanceError("configured CAS digest does not match the publisher tag")
+        if required_platform is not None or required_revision is not None:
+            if required_platform not in (None,"linux/amd64"):
+                raise ProvenanceError("requested publisher image platform is not approved")
+            if required_revision is not None and not re.fullmatch(r"[0-9a-f]{40}", required_revision):
+                raise ProvenanceError("requested publisher OCI revision is invalid")
+            _linux_amd64(publisher_manifest, registry_token, required_revision)
         checked[(repository, revision)] = (publisher_digest, current_main)
 
     proof = {}
@@ -141,4 +210,6 @@ def verify(manifest: dict) -> dict[str, dict[str, str]]:
             "publisher_tag": "sha-" + image["revision"],
             "current_main": current_main,
         }
+        if required_platform is not None:
+            proof[name]["platform"] = required_platform
     return proof

@@ -297,6 +297,7 @@ def dispatch(original_command: str | None, *, profile: Path | None = None) -> in
         return 126
     codex = config["codex_bin"]
     allowed_commands = (
+        (codex, "--version"),
         (codex, "app-server", "daemon", "version"),
         (codex, "app-server", "proxy", "--sock", config["socket"]),
     )

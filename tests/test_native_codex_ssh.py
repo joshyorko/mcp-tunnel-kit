@@ -79,6 +79,7 @@ class NativeCodexSSHTests(unittest.TestCase):
         profile = self.write_profile(codex=codex)
         socket = Path(self.temp.name) / "codex.sock"
         commands = (
+            (f"{codex} --version", [str(codex), "--version"]),
             (f"{codex} app-server daemon version", [str(codex), "app-server", "daemon", "version"]),
             (f"{codex} app-server proxy --sock {socket}", [str(codex), "app-server", "proxy", "--sock", str(socket)]),
         )
@@ -101,6 +102,7 @@ class NativeCodexSSHTests(unittest.TestCase):
             "env FOO=bar " + allowed,
             f"{codex} app-server proxy --sock /tmp/other.sock",
             f"{codex} app-server daemon start",
+            f"{codex} install --version 0.1.0",
             "",
         )
         with patch.object(native.os, "execv") as execv:

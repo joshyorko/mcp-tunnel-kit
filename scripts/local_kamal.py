@@ -267,7 +267,7 @@ def main(argv=None):
                 confirm_import_quiescent=confirmed,
                 approve_legacy_abandon=legacy_approved,
                 rollout_id=rollout_id,
-                local=True, approve_full_stack=True, cas_digest='', cas_revision='',
+                local=True, approve_full_stack=True,
                 tunnel_api_key=tunnel_api_key,
                 native_target=os.environ.get('NATIVE_TARGET'),
                 native_cwd=os.environ.get('NATIVE_CWD'),

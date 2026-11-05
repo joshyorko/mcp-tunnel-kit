@@ -1,0 +1,67 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "github>joshyorko/renovate-config:org-inherited-config"
+  ],
+
+  "automerge": false,
+  "platformAutomerge": false,
+  "dependencyDashboard": true,
+  "dependencyDashboardApproval": true,
+  "prCreation": "status-success",
+  "prConcurrentLimit": 1,
+  "prHourlyLimit": 1,
+
+  "packageRules": [
+    {
+      "description": [
+        "Require review and CI for every tunnel-kit runtime, toolchain, and image update."
+      ],
+      "matchUpdateTypes": [
+        "major",
+        "minor",
+        "patch",
+        "pin",
+        "pinDigest",
+        "digest",
+        "replacement",
+        "rollback"
+      ],
+      "automerge": false,
+      "platformAutomerge": false,
+      "dependencyDashboardApproval": true,
+      "prCreation": "status-success"
+    },
+    {
+      "description": [
+        "Only the receipt-verified qualification promotion lane may update the paired production CAS and schema-proxy pins."
+      ],
+      "matchFileNames": [
+        "config/deploy-images.json"
+      ],
+      "matchPackageNames": [
+        "ghcr.io/joshyorko/codex-action-server"
+      ],
+      "enabled": false,
+      "automerge": false,
+      "platformAutomerge": false
+    },
+    {
+      "description": [
+        "Keep the executor and tunnel image references review-gated and grouped in one production manifest PR."
+      ],
+      "matchFileNames": [
+        "config/deploy-images.json"
+      ],
+      "matchPackageNames": [
+        "ghcr.io/usefulsoftwareco/executor-selfhost",
+        "ghcr.io/openai/tunnel-client"
+      ],
+      "groupName": "Tunnel-kit deployment images",
+      "automerge": false,
+      "platformAutomerge": false,
+      "dependencyDashboardApproval": true,
+      "prCreation": "status-success"
+    }
+  ]
+}
