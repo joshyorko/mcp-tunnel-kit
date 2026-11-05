@@ -92,10 +92,12 @@ def runtime_repo(tmp_path):
     return repo,source_sha
 
 
-def test_cas_without_merged_qualification_evidence_fails_closed_before_mutation():
+def test_cas_without_merged_qualification_evidence_fails_closed_before_mutation(tmp_path):
     before = generation()
     current = dict(before)
     calls = []
+    (tmp_path/'config').mkdir()
+    (tmp_path/'config/deploy-images.json').write_text(json.dumps(before['manifest']))
 
     def remote(action, data=None):
         calls.append((action, data))
@@ -106,7 +108,8 @@ def test_cas_without_merged_qualification_evidence_fails_closed_before_mutation(
             return {}
         raise AssertionError(f"Unexpected VM action: {action}")
 
-    with patch.object(d,"INSTANCE",json.loads((ROOT/"config/instance.example.json").read_text())), \
+    with patch.object(d,"ROOT",tmp_path), \
+         patch.object(d,"INSTANCE",json.loads((ROOT/"config/instance.example.json").read_text())), \
          patch.object(d, "trusted_context"), patch.object(d, "lock", return_value=nullcontext()), \
          patch.object(d, "remote", side_effect=remote), \
          patch.object(d, "prove_images", return_value={}), \

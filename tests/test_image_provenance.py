@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 from urllib.error import URLError
+from urllib.request import HTTPRedirectHandler
 import unittest
 from unittest.mock import patch
 
@@ -61,8 +62,8 @@ def fixture(manifest=None, compare=None, revision_label=None):
         if "/compare/" in url:
             value = compare or {
                 "status": "ahead",
-                "base_commit": {"sha": "54278b1ecc3c67d46ebdb25148971814243f51a6"},
-                "merge_base_commit": {"sha": "54278b1ecc3c67d46ebdb25148971814243f51a6"},
+                "base_commit": {"sha": revision},
+                "merge_base_commit": {"sha": revision},
             }
             return Response(value)
         if url.startswith("https://ghcr.io/token?"):
@@ -89,9 +90,9 @@ class ImageProvenanceTests(unittest.TestCase):
         self.assertTrue(all(timeout <= 10 for _, timeout in calls))
         expected = {
             "repository": "ghcr.io/joshyorko/codex-action-server",
-            "revision": "54278b1ecc3c67d46ebdb25148971814243f51a6",
+            "revision": manifest["images"]["cas"]["revision"],
             "digest": digest,
-            "publisher_tag": "sha-54278b1ecc3c67d46ebdb25148971814243f51a6",
+            "publisher_tag": "sha-" + manifest["images"]["cas"]["revision"],
             "current_main": "f" * 40,
         }
         self.assertEqual(proof["cas"], expected)
@@ -164,18 +165,23 @@ class ImageProvenanceTests(unittest.TestCase):
         self.assertEqual(calls, [])
 
     def test_optional_github_token_is_used_in_memory_and_never_in_errors(self):
-        manifest, calls, open_url, _digest = fixture()
-        with patch.object(provenance, "urlopen", side_effect=open_url), \
-                patch.dict(os.environ, {"GITHUB_TOKEN": "ghp_fixture_secret"}):
-            provenance.verify(manifest)
-        compare_request = calls[0][0]
-        self.assertEqual(compare_request.get_header("Authorization"), "Bearer ghp_fixture_secret")
+        for variable in ("GITHUB_TOKEN", "CAS_ARTIFACTS_READ_TOKEN"):
+            with self.subTest(variable=variable):
+                manifest, calls, open_url, _digest = fixture()
+                with patch.object(provenance, "urlopen", side_effect=open_url), \
+                        patch.dict(os.environ, {variable: "ghp_fixture_secret"}, clear=True):
+                    provenance.verify(manifest)
+                compare_request = calls[0][0]
+                self.assertEqual(compare_request.get_header("Authorization"), "Bearer ghp_fixture_secret")
+                redirected = HTTPRedirectHandler().redirect_request(
+                    compare_request, None, 302, "Found", {}, "https://example.invalid/redirect")
+                self.assertIsNone(redirected.get_header("Authorization"))
 
         def failed_request(_request, timeout):
             raise URLError("ghp_fixture_secret upstream details")
 
         with patch.object(provenance, "urlopen", side_effect=failed_request), \
-                patch.dict(os.environ, {"GITHUB_TOKEN": "ghp_fixture_secret"}):
+                patch.dict(os.environ, {"GITHUB_TOKEN": "ghp_fixture_secret"}, clear=True):
             with self.assertRaises(provenance.ProvenanceError) as raised:
                 provenance.verify(manifest)
         self.assertNotIn("ghp_fixture_secret", str(raised.exception))
