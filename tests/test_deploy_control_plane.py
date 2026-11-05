@@ -248,7 +248,7 @@ def test_remote_stdin_bootstrap_preserves_following_json():
 
 
 def test_remote_source_injects_stdlib_generation_validator_without_target_install():
-    names=("instance_profile","prepare_recovery_generation","devsy_vm_bootstrap",
+    names=("instance_profile","coordination_policy","prepare_recovery_generation","devsy_vm_bootstrap",
            "scope_binding_rebind","bridge_kubectl_path","compose_control","native_drift")
     previous={name:sys.modules.get(name) for name in names}
     try:

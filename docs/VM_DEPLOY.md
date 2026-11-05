@@ -1,5 +1,7 @@
 # VM control-plane deployment
 
+For the optional CAS relay policy, see [Managed CAS coordination policy](COORDINATION_POLICY.md).
+
 To register another device rather than redeploy an existing service, use
 [native device onboarding](NATIVE_ONBOARDING.md). It supports local Kamal and
 the protected workflow's `onboard-native`, `remove-native` and `rename-native`

@@ -34,6 +34,8 @@ HELP = '''Usage:
                                        Fence a proven abandoned legacy transfer
   bin/kamal deploy | rollback | preflight | status
   bin/kamal setup-local                 Install the isolated Kamal bundle
+  bin/kamal coordination-policy install --file PATH [--directory VM_DIRECTORY]
+                                       Atomically install an owner-private CAS pair policy
 
 NAME: executor, schema-proxy, cas, tunnel, memoryd. Loads .env.kamal.local.
 Deploy/rollback reuse recorded image pins. No application image is built locally.
@@ -218,6 +220,18 @@ def main(argv=None):
         print(HELP)
         return 0
     try:
+        if argv[:2] == ['coordination-policy', 'install']:
+            parser = argparse.ArgumentParser()
+            parser.add_argument('--file', type=Path, required=True)
+            parser.add_argument('--directory')
+            selected = parser.parse_args(argv[2:])
+            deploy.configure_local(deploy.ROOT / '.env.kamal.local')
+            deploy.coordination_policy_override(selected.directory)
+            deploy.trusted_context(os.environ, local=True)
+            with deploy.lock():
+                result = deploy.install_coordination_policy(selected.file)
+            print(json.dumps(result, indent=2))
+            return 0
         if argv[:1] == ['native'] or argv[:2] == ['accessory', 'logs']:
             bundle_environment()
             return native(argv[1:] if argv[0] == 'native' else argv)
