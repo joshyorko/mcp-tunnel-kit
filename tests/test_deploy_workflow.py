@@ -38,7 +38,8 @@ class DeployWorkflowTests(unittest.TestCase):
         self.assertRegex(text, r"(?ms)^      approve_full_stack:\n.*?^        type: boolean\n        default: false$")
         self.assertIn("FULL_APPROVAL: ${{ inputs.approve_full_stack }}", text)
         self.assertIn('if [ "$FULL_APPROVAL" = true ]; then args+=(--approve-full-stack); fi', text)
-        self.assertNotIn("${{ secrets.", text)
+        self.assertEqual(text.count("${{ secrets."), 1)
+        self.assertIn("OPTIONAL_TUNNEL_API_KEY: ${{ secrets.CONTROL_PLANE_API_KEY }}", text)
         self.assertNotIn("upload-artifact", text)
 
     def test_runner_source_accepts_only_repository_main_dispatch_on_named_pi(self):

@@ -114,6 +114,7 @@ jobs:
         if: inputs.operation != 'onboard-native' && inputs.operation != 'remove-native' && inputs.operation != 'rename-native'
         shell: bash
         env:
+          OPTIONAL_TUNNEL_API_KEY: ${{ secrets.CONTROL_PLANE_API_KEY }}
           OPERATION: ${{ inputs.operation }}
           CAS_DIGEST: ${{ inputs.cas_digest }}
           CAS_REVISION: ${{ inputs.cas_revision }}
@@ -131,6 +132,7 @@ jobs:
           TAP_RECONCILIATION_RUN_ATTEMPT: ${{ inputs.tap_reconciliation_run_attempt }}
         run: |
           set -euo pipefail
+          if [ -n "${OPTIONAL_TUNNEL_API_KEY:-}" ]; then export CONTROL_PLANE_API_KEY="$OPTIONAL_TUNNEL_API_KEY"; fi
           args=("$OPERATION" --cas-digest "$CAS_DIGEST" --cas-revision "$CAS_REVISION")
           if [ "$FULL_APPROVAL" = true ]; then args+=(--approve-full-stack); fi
           if [ "$BRIDGE_KUBECTL_PATH_APPROVAL" = true ]; then args+=(--approve-bridge-kubectl-path); fi

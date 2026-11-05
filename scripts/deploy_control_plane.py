@@ -1522,7 +1522,60 @@ def _pin_memoryd_before_core_change():
         raise ValueError('MemoryD adapter image could not be pinned before the core deployment')
 
 
+def deployment_tunnel_key(*, local=False):
+    import compose_control as c
+    values = c.credential_dotenv() if local else {}
+    value = os.environ.get('CONTROL_PLANE_API_KEY', values.get('CONTROL_PLANE_API_KEY'))
+    if value is not None and (not isinstance(value, str)
+            or not re.fullmatch(r'[!-~]{1,8192}', value)
+            or any(char in value for char in '\\"\'')):
+        raise ValueError('Set CONTROL_PLANE_API_KEY to one nonempty literal token')
+    return value
+
+
+def rotate_tunnel_key(key, current, directory, native_tuple):
+    request = {'api_key': key}
+    plan = remote('tunnel-key-prepare', request)
+    if not plan['changed']:
+        return False
+    config = configuration(directory, current.get('manifest', {}))
+    phase = 'preflight'
+    try:
+        remote('devsy-check', devsy_payload())
+        smoke(native_tuple, require_native=True)
+        phase = 'rotation'
+        kamal(config, 'stop', 'tunnel')
+        remote('tunnel-key-apply')
+        kamal(config, 'start', 'tunnel')
+        remote('wait', {'owner': 'kamal', 'service': 'tunnel'})
+        remote('tunnel-key-accept')
+        return True
+    except Exception:
+        if phase == 'preflight':
+            raise RuntimeError('Key rotation preflight failed; live credentials unchanged; retry deployment after resolving the gate') from None
+        try:
+            # A lost acceptance reply must never roll back an accepted key.
+            pending = remote('tunnel-key-prepare', request)
+            if not pending['changed']:
+                return True
+            kamal(config, 'stop', 'tunnel')
+            restored = remote('tunnel-key-restore')
+            if restored.get('accepted'):
+                kamal(config, 'start', 'tunnel')
+                return True
+            if restored['was_running']:
+                kamal(config, 'start', 'tunnel')
+                if restored['was_healthy']:
+                    remote('wait', {'owner': 'kamal', 'service': 'tunnel'})
+        except Exception:
+            raise RuntimeError('Tunnel key rotation is incomplete; private recovery state retained; rerun bin/kamal deploy') from None
+        raise RuntimeError('Tunnel key rotation failed; original key and running state restored') from None
+
+
 def execute(args):
+    tunnel_api_key = getattr(args, 'tunnel_api_key', None)
+    if args.operation == 'deploy' and not hasattr(args, 'tunnel_api_key'):
+        tunnel_api_key = deployment_tunnel_key()
     if getattr(args,'approve_legacy_abandon',False) and args.operation!='memoryd-legacy-reconcile':
         raise ValueError('Legacy abandonment approval is only valid for MemoryD legacy reconciliation')
     if args.operation=='memoryd-legacy-reconcile' and not getattr(args,'approve_legacy_abandon',False):
@@ -1649,6 +1702,14 @@ def execute(args):
             after=restore(previous,directory,native_tuple)
             remote('rollback-commit',{'current':previous,'previous':current})
             return {'operation':'rollback','authority':after['authority'],'inventory':after['inventory'],'identity_preserved':True}
+        credentials_updated = False
+        if args.operation == 'deploy' and tunnel_api_key is not None:
+            recorded = remote('current')
+            if not recorded or recorded.get('authority') != 'kamal':
+                raise ValueError('Key rotation requires recorded Kamal ownership')
+            credentials_updated = rotate_tunnel_key(tunnel_api_key, recorded, directory, native_tuple)
+            if credentials_updated:
+                print('Tunnel key accepted; subsequent image deployment failures or rollbacks retain the accepted key.', file=sys.stderr)
         before=remote('snapshot')
         remote('profile')
         remote('network-check',profile()['network'])
@@ -1704,7 +1765,7 @@ def execute(args):
             if after['identity']!=before['identity']:raise RuntimeError('Post-deploy Executor identity changed')
             deployed_source=current['source_sha'] if args.operation=='cas' else sha
             remote('commit',{'authority':'kamal','source_sha':deployed_source,'manifest':manifest,'identity':after['identity'],'publication_proof':publication})
-            return {'operation':args.operation,'authority':'kamal','inventory':after['inventory'],'smoke':smoke_result,'identity_preserved':True,'backup':backup,'source_sha':deployed_source,'controller_sha':sha}
+            return {'operation':args.operation,'authority':'kamal','inventory':after['inventory'],'smoke':smoke_result,'identity_preserved':True,'backup':backup,'source_sha':deployed_source,'controller_sha':sha,'credentials_updated':credentials_updated}
         except Exception:
             # Report only our fixed phase names, never subprocess output or secrets.
             try:
