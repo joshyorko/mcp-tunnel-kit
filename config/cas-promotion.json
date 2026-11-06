@@ -1,17 +1,17 @@
 {
   "comparison": {
-    "previous_manifest_digest": "sha256:bda7ef55e9d31574aefbd650ec38bfbe993b5adbbfffc15a49a7ca83e6ba26ca",
-    "promoted_digest": "sha256:e33719d82f99f85a54523e30afc5a1122b4f7691b5e63eb703795cf5368541f3",
+    "previous_manifest_digest": "sha256:e33719d82f99f85a54523e30afc5a1122b4f7691b5e63eb703795cf5368541f3",
+    "promoted_digest": "sha256:90381e8a04cc9b7bae77cd32b2c8b86fe8be7298877d724107523fc70da65f7f",
     "schema_proxy_promoted_together": true
   },
   "handoff": {
     "publication": {
-      "digest": "sha256:e33719d82f99f85a54523e30afc5a1122b4f7691b5e63eb703795cf5368541f3",
+      "digest": "sha256:90381e8a04cc9b7bae77cd32b2c8b86fe8be7298877d724107523fc70da65f7f",
       "image_repository": "ghcr.io/joshyorko/codex-action-server",
-      "image_tag": "sha-bfdb2251485034a7998475a1c80fe57cbfdc054a",
+      "image_tag": "sha-e5ad00ac5d955b5c07e9747e9ba80e689aca1afd",
       "platform": "linux/amd64",
-      "revision": "bfdb2251485034a7998475a1c80fe57cbfdc054a",
-      "run_url": "https://github.com/joshyorko/codex-action-server/actions/runs/42109764389",
+      "revision": "e5ad00ac5d955b5c07e9747e9ba80e689aca1afd",
+      "run_url": "https://github.com/joshyorko/codex-action-server/actions/runs/42219264243",
       "status": "published"
     },
     "qualification": {
@@ -249,7 +249,7 @@
           "strategy": "isolated_fixture"
         }
       },
-      "comparison_url": "https://github.com/joshyorko/codex-action-server/compare/b292fcae1767ae9a9c63cacc1e300feeae11de16...bfdb2251485034a7998475a1c80fe57cbfdc054a",
+      "comparison_url": "https://github.com/joshyorko/codex-action-server/compare/bfdb2251485034a7998475a1c80fe57cbfdc054a...e5ad00ac5d955b5c07e9747e9ba80e689aca1afd",
       "method_verdicts": {
         "account/rateLimits/read": "qualified",
         "account/usage/read": "qualified",
@@ -311,18 +311,18 @@
         "turn/steer": "qualified"
       },
       "native_release": {
-        "asset_id": "689712643",
-        "asset_sha256": "a0bf572d2f93f056c6712a6da348e96078dc84f3885fd7be67807ef389cb3978",
-        "asset_url": "https://github.com/openai/codex/releases/download/rust-v0.166.0/codex-x86_64-unknown-linux-musl.tar.gz",
-        "binary_sha256": "b8a11fedf24b2dfb59a70c9e52b030f9a508dcd49cd2dd0d41956f4c785156b8",
-        "fixture_path": "tests/fixtures/protocol/codex_0.166.0_native_catalog.json",
-        "fixture_sha256": "7872905ef234688bb7c6b21eee956c454107c779945af3a0389a8c34f8360f70",
-        "qualification_run_url": "https://github.com/joshyorko/codex-action-server/actions/runs/42107143447",
-        "tag": "rust-v0.166.0",
-        "version": "0.166.0"
+        "asset_id": "715506769",
+        "asset_sha256": "9d64836106d5b374e90ee4454c7ebcde7ca7106558bd7e41a34b9f26ebda251a",
+        "asset_url": "https://github.com/openai/codex/releases/download/rust-v0.167.0/codex-x86_64-unknown-linux-musl.tar.gz",
+        "binary_sha256": "cdcb45aaa01d0f14e298985e09465aebccd47f64ecd298aea44814af7b62bbda",
+        "fixture_path": "tests/fixtures/protocol/codex_0.167.0_native_methods.json",
+        "fixture_sha256": "f2553e3864c788ed68d596d9bbccf6d7d54dc64463603267826ab83b90a10a37",
+        "qualification_run_url": "https://github.com/joshyorko/codex-action-server/actions/runs/42217749397",
+        "tag": "rust-v0.167.0",
+        "version": "0.167.0"
       },
-      "required_ci_url": "https://github.com/joshyorko/codex-action-server/actions/runs/42109764353",
-      "run_url": "https://github.com/joshyorko/codex-action-server/actions/runs/42109764315",
+      "required_ci_url": "https://github.com/joshyorko/codex-action-server/actions/runs/42219264034",
+      "run_url": "https://github.com/joshyorko/codex-action-server/actions/runs/42219264023",
       "status": "qualified",
       "surface": {
         "complete": true,
@@ -564,49 +564,49 @@
       },
       "withheld_methods": []
     },
-    "receipt_sha256": "fae2c696790569964f394c77f8662d7cf6190beb816ae21cc7a74d636e380698",
+    "receipt_sha256": "2450379364f1dae8d560976cae3baeb9e3058b6757606e1fbeedc2305ddb19ff",
     "schema_version": 1,
     "source": {
-      "commit_url": "https://github.com/joshyorko/codex-action-server/commit/bfdb2251485034a7998475a1c80fe57cbfdc054a",
+      "commit_url": "https://github.com/joshyorko/codex-action-server/commit/e5ad00ac5d955b5c07e9747e9ba80e689aca1afd",
       "merged": true,
       "repository": "joshyorko/codex-action-server",
-      "revision": "bfdb2251485034a7998475a1c80fe57cbfdc054a"
+      "revision": "e5ad00ac5d955b5c07e9747e9ba80e689aca1afd"
     }
   },
   "handoff_source": {
     "artifact": {
-      "artifact_id": 13454216175,
-      "content_sha256": "e6fc03b807ae37b0cf2b9f07d1cf09963d6e172643d292f9500dacfc7d85ea38",
-      "digest": "sha256:98a459786335186fbe58095e18e58499fce63d29397f7520494c4768d694cc18",
+      "artifact_id": 13502923010,
+      "content_sha256": "a65b231b7d3b92fd358d6109beba707d15d1edca6788febf51a9adfd088c5bc3",
+      "digest": "sha256:a25bc0961ac2499f23953709fc1498e869c7edb28f86fe20f886d552193b1097",
       "file": "qualified-release.json",
-      "name": "cas-qualified-release-bfdb2251485034a7998475a1c80fe57cbfdc054a-42109764389",
-      "receipt_sha256": "fae2c696790569964f394c77f8662d7cf6190beb816ae21cc7a74d636e380698",
-      "run_id": "42109764389"
+      "name": "cas-qualified-release-e5ad00ac5d955b5c07e9747e9ba80e689aca1afd-42219264243",
+      "receipt_sha256": "2450379364f1dae8d560976cae3baeb9e3058b6757606e1fbeedc2305ddb19ff",
+      "run_id": "42219264243"
     },
-    "publisher_run_id": "42109764389",
+    "publisher_run_id": "42219264243",
     "repository": "joshyorko/codex-action-server",
-    "source_sha": "bfdb2251485034a7998475a1c80fe57cbfdc054a"
+    "source_sha": "e5ad00ac5d955b5c07e9747e9ba80e689aca1afd"
   },
   "image": {
-    "digest": "sha256:e33719d82f99f85a54523e30afc5a1122b4f7691b5e63eb703795cf5368541f3",
+    "digest": "sha256:90381e8a04cc9b7bae77cd32b2c8b86fe8be7298877d724107523fc70da65f7f",
     "platform": "linux/amd64",
     "repository": "ghcr.io/joshyorko/codex-action-server",
-    "revision": "bfdb2251485034a7998475a1c80fe57cbfdc054a"
+    "revision": "e5ad00ac5d955b5c07e9747e9ba80e689aca1afd"
   },
   "publisher": {
     "artifact": {
-      "artifact_id": 13454216175,
-      "content_sha256": "e6fc03b807ae37b0cf2b9f07d1cf09963d6e172643d292f9500dacfc7d85ea38",
-      "digest": "sha256:98a459786335186fbe58095e18e58499fce63d29397f7520494c4768d694cc18",
+      "artifact_id": 13502923010,
+      "content_sha256": "a65b231b7d3b92fd358d6109beba707d15d1edca6788febf51a9adfd088c5bc3",
+      "digest": "sha256:a25bc0961ac2499f23953709fc1498e869c7edb28f86fe20f886d552193b1097",
       "file": "qualified-release.json",
-      "name": "cas-qualified-release-bfdb2251485034a7998475a1c80fe57cbfdc054a-42109764389",
-      "receipt_sha256": "fae2c696790569964f394c77f8662d7cf6190beb816ae21cc7a74d636e380698",
-      "run_id": "42109764389"
+      "name": "cas-qualified-release-e5ad00ac5d955b5c07e9747e9ba80e689aca1afd-42219264243",
+      "receipt_sha256": "2450379364f1dae8d560976cae3baeb9e3058b6757606e1fbeedc2305ddb19ff",
+      "run_id": "42219264243"
     },
-    "run_url": "https://github.com/joshyorko/codex-action-server/actions/runs/42109764389",
-    "tag": "sha-bfdb2251485034a7998475a1c80fe57cbfdc054a",
+    "run_url": "https://github.com/joshyorko/codex-action-server/actions/runs/42219264243",
+    "tag": "sha-e5ad00ac5d955b5c07e9747e9ba80e689aca1afd",
     "trusted_ancestor": true,
-    "verified_digest": "sha256:e33719d82f99f85a54523e30afc5a1122b4f7691b5e63eb703795cf5368541f3"
+    "verified_digest": "sha256:90381e8a04cc9b7bae77cd32b2c8b86fe8be7298877d724107523fc70da65f7f"
   },
   "qualification": {
     "behavior_coverage": {
@@ -843,7 +843,7 @@
         "strategy": "isolated_fixture"
       }
     },
-    "comparison_url": "https://github.com/joshyorko/codex-action-server/compare/b292fcae1767ae9a9c63cacc1e300feeae11de16...bfdb2251485034a7998475a1c80fe57cbfdc054a",
+    "comparison_url": "https://github.com/joshyorko/codex-action-server/compare/bfdb2251485034a7998475a1c80fe57cbfdc054a...e5ad00ac5d955b5c07e9747e9ba80e689aca1afd",
     "method_verdicts": {
       "account/rateLimits/read": "qualified",
       "account/usage/read": "qualified",
@@ -905,18 +905,18 @@
       "turn/steer": "qualified"
     },
     "native_release": {
-      "asset_id": "689712643",
-      "asset_sha256": "a0bf572d2f93f056c6712a6da348e96078dc84f3885fd7be67807ef389cb3978",
-      "asset_url": "https://github.com/openai/codex/releases/download/rust-v0.166.0/codex-x86_64-unknown-linux-musl.tar.gz",
-      "binary_sha256": "b8a11fedf24b2dfb59a70c9e52b030f9a508dcd49cd2dd0d41956f4c785156b8",
-      "fixture_path": "tests/fixtures/protocol/codex_0.166.0_native_catalog.json",
-      "fixture_sha256": "7872905ef234688bb7c6b21eee956c454107c779945af3a0389a8c34f8360f70",
-      "qualification_run_url": "https://github.com/joshyorko/codex-action-server/actions/runs/42107143447",
-      "tag": "rust-v0.166.0",
-      "version": "0.166.0"
+      "asset_id": "715506769",
+      "asset_sha256": "9d64836106d5b374e90ee4454c7ebcde7ca7106558bd7e41a34b9f26ebda251a",
+      "asset_url": "https://github.com/openai/codex/releases/download/rust-v0.167.0/codex-x86_64-unknown-linux-musl.tar.gz",
+      "binary_sha256": "cdcb45aaa01d0f14e298985e09465aebccd47f64ecd298aea44814af7b62bbda",
+      "fixture_path": "tests/fixtures/protocol/codex_0.167.0_native_methods.json",
+      "fixture_sha256": "f2553e3864c788ed68d596d9bbccf6d7d54dc64463603267826ab83b90a10a37",
+      "qualification_run_url": "https://github.com/joshyorko/codex-action-server/actions/runs/42217749397",
+      "tag": "rust-v0.167.0",
+      "version": "0.167.0"
     },
-    "required_ci_url": "https://github.com/joshyorko/codex-action-server/actions/runs/42109764353",
-    "run_url": "https://github.com/joshyorko/codex-action-server/actions/runs/42109764315",
+    "required_ci_url": "https://github.com/joshyorko/codex-action-server/actions/runs/42219264034",
+    "run_url": "https://github.com/joshyorko/codex-action-server/actions/runs/42219264023",
     "status": "qualified",
     "surface": {
       "complete": true,
@@ -1158,14 +1158,14 @@
     },
     "withheld_methods": []
   },
-  "receipt_sha256": "af5762dc87c13bb261254149123b77bf93f027d8a817a217a7a1430432f201d4",
+  "receipt_sha256": "e8786eab5406bd3a71a653b9f91ab531c0a42915057da1c8c0bbd303a2e7ce60",
   "rollback": {
     "deployment_generation": "resolved from the recorded current generation at deploy time",
-    "manifest_digest": "sha256:bda7ef55e9d31574aefbd650ec38bfbe993b5adbbfffc15a49a7ca83e6ba26ca",
-    "source_revision": "54278b1ecc3c67d46ebdb25148971814243f51a6"
+    "manifest_digest": "sha256:e33719d82f99f85a54523e30afc5a1122b4f7691b5e63eb703795cf5368541f3",
+    "source_revision": "bfdb2251485034a7998475a1c80fe57cbfdc054a"
   },
   "schema_version": 1,
-  "source_revision": "bfdb2251485034a7998475a1c80fe57cbfdc054a",
+  "source_revision": "e5ad00ac5d955b5c07e9747e9ba80e689aca1afd",
   "status": "qualified_pending_deploy",
   "unqualified_methods": []
 }

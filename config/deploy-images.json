@@ -1,18 +1,18 @@
 {
   "images": {
     "cas": {
-      "digest": "sha256:e33719d82f99f85a54523e30afc5a1122b4f7691b5e63eb703795cf5368541f3",
+      "digest": "sha256:90381e8a04cc9b7bae77cd32b2c8b86fe8be7298877d724107523fc70da65f7f",
       "repository": "ghcr.io/joshyorko/codex-action-server",
-      "revision": "bfdb2251485034a7998475a1c80fe57cbfdc054a"
+      "revision": "e5ad00ac5d955b5c07e9747e9ba80e689aca1afd"
     },
     "executor": {
       "digest": "sha256:89a2b829150d01bc26305f844159ca8064ea8a4ace047490d09b6a3c8bdcf600",
       "repository": "ghcr.io/usefulsoftwareco/executor-selfhost:2.0.0-beta.12"
     },
     "schema_proxy": {
-      "digest": "sha256:e33719d82f99f85a54523e30afc5a1122b4f7691b5e63eb703795cf5368541f3",
+      "digest": "sha256:90381e8a04cc9b7bae77cd32b2c8b86fe8be7298877d724107523fc70da65f7f",
       "repository": "ghcr.io/joshyorko/codex-action-server",
-      "revision": "bfdb2251485034a7998475a1c80fe57cbfdc054a"
+      "revision": "e5ad00ac5d955b5c07e9747e9ba80e689aca1afd"
     },
     "tunnel": {
       "digest": "sha256:119799b778ba8411a124f53588f9dc837fd62ba03e5fadf77d675123c92ab58e",
