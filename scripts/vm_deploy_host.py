@@ -4438,6 +4438,12 @@ def _recovery_memoryd_absent():
 
 
 def smoke(request=None):
+    def check(gate, callback, *arguments):
+        try:
+            return callback(*arguments)
+        except Exception:
+            raise ValueError('Acceptance smoke failed: '+gate) from None
+
     request = request or {}
     if not isinstance(request, dict):
         raise ValueError("Smoke request is invalid")
@@ -4449,8 +4455,8 @@ def smoke(request=None):
     require_native = request.get("require_native") is True
     os.environ.update(EXECUTOR_URL='http://127.0.0.1:4312',EXECUTOR_PAT_FILE=str(STATE/'secrets/executor-pat'))
     sys.path.insert(0,str(ROOT/'scripts'));import compose_control as c
-    _,m=c.executor_session();c.verify_compact(m)
-    profile=json.loads(private(STATE/'bootstrap/devsy-integration.json'))['profile'];c.read_devsy(m,profile)
+    _,m=check('catalog',c.executor_session);check('catalog',c.verify_compact,m)
+    profile=json.loads(private(STATE/'bootstrap/devsy-integration.json'))['profile'];check('devsy',c.read_devsy,m,profile)
     memoryd_discovery = 'UNREGISTERED'
     memoryd_restored=False
     captured=recovery is not None and recovery.get('memoryd',{}).get('status')=='captured'
@@ -4463,7 +4469,7 @@ def smoke(request=None):
             if captured:raise ValueError('Captured MemoryD provider is unavailable')
             memoryd_discovery = 'UNAVAILABLE'
         else:
-            c.search_memoryd(m)
+            check('memoryd',c.search_memoryd,m)
             memoryd_discovery = 'PASS'
             if captured:
                 _verified_memoryd_restore(recovery)

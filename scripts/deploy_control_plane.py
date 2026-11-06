@@ -1959,12 +1959,17 @@ def execute(args):
                     kamal(config,'reboot',name);remote('wait',{'owner':'kamal','service':name})
                 phase='devsy-start'
                 remote('devsy-start')
-            phase='acceptance'
-            after=remote('snapshot');smoke_result=smoke(native_tuple, require_native=args.operation!='cas')
+            phase='acceptance-snapshot'
+            after=remote('snapshot')
+            phase='acceptance-smoke'
+            smoke_result=smoke(native_tuple, require_native=args.operation!='cas')
+            phase='acceptance-identity'
             if after['identity']!=before['identity']:raise RuntimeError('Post-deploy Executor identity changed')
             deployed_source=current['source_sha'] if args.operation=='cas' else sha
             if args.operation=='cas':
+                phase='acceptance-image-check'
                 image_ids=remote('image-check',manifest)['image_ids']
+                phase='acceptance-pair-isolation'
                 _assert_cas_pair_rollout(before,after,image_ids)
                 deploy_receipt=_cas_deployment_receipt(
                     current,manifest,promotion_evidence,status='deployed',rollback_status='available')
@@ -1978,14 +1983,22 @@ def execute(args):
                             'identity':after['identity'],'publication_proof':publication}
             if 'cas_coordination_policy_dir' in INSTANCE['vm']:
                 generation['cas_coordination_policy_dir'] = INSTANCE['vm']['cas_coordination_policy_dir']
+            phase='acceptance-commit'
             remote('commit',generation)
             result={'operation':args.operation,'authority':'kamal','inventory':after['inventory'],
                     'smoke':smoke_result,'identity_preserved':True,'backup':backup,
                     'source_sha':deployed_source,'controller_sha':sha,'credentials_updated':credentials_updated}
             if deploy_receipt is not None:result.update(status='deployed',deployment_receipt=deploy_receipt)
             return result
-        except Exception:
+        except Exception as error:
             # Report only our fixed phase names, never subprocess output or secrets.
+            if (phase=='acceptance-smoke' and type(error) is RuntimeError
+                    and len(error.args)==1 and isinstance(error.args[0],str)):
+                phase={
+                    'VM smoke refused; Deployment boundary refused: Acceptance smoke failed: catalog':'acceptance-smoke-catalog',
+                    'VM smoke refused; Deployment boundary refused: Acceptance smoke failed: devsy':'acceptance-smoke-devsy',
+                    'VM smoke refused; Deployment boundary refused: Acceptance smoke failed: memoryd':'acceptance-smoke-memoryd',
+                }.get(error.args[0],phase)
             if args.operation=='cas':
                 try:
                     restore_cas(current,directory,native_tuple,before=before)

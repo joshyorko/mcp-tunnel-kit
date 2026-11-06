@@ -378,9 +378,11 @@ def test_current_cas_manifest_is_noop_before_memoryd_pinning(tmp_path):
     assert "images" not in calls and "backup-cas" not in calls
 
 
-@pytest.mark.parametrize("legacy,drift_service", [
-    (False,None),(True,None),(True,'cas'),(True,'schema-proxy')])
-def test_cas_deploy_updates_pair_and_rolls_back_after_receipt_commit_failure(tmp_path,legacy,drift_service):
+@pytest.mark.parametrize("legacy,drift_service,failure_gate", [
+    (False,None,'commit'),(True,None,'commit'),(True,'cas','commit'),(True,'schema-proxy','commit'),
+    *((False,None,gate) for gate in ('snapshot','smoke','identity','image-check','pair-isolation',
+                                   'smoke-catalog','smoke-devsy','smoke-memoryd','smoke-private'))])
+def test_cas_deploy_reports_safe_failed_gate_and_rolls_back(tmp_path,legacy,drift_service,failure_gate):
     import json as json_module
     current_manifest,candidate_manifest,evidence=cas_promotion_fixture()
     if legacy:
@@ -403,6 +405,8 @@ def test_cas_deploy_updates_pair_and_rolls_back_after_receipt_commit_failure(tmp
         "cas":{"container_id":"new-cas","started_at":"cas-new-start","image":"new-cas-image","state":"running","health":"healthy"},
         "schema-proxy":{"container_id":"new-schema","started_at":"schema-new-start","image":"new-schema-image","state":"running","health":"healthy"}}
     deployed={**before,"inventory":promoted_inventory}
+    if failure_gate=='identity':deployed['identity']='unexpected-identity'
+    if failure_gate=='pair-isolation':promoted_inventory['cas']['image']='unexpected-image'
     rollback_inventory={**before_inventory,
         "cas":{"container_id":"rollback-cas","started_at":"rollback-cas-start","image":"old-cas-image","state":"running","health":"healthy"},
         "schema-proxy":{"container_id":"rollback-schema","started_at":"rollback-schema-start","image":"old-schema-image","state":"running","health":"healthy"}}
@@ -413,15 +417,31 @@ def test_cas_deploy_updates_pair_and_rolls_back_after_receipt_commit_failure(tmp
              "executor":"exec-image","tunnel":"tunnel-image"}
     new_ids={"cas":"new-cas-image","schema_proxy":"new-schema-image",
              "executor":"exec-image","tunnel":"tunnel-image"}
-    snapshots=iter((before,deployed,restored));image_checks=iter((old_ids,new_ids,old_ids));calls=[]
+    snapshots=iter((before,deployed,restored));calls=[]
     def remote(action,data=None):
         calls.append((action,data))
-        if action=="snapshot":return next(snapshots)
+        if action=="snapshot":
+            result=next(snapshots)
+            if failure_gate=='snapshot' and result is deployed:
+                raise RuntimeError('private-token /private/snapshot')
+            return result
         if action=="current":return generation
-        if action=="image-check":return {"image_ids":next(image_checks)}
+        if action=="image-check":
+            result=new_ids if data==candidate_manifest else old_ids
+            if failure_gate=='image-check' and result is new_ids:
+                raise RuntimeError('private-token /private/image-check')
+            return {"image_ids":result}
         if action=="images":return {"image_ids":new_ids}
-        if action=="commit":raise RuntimeError("fixture receipt commit failure")
+        if action=="commit":raise RuntimeError('private-token /private/receipt-commit')
         return {}
+    smoke_results=[{},{},{}]
+    if failure_gate.startswith('smoke'):
+        detail='private-token /private/smoke'
+        if failure_gate!='smoke':
+            gate=failure_gate.removeprefix('smoke-')
+            detail='VM smoke refused; Deployment boundary refused: Acceptance smoke failed: '+gate
+            if gate=='private':detail='VM smoke refused; Deployment boundary refused: Acceptance smoke failed: catalog private-token'
+        smoke_results[1]=RuntimeError(detail)
     args=SimpleNamespace(local=False,operation="cas",native_target=None,native_cwd=None,
                          native_thread_id=None,approve_full_stack=False)
     try:
@@ -431,7 +451,7 @@ def test_cas_deploy_updates_pair_and_rolls_back_after_receipt_commit_failure(tmp
              patch.object(d,"devsy_payload",return_value={}), \
              patch.object(d,"prove_images",return_value={}),patch.object(d,"_verified_cas_candidate",return_value=evidence), \
              patch.object(d,"_pin_memoryd_before_core_change") as memoryd_pin,patch.object(d,"kamal") as kamal, \
-             patch.object(d,"smoke",side_effect=[{},{},{}]), \
+             patch.object(d,"smoke",side_effect=smoke_results), \
              patch.dict(os.environ,{"GITHUB_SHA":"b"*40}):
             with pytest.raises(ValueError if drift_service else RuntimeError) as caught:
                 d.execute(args)
@@ -442,6 +462,10 @@ def test_cas_deploy_updates_pair_and_rolls_back_after_receipt_commit_failure(tmp
             assert not any(action in ('images','backup-cas','commit','set-current') for action,_data in calls)
             return
         receipt=json_module.loads(str(caught.value))
+        expected_gate='smoke' if failure_gate=='smoke-private' else failure_gate
+        assert receipt['phase']=='acceptance-'+expected_gate
+        assert receipt['deployment_receipt']['failure_reason']=='acceptance-'+expected_gate
+        assert 'private-token' not in str(caught.value) and '/private/' not in str(caught.value)
         assert receipt["automatic_rollback"]=="restored"
         assert receipt["deployment_receipt"]["rollback_digest"]==current_manifest["images"]["cas"]["digest"]
         assert receipt["deployment_receipt"]["rollback_source_revision"]==current_manifest["images"]["cas"]["revision"]
@@ -450,7 +474,7 @@ def test_cas_deploy_updates_pair_and_rolls_back_after_receipt_commit_failure(tmp
         assert receipt['deployment_receipt']['rollback_generation_source_sha']==generation['source_sha']
         assert [call.args[2] for call in kamal.call_args_list]==[
             "schema-proxy","cas","schema-proxy","cas"]
-        assert sum(action=="commit" for action,_data in calls)==1
+        assert sum(action=="commit" for action,_data in calls)==(failure_gate=='commit')
         assert calls[-1]==("set-current",generation)
         assert configuration.call_args_list[-1].args[1]==current_manifest
     finally:
