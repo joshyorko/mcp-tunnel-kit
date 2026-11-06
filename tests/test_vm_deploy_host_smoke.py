@@ -157,8 +157,30 @@ def test_active_recovery_reports_missing_memoryd_without_skipping_core_checks(tm
 
 def test_normal_smoke_fails_closed_when_registered_memoryd_is_missing(tmp_path, monkeypatch):
     recovery_smoke_host(tmp_path, monkeypatch)
-    with pytest.raises(ValueError, match="MemoryD discovery failed"):
+    with pytest.raises(ValueError, match="Acceptance smoke failed: memoryd"):
         host.smoke()
+
+
+@pytest.mark.parametrize('callback,gate', [
+    ('executor_session','catalog'),('verify_compact','catalog'),
+    ('read_devsy','devsy'),('search_memoryd','memoryd'),
+])
+def test_smoke_reports_only_fixed_gate_without_private_exception(tmp_path, monkeypatch, callback, gate):
+    import traceback
+
+    fake=configured_host(tmp_path, monkeypatch, session=FakeSession())
+    if gate=='memoryd':
+        marker=host.STATE/'bootstrap/memoryd-integration.json'
+        marker.parent.mkdir(parents=True)
+        marker.touch()
+    def fail(*_args):
+        raise ValueError('private-token /private/input')
+    setattr(fake,callback,fail)
+    with pytest.raises(ValueError) as caught:
+        host.smoke()
+    assert str(caught.value)=='Acceptance smoke failed: '+gate
+    rendered=''.join(traceback.format_exception(caught.value))
+    assert 'private-token' not in rendered and '/private/input' not in rendered
 
 
 @pytest.mark.parametrize("activation_id,status", [
@@ -214,7 +236,7 @@ def test_recovery_smoke_rejects_incomplete_docker_inspection(tmp_path, monkeypat
 def test_recovery_smoke_does_not_skip_discovery_when_any_memoryd_state_exists(
         tmp_path, monkeypatch, rows, volumes):
     recovery_smoke_host(tmp_path, monkeypatch, rows=rows, volumes=volumes)
-    with pytest.raises(ValueError, match="MemoryD discovery failed"):
+    with pytest.raises(ValueError, match="Acceptance smoke failed: memoryd"):
         host.smoke({"activation_id": "c" * 32})
 
 
