@@ -6,6 +6,14 @@ reports. It requires no account, network request, file upload, or service restar
 Submit only synthetic or otherwise nonsecret data. Chat tool arguments and
 results remain part of the conversation; this is not a secret-data channel.
 
+The existing live app was updated through Executor app management after exact
+beta.12 tests and independent review. Fresh discovery verified the bounded
+input signature, and a new five-row dataset/custom grouped query executed from
+chat. All ten deployed files matched the reviewed source; repeated query rows
+and the three fixed reports matched. See the [live receipt](evidence/dynamic-live-installation.json),
+[exact-host acceptance](evidence/dynamic-beta12-acceptance.json), and
+[payload hashes](evidence/dynamic-source-hashes.json).
+
 ## Input schema
 
 `tools["wasm-retail-sql"].analyze` accepts exactly these three properties:
@@ -110,3 +118,13 @@ literals, nulls, maximum row count/column count, and cancellation. Fixed-report
 tests still run. Deploy only through the existing Executor app management API
 after those checks; retain the app ID and verify existing source ownership
 before saving the complete new file list.
+
+When updating through Code Mode, read `appManagement.source` and verify its
+revision and contents against the owned app's recorded baseline. Retain unchanged
+files remotely, splice in only reviewed updates, and save the **complete** file
+list with `appManagement.commit` using that revision as `expected`. Deploy the
+returned immutable commit to the same app ID; do not create a replacement app.
+Read back the deployed source and compare every file. The source exceeds Code
+Mode's 64 KiB output budget: compare bounded file groups within execute and
+return only match flags and deployment metadata, rather than returning the
+whole source. Preserve `sqlite-glue.js` and the license exactly.
