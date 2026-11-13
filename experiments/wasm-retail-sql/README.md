@@ -10,6 +10,18 @@ Owner: the operator who explicitly installs **WASM Retail SQL**. Only this new
 app belongs to the experiment. No accounts, credentials, persisted app data,
 external API calls, sidecars, or existing-app edits are required.
 
+The explicitly authorized live app-only install succeeded after
+[PR #78](https://github.com/joshyorko/mcp-tunnel-kit/pull/78) was published.
+Fresh connected-MCP discovery and calls verified
+`tools["wasm-retail-sql"].margin({})`, `.inventory({})`, and `.outliers({})`.
+All seven deployed source files matched the reviewed payload byte-for-byte;
+all three reports matched the disposable beta.12 results. A repeated margin
+call returned identical JSON. See [the installation receipt](evidence/live-installation.json)
+for app/deployment IDs, discovered signatures, and actual results, and
+[source hashes](evidence/source-hashes.json) for the reviewed payload.
+No accessory was upgraded or restarted. Visibility in another ChatGPT session
+still depends on that session's existing Executor connection and tool discovery.
+
 ## Check compatibility
 
 The connected live Executor returned `framework.release({}).version` =
