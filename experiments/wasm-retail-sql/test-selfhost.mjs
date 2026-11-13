@@ -5,6 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { createServer } from 'node:net';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { sourceFiles } from './pack.mjs';
+import { dynamicCases } from './test/dynamic-cases.mjs';
 
 const image = 'ghcr.io/usefulsoftwareco/executor-selfhost:2.0.0-beta.12@sha256:89a2b829150d01bc26305f844159ca8064ea8a4ace047490d09b6a3c8bdcf600';
 const name = 'tunnel-kit-wasm-fixture-' + randomUUID();
@@ -34,12 +35,12 @@ try {
   started = true;
   let cookie = '';
   const jar = new Map();
-  async function request(path, body) {
+  async function request(path, body, rejected = false) {
     const response = await fetch(origin + path, {
       method: body === undefined ? 'GET' : 'POST',
       headers: { 'Content-Type': 'application/json', Origin: origin, Cookie: cookie },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-      signal: AbortSignal.timeout(90000),
+      signal: AbortSignal.timeout(path.endsWith('/tools/call') ? 8000 : 90000),
     });
     const cookies = response.headers.getSetCookie();
     for (const value of cookies) {
@@ -48,6 +49,12 @@ try {
     }
     cookie = [...jar.values()].join('; ');
     const data = await response.json();
+    if (rejected) {
+      assert.notEqual(response.status, 200, 'Forbidden SQL/input unexpectedly executed');
+      assert.ok([400, 422, 502].includes(response.status), JSON.stringify({ status: response.status, data }));
+      assert.ok(['ToolCallFailed', 'InputInvalid'].includes(data._tag ?? data.code));
+      return { status: response.status, code: data._tag ?? data.code };
+    }
     assert.equal(response.status, 200, JSON.stringify({ path, status: response.status, data }));
     return data;
   }
@@ -70,7 +77,7 @@ try {
   const app = await request(prefix + '/apps/deploy', { name: 'WASM Retail SQL', files: await sourceFiles() });
   const catalog = await request(`${prefix}/apps/${app.id}/tools`);
   assert.deepEqual(catalog.items.map(tool => [tool.name, tool.readOnly]).sort(),
-    [['inventory', true], ['margin', true], ['outliers', true]]);
+    [['analyze', true], ['inventory', true], ['margin', true], ['outliers', true]]);
   const results = {};
   for (const tool of ['margin', 'inventory', 'outliers']) {
     results[tool] = await request(`${prefix}/apps/${app.id}/tools/call`, { tool, input: {}, kind: 'query' });
@@ -87,8 +94,24 @@ try {
   }
   assert.deepEqual(await request(`${prefix}/apps/${app.id}/tools/call`,
     { tool: 'margin', input: {}, kind: 'query' }), results.margin);
+  const { input, bombs, badInputs } = dynamicCases();
+  const callDynamic = (input, rejected = false) => request(`${prefix}/apps/${app.id}/tools/call`,
+    { tool: 'analyze', input, kind: 'query' }, rejected);
+  const dynamic = await callDynamic(input);
+  assert.deepEqual(dynamic.rows, [['Tea', 100], ['Coffee', 90]]);
+  assert.equal(dynamic.provenance.wasmInstance, true);
+  assert.equal(dynamic.provenance.queryOnly, true);
+  const rejections = [];
+  for (const sql of bombs) rejections.push(await callDynamic({ ...input, sql }, true));
+  for (const value of badInputs) rejections.push(await callDynamic(value, true));
+  assert.deepEqual((await callDynamic(input)).rows, dynamic.rows);
+  for (const tool of ['margin', 'inventory', 'outliers']) {
+    assert.deepEqual((await request(`${prefix}/apps/${app.id}/tools/call`,
+      { tool, input: {}, kind: 'query' })).rows, results[tool].rows);
+  }
+  console.log(`Dynamic SQL passed; ${rejections.length} forbidden SQL/input cases rejected.`);
   await mkdir('.build', { recursive: true });
-  await writeFile('.build/selfhost-results.json', JSON.stringify({ image, catalog, results }, null, 2));
+  await writeFile('.build/selfhost-results.json', JSON.stringify({ image, catalog, results, dynamic, rejections }, null, 2));
   console.log('beta.12 installed acceptance passed; results in .build/selfhost-results.json.');
 } finally {
   if (started) docker('stop', '--time=5', name);

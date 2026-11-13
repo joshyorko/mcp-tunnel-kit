@@ -2,7 +2,7 @@ import initSqlJs from './sqlite-glue.js';
 import wasmModule from 'sql.js/dist/sql-wasm.wasm';
 import { reports, setupSql, type Report } from './dataset.js';
 
-const wasmSha256 = '0734155c83e493983d1f2ff5b09a4fab6e35a32e9449c7e4e545756439f62d73';
+export const wasmSha256 = '0734155c83e493983d1f2ff5b09a4fab6e35a32e9449c7e4e545756439f62d73';
 let instance: WebAssembly.Instance | undefined;
 let engine: ReturnType<typeof initSqlJs> | undefined;
 
@@ -15,6 +15,20 @@ function loadEngine() {
     },
   });
   return engine;
+}
+
+export async function createEmptyDatabase() {
+  const SQL = await loadEngine();
+  const memory = instance?.exports.M;
+  if (!(memory instanceof WebAssembly.Memory) || memory.buffer.byteLength > 64 * 1024 * 1024) {
+    throw new Error('WASM memory budget exceeded');
+  }
+  // These APIs are not exported by sql.js@1.13.0. Fail closed on an unexpected
+  // artifact rather than silently skipping a newly available authorizer.
+  if (Object.hasOwn(SQL, '_sqlite3_set_authorizer') || Object.hasOwn(SQL, 'setAuthorizer')) {
+    throw new Error('Unexpected authorizer API; review the pinned artifact');
+  }
+  return { db: new SQL.Database(), memory, wasmInstance: instance instanceof WebAssembly.Instance };
 }
 
 export async function openDatabase() {

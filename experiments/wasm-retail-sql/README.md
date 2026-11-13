@@ -1,10 +1,15 @@
 # Run the optional WASM retail SQL lab
 
-This opt-in proof of concept adds three read-only Executor app tools. Nothing in
+This opt-in proof of concept adds three fixed read-only report tools. Nothing in
 Compose, Kamal, bootstrap, or the existing apps installs it automatically.
 The app executes real SQLite WASM over 50,000 synthetic orders and 100 inventory
 rows, generated entirely by SQL with seed `20261112`. It returns category margin,
 inventory exposure, and loss outliers as compact JSON for ChatGPT charts.
+
+It also includes a bounded programmable `analyze` tool for rows supplied directly
+in chat and a restricted SELECT query. See [dynamic SQL](DYNAMIC_SQL.md) for the
+precise input schema, grammar, safeguards, and limitations. The fixed-report
+limits below apply to the original three reports; dynamic limits are separate.
 
 Owner: the operator who explicitly installs **WASM Retail SQL**. Only this new
 app belongs to the experiment. No accounts, credentials, persisted app data,

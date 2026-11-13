@@ -1,8 +1,19 @@
 import { analyze, openDatabase } from '../engine.js';
+import { analyzeData } from '../dynamic.js';
 
 export default {
   async fetch(request: Request) {
     const path = new URL(request.url).pathname;
+    if (path === '/dynamic') {
+      try { return Response.json(await analyzeData(await request.json())); }
+      catch { return Response.json({ error: 'rejected' }, { status: 400 }); }
+    }
+    if (path === '/cancelled') {
+      const controller = new AbortController(); controller.abort();
+      try { await analyzeData({}, controller.signal); }
+      catch (error) { return Response.json({ aborted: error instanceof DOMException && error.name === 'AbortError' }); }
+      return Response.json({ aborted: false });
+    }
     if (path === '/guards') {
       const db = await openDatabase();
       let writesRefused = 0;

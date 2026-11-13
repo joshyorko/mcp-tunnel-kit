@@ -2,7 +2,7 @@ import { readFile, mkdir, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 
 export async function sourceFiles() {
-  const paths = ['index.ts', 'engine.ts', 'dataset.ts', 'output.ts', 'sqlite-glue.js', 'SQLJS-LICENSE'];
+  const paths = ['index.ts', 'engine.ts', 'dataset.ts', 'output.ts', 'dynamic-schema.ts', 'dynamic.ts', 'select.ts', 'sqlite-glue.js', 'SQLJS-LICENSE'];
   const files = await Promise.all(paths.map(async path => ({ path, content: await readFile(path, 'utf8') })));
   const manifest = JSON.parse(await readFile('package.json', 'utf8'));
   files.push({ path: 'package.json', content: JSON.stringify({
