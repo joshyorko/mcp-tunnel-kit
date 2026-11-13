@@ -1,0 +1,20 @@
+{
+  "name": "mcp-tunnel-kit-wasm-retail-sql",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "apps": "0.0.1-beta.65",
+    "sql.js": "1.13.0"
+  },
+  "devDependencies": {
+    "@types/sql.js": "1.4.9",
+    "esbuild": "0.25.12",
+    "typescript": "5.9.3",
+    "workerd": "1.20260918.1"
+  }
+}

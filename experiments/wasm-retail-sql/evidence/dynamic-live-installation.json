@@ -1,0 +1,173 @@
+{
+  "scope": "Existing live app updated through Executor management only",
+  "kitSourceCommit": "b80e54bed22efad4febcc9bc77d4f4f9fdabace1",
+  "pullRequest": "https://github.com/joshyorko/mcp-tunnel-kit/pull/78",
+  "app": "app_f772eaa4-5e04-4e93-9c1c-29ed99d14683",
+  "slug": "wasm-retail-sql",
+  "previousDeployment": "dpl_ed637bcf-a49b-473f-8f7b-c329e8787525",
+  "deployment": "dpl_b06d8708-c058-44d3-aa93-848147c2942b",
+  "appSourceCommit": "3a3241959a28049557dab6c7dd3c0e9be3647651",
+  "sourceReadback": {
+    "exactMatch": true,
+    "files": 10,
+    "deployment": "dpl_b06d8708-c058-44d3-aa93-848147c2942b",
+    "sourceCommit": "3a3241959a28049557dab6c7dd3c0e9be3647651",
+    "checks": [
+      {
+        "id": "dpl_b06d8708-c058-44d3-aa93-848147c2942b",
+        "commit": "3a3241959a28049557dab6c7dd3c0e9be3647651",
+        "fileCount": 10,
+        "matches": [
+          {
+            "path": "index.ts",
+            "exact": true
+          },
+          {
+            "path": "engine.ts",
+            "exact": true
+          },
+          {
+            "path": "dataset.ts",
+            "exact": true
+          },
+          {
+            "path": "output.ts",
+            "exact": true
+          },
+          {
+            "path": "dynamic-schema.ts",
+            "exact": true
+          },
+          {
+            "path": "dynamic.ts",
+            "exact": true
+          },
+          {
+            "path": "select.ts",
+            "exact": true
+          }
+        ]
+      },
+      {
+        "id": "dpl_b06d8708-c058-44d3-aa93-848147c2942b",
+        "commit": "3a3241959a28049557dab6c7dd3c0e9be3647651",
+        "fileCount": 10,
+        "matches": [
+          {
+            "path": "sqlite-glue.js",
+            "exact": true
+          },
+          {
+            "path": "SQLJS-LICENSE",
+            "exact": true
+          },
+          {
+            "path": "package.json",
+            "exact": true
+          }
+        ]
+      }
+    ]
+  },
+  "signature": {
+    "path": "tools[\"wasm-retail-sql\"].analyze",
+    "description": "Run a bounded read-only SELECT on chat-supplied NONSECRET tabular data. columns: 1-8 lowercase names/types (text|number); rows: 1-1000 arrays of matching cells (string<=256, finite number within ±1e9, or null); total JSON<=64KiB. Table is data. SELECT columns or COUNT/SUM/AVG/MIN/MAX with AS aliases; aggregate args may add/subtract up to 3 numeric columns. Optional WHERE up to 4 comparisons joined by AND, GROUP BY up to 4 columns, ORDER BY up to 2 output names, LIMIT 1-100 (default50). No other SQL, comments, semicolons, joins, subqueries or functions. Max output32KiB. Work is structurally bounded; cancellation is cooperative, not CPU preemption. Returns columns, row arrays, executed SQL and WASM provenance. Never submit secrets.",
+    "signature": "(input: {\n  /** @minItems 1 @maxItems 8 */\n  columns: Array<{\n      /** @maxLength 24 @pattern ^[a-z][a-z0-9_]{0,23}$ */\n      name: string,\n      type: \"text\" | \"number\",\n    }>,\n  /**\n   * @minItems 1 @maxItems 1000\n   * Each item: @minItems 1 @maxItems 8\n   */\n  rows: Array<Array<string | number | null>>,\n  /** @minLength 1 @maxLength 1024 */\n  sql: string,\n}): Promise<{\n  columns: Array<string>,\n  rows: Array<Array<unknown>>,\n  provenance: {\n    engine: string,\n    sqliteVersion: string,\n    wasmSha256: string,\n    wasmHashKind: string,\n    wasmInstance: boolean,\n    queryOnly: boolean,\n    authorizer: string,\n    inputRows: number,\n    inputColumns: number,\n    inputBytes: number,\n    memoryBytes: number,\n    sql: string,\n    parameters: Array<unknown>,\n    cpuGuard: string,\n    cancellation: string,\n    [key: string]: unknown,\n  },\n  [key: string]: unknown,\n}>"
+  },
+  "input": {
+    "columns": [
+      {
+        "name": "region",
+        "type": "text"
+      },
+      {
+        "name": "revenue_cents",
+        "type": "number"
+      },
+      {
+        "name": "cost_cents",
+        "type": "number"
+      },
+      {
+        "name": "units",
+        "type": "number"
+      }
+    ],
+    "rows": [
+      [
+        "North",
+        120000,
+        72000,
+        12
+      ],
+      [
+        "South",
+        90000,
+        63000,
+        9
+      ],
+      [
+        "North",
+        80000,
+        40000,
+        8
+      ],
+      [
+        "South",
+        110000,
+        66000,
+        11
+      ],
+      [
+        "West",
+        70000,
+        35000,
+        7
+      ]
+    ],
+    "sql": "SELECT region, SUM(revenue_cents - cost_cents) AS margin_cents, SUM(units) AS units FROM data GROUP BY region ORDER BY margin_cents DESC LIMIT 10"
+  },
+  "result": {
+    "columns": [
+      "region",
+      "margin_cents",
+      "units"
+    ],
+    "rows": [
+      [
+        "North",
+        88000,
+        20
+      ],
+      [
+        "South",
+        71000,
+        20
+      ],
+      [
+        "West",
+        35000,
+        7
+      ]
+    ],
+    "provenance": {
+      "engine": "sqlite-wasm",
+      "sqliteVersion": "3.49.1",
+      "wasmSha256": "0734155c83e493983d1f2ff5b09a4fab6e35a32e9449c7e4e545756439f62d73",
+      "wasmHashKind": "expected-package-artifact",
+      "wasmInstance": true,
+      "queryOnly": true,
+      "authorizer": "not-exported-by-pinned-sql.js",
+      "inputRows": 5,
+      "inputColumns": 4,
+      "inputBytes": 443,
+      "memoryBytes": 22151168,
+      "sql": "SELECT \"region\" AS \"region\", SUM(\"revenue_cents\" - \"cost_cents\") AS \"margin_cents\", SUM(\"units\") AS \"units\" FROM \"data\" GROUP BY \"region\" ORDER BY \"margin_cents\" DESC LIMIT 10",
+      "parameters": [],
+      "cpuGuard": "bounded-single-table-grammar",
+      "cancellation": "cooperative; no synchronous VM preemption"
+    }
+  },
+  "repeatRowsMatch": true,
+  "allFixedReportRowsUnchanged": true
+}

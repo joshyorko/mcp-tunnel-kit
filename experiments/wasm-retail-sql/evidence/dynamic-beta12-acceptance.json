@@ -1,0 +1,272 @@
+{
+  "scope": "disposable exact beta.12 installed API; not VM image identity",
+  "image": "ghcr.io/usefulsoftwareco/executor-selfhost:2.0.0-beta.12@sha256:89a2b829150d01bc26305f844159ca8064ea8a4ace047490d09b6a3c8bdcf600",
+  "workerd": "1.20260918.1",
+  "framework": "0.0.1-beta.65",
+  "readOnlyTools": [
+    {
+      "name": "analyze",
+      "readOnly": true
+    },
+    {
+      "name": "inventory",
+      "readOnly": true
+    },
+    {
+      "name": "margin",
+      "readOnly": true
+    },
+    {
+      "name": "outliers",
+      "readOnly": true
+    }
+  ],
+  "dynamicResult": {
+    "columns": [
+      "category",
+      "margin"
+    ],
+    "rows": [
+      [
+        "Tea",
+        100
+      ],
+      [
+        "Coffee",
+        90
+      ]
+    ],
+    "provenance": {
+      "engine": "sqlite-wasm",
+      "sqliteVersion": "3.49.1",
+      "wasmSha256": "0734155c83e493983d1f2ff5b09a4fab6e35a32e9449c7e4e545756439f62d73",
+      "wasmHashKind": "expected-package-artifact",
+      "wasmInstance": true,
+      "queryOnly": true,
+      "authorizer": "not-exported-by-pinned-sql.js",
+      "inputRows": 4,
+      "inputColumns": 3,
+      "inputBytes": 321,
+      "memoryBytes": 22151168,
+      "sql": "SELECT \"category\" AS \"category\", SUM(\"revenue\" - \"cost\") AS \"margin\" FROM \"data\" WHERE \"revenue\" >= ? GROUP BY \"category\" ORDER BY \"margin\" DESC LIMIT 10",
+      "parameters": [
+        60
+      ],
+      "cpuGuard": "bounded-single-table-grammar",
+      "cancellation": "cooperative; no synchronous VM preemption"
+    }
+  },
+  "rejections": [
+    {
+      "status": 502,
+      "code": "ToolCallFailed"
+    },
+    {
+      "status": 502,
+      "code": "ToolCallFailed"
+    },
+    {
+      "status": 502,
+      "code": "ToolCallFailed"
+    },
+    {
+      "status": 502,
+      "code": "ToolCallFailed"
+    },
+    {
+      "status": 502,
+      "code": "ToolCallFailed"
+    },
+    {
+      "status": 502,
+      "code": "ToolCallFailed"
+    },
+    {
+      "status": 502,
+      "code": "ToolCallFailed"
+    },
+    {
+      "status": 502,
+      "code": "ToolCallFailed"
+    },
+    {
+      "status": 502,
+      "code": "ToolCallFailed"
+    },
+    {
+      "status": 502,
+      "code": "ToolCallFailed"
+    },
+    {
+      "status": 502,
+      "code": "ToolCallFailed"
+    },
+    {
+      "status": 502,
+      "code": "ToolCallFailed"
+    },
+    {
+      "status": 502,
+      "code": "ToolCallFailed"
+    },
+    {
+      "status": 502,
+      "code": "ToolCallFailed"
+    },
+    {
+      "status": 502,
+      "code": "ToolCallFailed"
+    },
+    {
+      "status": 502,
+      "code": "ToolCallFailed"
+    },
+    {
+      "status": 502,
+      "code": "ToolCallFailed"
+    },
+    {
+      "status": 502,
+      "code": "ToolCallFailed"
+    },
+    {
+      "status": 502,
+      "code": "ToolCallFailed"
+    },
+    {
+      "status": 502,
+      "code": "ToolCallFailed"
+    },
+    {
+      "status": 502,
+      "code": "ToolCallFailed"
+    },
+    {
+      "status": 502,
+      "code": "ToolCallFailed"
+    },
+    {
+      "status": 502,
+      "code": "ToolCallFailed"
+    },
+    {
+      "status": 502,
+      "code": "ToolCallFailed"
+    },
+    {
+      "status": 502,
+      "code": "ToolCallFailed"
+    },
+    {
+      "status": 502,
+      "code": "ToolCallFailed"
+    },
+    {
+      "status": 502,
+      "code": "ToolCallFailed"
+    },
+    {
+      "status": 502,
+      "code": "ToolCallFailed"
+    },
+    {
+      "status": 502,
+      "code": "ToolCallFailed"
+    },
+    {
+      "status": 502,
+      "code": "ToolCallFailed"
+    },
+    {
+      "status": 502,
+      "code": "ToolCallFailed"
+    },
+    {
+      "status": 502,
+      "code": "ToolCallFailed"
+    },
+    {
+      "status": 502,
+      "code": "ToolCallFailed"
+    },
+    {
+      "status": 502,
+      "code": "ToolCallFailed"
+    },
+    {
+      "status": 502,
+      "code": "ToolCallFailed"
+    },
+    {
+      "status": 502,
+      "code": "ToolCallFailed"
+    },
+    {
+      "status": 502,
+      "code": "ToolCallFailed"
+    },
+    {
+      "status": 422,
+      "code": "InputInvalid"
+    },
+    {
+      "status": 422,
+      "code": "InputInvalid"
+    },
+    {
+      "status": 422,
+      "code": "InputInvalid"
+    },
+    {
+      "status": 502,
+      "code": "ToolCallFailed"
+    },
+    {
+      "status": 502,
+      "code": "ToolCallFailed"
+    },
+    {
+      "status": 422,
+      "code": "InputInvalid"
+    },
+    {
+      "status": 502,
+      "code": "ToolCallFailed"
+    },
+    {
+      "status": 502,
+      "code": "ToolCallFailed"
+    },
+    {
+      "status": 422,
+      "code": "InputInvalid"
+    },
+    {
+      "status": 422,
+      "code": "InputInvalid"
+    },
+    {
+      "status": 422,
+      "code": "InputInvalid"
+    },
+    {
+      "status": 502,
+      "code": "ToolCallFailed"
+    },
+    {
+      "status": 422,
+      "code": "InputInvalid"
+    },
+    {
+      "status": 502,
+      "code": "ToolCallFailed"
+    },
+    {
+      "status": 422,
+      "code": "InputInvalid"
+    }
+  ],
+  "rejectedSqlCases": 38,
+  "rejectedInputOrOutputCases": 14,
+  "fixedReportsVerifiedAfterDynamic": true
+}

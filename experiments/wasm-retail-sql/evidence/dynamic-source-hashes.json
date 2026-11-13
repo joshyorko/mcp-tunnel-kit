@@ -1,0 +1,42 @@
+[
+  {
+    "path": "index.ts",
+    "sha256": "6cfc68962b69d67d634ec12a25eed0affe8409d02b765a8fa9e6bf2837ede03f"
+  },
+  {
+    "path": "engine.ts",
+    "sha256": "7cf36cd9f59e57635948236e77eb259f654333f3d4d293df5061ad674c0a2f0b"
+  },
+  {
+    "path": "dataset.ts",
+    "sha256": "a97ce632ca78a478357bce92ae6f05416e510a2c6d6ea31597868d4b40f0b3ff"
+  },
+  {
+    "path": "output.ts",
+    "sha256": "34d73cc9f388d2028ffda5a0367ab994a4c68287676064116bcd252a1c5aec5d"
+  },
+  {
+    "path": "dynamic-schema.ts",
+    "sha256": "6b602135895d99c3631d5e8e2c2eb5fd9251205a09fab5f4f37287d007cc3941"
+  },
+  {
+    "path": "dynamic.ts",
+    "sha256": "5d4f2a5dba012169e069c7a4a450b1d09a838b04ac146ca2fe4860b814b953f9"
+  },
+  {
+    "path": "select.ts",
+    "sha256": "e5d7810101af5f13aac15e9f414acbdfcd73785621b6679b15fcf61ffb53f452"
+  },
+  {
+    "path": "sqlite-glue.js",
+    "sha256": "03590c5492b5b7e354cf035449e53d00bee237cea57a8e2080a805ac24c32515"
+  },
+  {
+    "path": "SQLJS-LICENSE",
+    "sha256": "60a3f6e4d7b29b4321359e683b36cf198d24f58e24582070f56e6fa89d5ee2be"
+  },
+  {
+    "path": "package.json",
+    "sha256": "d72a1b7a5248ab457a707a6936606994c63c44387872c2239a9b4c4049725afe"
+  }
+]
