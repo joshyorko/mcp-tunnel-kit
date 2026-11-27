@@ -6,6 +6,7 @@ Executor remains the sole authentication and approval authority.
 """
 import asyncio
 import json
+import os
 import re
 import zlib
 
@@ -17,19 +18,39 @@ HOP_HEADERS = {"connection", "keep-alive", "proxy-authenticate", "proxy-authoriz
                "te", "trailer", "transfer-encoding", "upgrade"}
 CLIENT = web.AppKey("client", ClientSession)
 UPSTREAM = web.AppKey("upstream", str)
+LEGACY_SURFACE = web.AppKey("legacy_surface", bool)
+PERMITTED_TOOLS = frozenset({'execute', 'resume', 'skills'})
+BETA79_TOOLS = PERMITTED_TOOLS | {'call', 'describe', 'search'}
 
 
-def rewrite_message(raw, identifier):
+def rewrite_message(raw, identifier, legacy_surface=False):
     try:
         message = json.loads(raw)
     except (ValueError, UnicodeError):
+        if legacy_surface:
+            raise ValueError('Invalid upstream catalog') from None
         return raw
+    if legacy_surface and (not isinstance(message, dict) or message.get('jsonrpc') != '2.0'):
+        raise ValueError('Invalid upstream catalog')
     if not isinstance(message, dict) or message.get("id") != identifier:
+        if legacy_surface and 'method' not in message:
+            raise ValueError('Mismatched upstream catalog')
         return raw
     result = message.get("result")
     if not isinstance(result, dict) or not isinstance(result.get("tools"), list):
+        if legacy_surface:
+            raise ValueError('Invalid upstream catalog')
         return raw
     changed = False
+    if legacy_surface:
+        catalog = result['tools']
+        names = [tool.get('name') for tool in catalog if isinstance(tool, dict)]
+        if (not all(isinstance(name, str) for name in names)
+                or len(names) != len(catalog) or len(names) != len(BETA79_TOOLS)
+                or set(names) != BETA79_TOOLS):
+            raise ValueError('Unexpected upstream tool surface')
+        result['tools'] = [tool for tool in catalog if tool['name'] in PERMITTED_TOOLS]
+        changed = True
     for tool in result["tools"]:
         if not isinstance(tool, dict) or tool.get("name") != "resume":
             continue
@@ -42,11 +63,13 @@ def rewrite_message(raw, identifier):
     return json.dumps(message, separators=(",", ":")).encode() if changed else raw
 
 
-def rewrite_event(event, identifier):
+def rewrite_event(event, identifier, legacy_surface=False):
     lines = event.splitlines(keepends=True)
+    if not any(line.startswith(b'data:') for line in lines):
+        return event
     data = b"\n".join(line[5:].lstrip(b" ").rstrip(b"\r\n")
                       for line in lines if line.startswith(b"data:"))
-    updated = rewrite_message(data, identifier)
+    updated = rewrite_message(data, identifier, legacy_surface)
     if updated == data:
         return event
     result, inserted = [], False
@@ -78,6 +101,18 @@ async def forward(request):
         message = json.loads(inspected) if inspected else None
     except (ValueError, UnicodeError, zlib.error):
         message = None
+    legacy_surface = request.app[LEGACY_SURFACE]
+    if legacy_surface and request.method == 'POST':
+        if not isinstance(message, dict) or message.get('jsonrpc') != '2.0':
+            return web.Response(status=400, text='Invalid MCP request')
+        if message.get('method') == 'tools/list' and 'id' not in message:
+            return web.Response(status=400, text='Invalid MCP discovery request')
+        if message.get('method') == 'tools/call':
+            params = message.get('params')
+            if (not isinstance(params, dict) or not isinstance(params.get('name'), str)
+                    or params['name'] not in PERMITTED_TOOLS):
+                return web.json_response({'jsonrpc': '2.0', 'id': message.get('id'),
+                    'error': {'code': -32601, 'message': 'Tool outside permitted surface'}})
     discovery = (request.method == "POST" and isinstance(message, dict)
                  and message.get("method") == "tools/list" and "id" in message)
     headers = end_to_end_headers(request.headers, "host", "content-length", "accept-encoding")
@@ -89,6 +124,9 @@ async def forward(request):
             data=raw, headers=headers, allow_redirects=False,
         ) as upstream:
             transform = discovery and upstream.status == 200
+            if (transform and legacy_surface and upstream.content_type not in
+                    {'application/json', 'text/event-stream'}):
+                raise ValueError('Unsupported upstream catalog encoding')
             response_headers = end_to_end_headers(upstream.headers, *(
                 ("content-length", "etag", "content-md5") if transform else ()))
             if transform and upstream.headers.get("Content-Encoding", "identity") != "identity":
@@ -100,7 +138,7 @@ async def forward(request):
                     if len(body) > MAX_CATALOG:
                         raise ValueError("Catalog limit")
                 return web.Response(status=upstream.status, headers=response_headers,
-                                    body=rewrite_message(bytes(body), message["id"]))
+                                    body=rewrite_message(bytes(body), message["id"], legacy_surface))
             downstream = web.StreamResponse(status=upstream.status, headers=response_headers)
             await downstream.prepare(request)
             pending = b""
@@ -111,7 +149,7 @@ async def forward(request):
                         end = boundary.end()
                         if end > MAX_CATALOG:
                             raise ValueError("Catalog event limit")
-                        await downstream.write(rewrite_event(pending[:end], message["id"]))
+                        await downstream.write(rewrite_event(pending[:end], message["id"], legacy_surface))
                         pending = pending[end:]
                     if len(pending) > MAX_CATALOG:
                         raise ValueError("Catalog event limit")
@@ -119,6 +157,8 @@ async def forward(request):
                     await downstream.write(chunk)
             if pending:
                 # An incomplete SSE event cannot contain a complete MCP response.
+                if transform and legacy_surface:
+                    raise ValueError('Incomplete upstream catalog event')
                 await downstream.write(pending)
             await downstream.write_eof()
             return downstream
@@ -141,10 +181,11 @@ async def health(_request):
     return web.Response(text="ok")
 
 
-def create_app(upstream="http://executor:4312"):
+def create_app(upstream="http://executor:4312", *, legacy_surface=False):
     app = web.Application(client_max_size=MAX_REQUEST,
                           handler_args={'auto_decompress': False, 'handler_cancellation': True})
     app[UPSTREAM] = upstream
+    app[LEGACY_SURFACE] = legacy_surface
     app.cleanup_ctx.append(client_context)
     app.router.add_get("/healthz", health)
     app.router.add_route("*", "/mcp", forward)
@@ -152,4 +193,8 @@ def create_app(upstream="http://executor:4312"):
 
 
 if __name__ == "__main__":
-    web.run_app(create_app(), host="0.0.0.0", port=4313, access_log=None, print=None)
+    setting = os.environ.get('EXECUTOR_SCHEMA_BETA79_LEGACY_SURFACE', '0')
+    if setting not in {'0', '1'}:
+        raise ValueError('Invalid Executor surface setting')
+    web.run_app(create_app(legacy_surface=setting == '1'), host="0.0.0.0", port=4313,
+                access_log=None, print=None)
