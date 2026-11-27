@@ -65,6 +65,8 @@ def rewrite_message(raw, identifier, legacy_surface=False):
 
 def rewrite_event(event, identifier, legacy_surface=False):
     lines = event.splitlines(keepends=True)
+    if not any(line.startswith(b'data:') for line in lines):
+        return event
     data = b"\n".join(line[5:].lstrip(b" ").rstrip(b"\r\n")
                       for line in lines if line.startswith(b"data:"))
     updated = rewrite_message(data, identifier, legacy_surface)

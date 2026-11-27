@@ -26,6 +26,7 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.seen = []
         self.names = list(BETA79_NAMES)
         self.content_type = 'application/json'
+        self.sse = False
 
         async def upstream(request):
             raw = await request.read()
@@ -34,6 +35,10 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
             message = json.loads(raw)
             self.seen.append((dict(request.headers), message))
             if message['method'] == 'tools/list':
+                if self.sse:
+                    return web.Response(body=b': keepalive\n\nevent: ping\n\ndata: ' +
+                        json.dumps(catalog(self.names)).encode() + b'\n\n',
+                        content_type='text/event-stream')
                 return web.Response(text=json.dumps(catalog(self.names)), content_type=self.content_type)
             return web.json_response({'jsonrpc': '2.0', 'id': message['id'],
                                       'result': {'status': 'approval-required', 'requestId': 'apr_fixture'}})
@@ -101,3 +106,13 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
         invalid['id'] = 99
         with self.assertRaises(ValueError):
             proxy.rewrite_message(json.dumps(invalid).encode(), 1, True)
+
+    async def test_standalone_sse_heartbeats_precede_filtered_catalog_over_http(self):
+        self.sse = True
+        response = await self.client.post('/mcp', json={
+            'jsonrpc': '2.0', 'id': 1, 'method': 'tools/list'})
+        self.assertEqual(response.status, 200)
+        raw = await response.read()
+        self.assertTrue(raw.startswith(b': keepalive\n\nevent: ping\n\n'))
+        data = json.loads(next(line[6:] for line in raw.splitlines() if line.startswith(b'data: ')))
+        self.assertEqual({t['name'] for t in data['result']['tools']}, {'execute', 'resume', 'skills'})
