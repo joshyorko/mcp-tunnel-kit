@@ -45,6 +45,15 @@ foreground service; no existing application or registration is modified.
 
 ## Activation handoff
 
+Complete this checklist independently for each app. One app passing does not
+authorize the other, and browser sign-in is not a prerequisite for a verified
+server-only synthetic read.
+
+| App | App-owner prerequisite before listener activation |
+| --- | --- |
+| Tracker | Verify the live read-only issuer/verifier contract, approved protected local token production, expiry and renewal. Keep signing state separate from the outbound-token directory. |
+| Easy Apply | Verify the published/live exact read-tool name, safe arguments and transport contract, plus a distinct protected app credential. Qualification-only fixture tools do not establish an application tool contract. |
+
 1. Each service owner verifies its live deployed revision, healthy private
    endpoint, exact dialect and owner-approved read-tool allowlist.
 2. The resource-server owner confirms verifier readiness and whether an existing
@@ -62,6 +71,10 @@ foreground service; no existing application or registration is modified.
    this candidate does not extend it. No wildcard trust or global policy change.
 6. Register separate authenticated apps only after all live gates pass. Use
    synthetic reads and verify missing, expired and wrong-app auth rejection.
+7. Retain the per-app source/runtime identity, protected configuration references
+   (never credential values), exact admissions, discovery/read results and
+   renewal/restart proof. Rollback removes only that app's registration,
+   admissions and listener; preserve raw-forward restrictions and existing apps.
 
 Operational endpoints, private deployment identities, issuer values and live
 service evidence belong in the owners' private handoff, not this public runbook.
