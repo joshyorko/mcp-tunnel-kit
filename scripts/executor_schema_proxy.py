@@ -9,6 +9,8 @@ import json
 import os
 import re
 import zlib
+from dataclasses import dataclass
+from urllib.parse import parse_qsl, urlsplit
 
 from aiohttp import ClientError, ClientSession, ClientTimeout, DummyCookieJar, web
 
@@ -21,6 +23,120 @@ UPSTREAM = web.AppKey("upstream", str)
 LEGACY_SURFACE = web.AppKey("legacy_surface", bool)
 PERMITTED_TOOLS = frozenset({'execute', 'resume', 'skills'})
 BETA79_TOOLS = PERMITTED_TOOLS | {'call', 'describe', 'search'}
+OAUTH_DISCOVERY = web.AppKey('oauth_discovery', object)
+RESOURCE_METADATA = '/.well-known/oauth-protected-resource/mcp'
+SERVER_METADATA = '/.well-known/oauth-authorization-server'
+OAUTH_ENDPOINTS = {
+    'authorization_endpoint': '/api/auth/oauth2/authorize',
+    'token_endpoint': '/api/auth/oauth2/token',
+    'registration_endpoint': '/api/auth/oauth2/register',
+    'revocation_endpoint': '/api/auth/oauth2/revoke',
+    'introspection_endpoint': '/api/auth/oauth2/introspect',
+    'device_authorization_endpoint': '/api/auth/oauth2/device-authorization',
+    'jwks_uri': '/api/auth/jwks',
+}
+
+
+def oauth_origin(value):
+    parsed = urlsplit(value)
+    if (any(c.isspace() or c in '#\\' for c in value)
+            or not parsed.hostname or parsed.username is not None or parsed.password is not None
+            or parsed.fragment or parsed.scheme not in {'https', 'http'}
+            or (parsed.scheme == 'http' and parsed.hostname not in {'127.0.0.1', '::1', 'localhost'})):
+        raise ValueError('Invalid OAuth identity URL')
+    _ = parsed.port
+    return parsed.scheme + '://' + parsed.netloc
+
+
+@dataclass(frozen=True)
+class OAuthDiscovery:
+    issuer: str
+    resource: str
+    host: str
+
+    def __post_init__(self):
+        oauth_origin(self.issuer)
+        oauth_origin(self.resource)
+        if (urlsplit(self.issuer).query or urlsplit(self.resource).path != '/mcp'
+                or not self.host or any(c in self.host for c in '/?#@\\ \t\r\n')
+                or urlsplit('http://' + self.host).netloc != self.host):
+            raise ValueError('Invalid OAuth discovery configuration')
+        host = urlsplit('http://' + self.host)
+        if not host.hostname:
+            raise ValueError('Invalid OAuth discovery host')
+        _ = host.port
+        query = parse_qsl(urlsplit(self.resource).query, keep_blank_values=True, strict_parsing=True)
+        if (len(dict(query)) != len(query) or set(dict(query)) - {'connection', 'elicitation_mode'}
+                or dict(query).get('elicitation_mode') != 'browser'
+                or ('connection' in dict(query) and not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', dict(query)['connection']))):
+            raise ValueError('Invalid OAuth resource address')
+
+    def target(self, path):
+        query = urlsplit(self.resource).query if path == RESOURCE_METADATA else ''
+        return path + ('?' + query if query else '')
+
+    def validate(self, path, document):
+        if (not isinstance(document, dict) or 'signed_metadata' in document
+                or 'mtls_endpoint_aliases' in document):
+            raise ValueError('Invalid OAuth metadata')
+        if path == RESOURCE_METADATA:
+            if (set(document) - {'resource', 'authorization_servers', 'scopes_supported',
+                                 'bearer_methods_supported', 'resource_name'}
+                    or document.get('resource') != self.resource
+                    or document.get('authorization_servers') != [self.issuer]
+                    or document.get('bearer_methods_supported') != ['header']):
+                raise ValueError('Unexpected OAuth resource identity')
+        else:
+            if document.get('issuer') != self.issuer:
+                raise ValueError('Unexpected OAuth issuer')
+            origin = oauth_origin(self.issuer)
+            for key in ('authorization_endpoint', 'token_endpoint', 'registration_endpoint'):
+                if key not in document:
+                    raise ValueError('Incomplete OAuth server metadata')
+            for key, value in document.items():
+                if key.endswith('_endpoint') or key == 'jwks_uri':
+                    if key not in OAUTH_ENDPOINTS or value != origin + OAUTH_ENDPOINTS[key]:
+                        raise ValueError('Unexpected OAuth endpoint')
+
+
+def metadata_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError('Duplicate OAuth metadata field')
+        result[key] = value
+    return result
+
+
+async def oauth_metadata(request):
+    policy = request.app[OAUTH_DISCOVERY]
+    if (request.raw_path != policy.target(request.path)
+            or request.headers.getall('Host', []) != [policy.host]
+            or request.can_read_body):
+        return web.Response(status=400)
+    if (any(key.lower() in {'authorization', 'cookie', 'forwarded'}
+            or key.lower().startswith('x-forwarded-') for key in request.headers)
+            or ('Origin' in request.headers and request.headers.getall('Origin') not in
+                [[oauth_origin(policy.issuer)], [oauth_origin(policy.resource)]])):
+        return web.Response(status=403)
+    try:
+        async with request.app[CLIENT].get(
+                request.app[UPSTREAM] + policy.target(request.path),
+                headers={'Accept': 'application/json', 'Accept-Encoding': 'identity'},
+                allow_redirects=False, timeout=ClientTimeout(total=10)) as response:
+            if (response.status != 200 or response.content_type != 'application/json'
+                    or response.headers.get('Content-Encoding', 'identity') != 'identity'):
+                raise ValueError('Invalid OAuth metadata response')
+            body = bytearray()
+            async for chunk in response.content.iter_any():
+                body.extend(chunk)
+                if len(body) > 65536:
+                    raise ValueError('OAuth metadata limit')
+            document = json.loads(bytes(body), object_pairs_hook=metadata_object)
+            policy.validate(request.path, document)
+        return web.json_response(document, headers={'Cache-Control': 'no-store'})
+    except (ClientError, asyncio.TimeoutError, ValueError, UnicodeError):
+        return web.Response(status=502, text='OAuth metadata unavailable')
 
 
 def rewrite_message(raw, identifier, legacy_surface=False):
@@ -181,7 +297,9 @@ async def health(_request):
     return web.Response(text="ok")
 
 
-def create_app(upstream="http://executor:4312", *, legacy_surface=False):
+def create_app(upstream="http://executor:4312", *, legacy_surface=False, oauth_discovery=None):
+    if oauth_discovery is not None and not legacy_surface:
+        raise ValueError('OAuth discovery requires the three-tool boundary')
     app = web.Application(client_max_size=MAX_REQUEST,
                           handler_args={'auto_decompress': False, 'handler_cancellation': True})
     app[UPSTREAM] = upstream
@@ -189,6 +307,12 @@ def create_app(upstream="http://executor:4312", *, legacy_surface=False):
     app.cleanup_ctx.append(client_context)
     app.router.add_get("/healthz", health)
     app.router.add_route("*", "/mcp", forward)
+    if oauth_discovery is not None:
+        if not isinstance(oauth_discovery, OAuthDiscovery):
+            raise ValueError('Invalid OAuth discovery policy')
+        app[OAUTH_DISCOVERY] = oauth_discovery
+        for path in (RESOURCE_METADATA, SERVER_METADATA):
+            app.router.add_get(path, oauth_metadata, allow_head=False)
     return app
 
 
@@ -196,5 +320,9 @@ if __name__ == "__main__":
     setting = os.environ.get('EXECUTOR_SCHEMA_BETA79_LEGACY_SURFACE', '0')
     if setting not in {'0', '1'}:
         raise ValueError('Invalid Executor surface setting')
-    web.run_app(create_app(legacy_surface=setting == '1'), host="0.0.0.0", port=4313,
+    values = [os.environ.get('EXECUTOR_SCHEMA_OAUTH_' + key) for key in ('ISSUER', 'RESOURCE', 'HOST')]
+    policy = OAuthDiscovery(*values) if all(values) else None
+    if any(value is not None for value in values) and not all(values):
+        raise ValueError('Incomplete OAuth discovery policy')
+    web.run_app(create_app(legacy_surface=setting == '1', oauth_discovery=policy), host="0.0.0.0", port=4313,
                 access_log=None, print=None)
