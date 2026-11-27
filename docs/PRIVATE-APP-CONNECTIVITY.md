@@ -64,6 +64,19 @@ Operational endpoints, private deployment identities, issuer values and live
 service evidence belong in the owners' private handoff, not this public runbook.
 This candidate proves neither live routing nor installed consumer acceptance.
 
+Existing Tailscale connectivity can provide the encrypted transport without
+reviving a coding service. Peer visibility or SSH reachability alone does not
+expose an app bound to remote loopback. Where an approved SSH endpoint already
+exists, the minimal candidate is a separately reviewed, pinned SSH local forward
+from one exact managed-gateway port to the remote loopback app port over the
+existing tailnet. Before installing it, the transport owner must verify host-key
+pinning, noninteractive authentication and forwarding permission, and approve
+the exact local bind and remote destination. This adapter can then use that fixed
+private gateway endpoint with independent app credentials. No forward is started
+by this PR. Do not substitute Funnel, public listeners, wildcard forwarding,
+re-enrollment or broad ACL changes. Tailnet DNS and HTTPS certificate-name
+requirements must also be verified rather than inferred from peer status.
+
 ## Synthetic verification
 
 Run with the repository-pinned `aiohttp==3.14.4`:
