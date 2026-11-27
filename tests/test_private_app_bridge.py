@@ -136,16 +136,49 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
         self.port = unused_port()
         # Substitute only address policy: real TCP peer, local socket and Host checks still execute.
         self.policy = (ipaddress.ip_network('127.0.0.0/24'), '127.0.0.1', self.port)
+        self.credentials = tempfile.TemporaryDirectory()
+        self.token_file = Path(self.credentials.name) / 'upstream'
+        self.token_file.write_text(UPSTREAM)
+        self.token_file.chmod(0o600)
         with patch.object(bridge, 'private_endpoint', return_value=URL(self.remote.make_url('/mcp'))), \
                 patch.object(bridge, 'listener_policy', return_value=self.policy):
             app = bridge.create_app('http://10.0.0.1/mcp', INBOUND, UPSTREAM, ['read'],
-                                    subnet='192.168.50.0/24', gateway='192.168.50.1', port=8091)
+                                    subnet='192.168.50.0/24', gateway='192.168.50.1', port=8091,
+                                    upstream_token_file=self.token_file)
         self.client = TestClient(TestServer(app, port=self.port))
         await self.client.start_server()
 
     async def asyncTearDown(self):
         await self.client.close()
         await self.remote.close()
+        self.credentials.cleanup()
+
+    async def test_atomic_renewal_is_used_on_next_request_without_restart(self):
+        headers = {'Authorization': 'Bearer ' + INBOUND}
+        self.assertEqual((await self.call(headers=headers)).status, 200)
+        renewed = 'renewed-fixture-' + 'c' * 32
+        replacement = self.token_file.with_suffix('.new')
+        replacement.write_text(renewed)
+        replacement.chmod(0o600)
+        replacement.replace(self.token_file)
+        self.assertEqual((await self.call(headers=headers)).status, 200)
+        self.assertEqual([row[0]['Authorization'] for row in self.seen],
+                         ['Bearer ' + UPSTREAM, 'Bearer ' + renewed])
+
+    async def test_unsafe_or_missing_replacement_never_uses_cached_token(self):
+        headers = {'Authorization': 'Bearer ' + INBOUND}
+        self.token_file.chmod(0o644)
+        self.assertEqual((await self.call(headers=headers)).status, 502)
+        self.token_file.unlink()
+        self.assertEqual((await self.call(headers=headers)).status, 502)
+        self.token_file.symlink_to('/nonexistent')
+        self.assertEqual((await self.call(headers=headers)).status, 502)
+        self.token_file.unlink()
+        for invalid in ('', INBOUND, 'bad token with whitespace' * 3):
+            self.token_file.write_text(invalid)
+            self.token_file.chmod(0o600)
+            self.assertEqual((await self.call(headers=headers)).status, 502)
+        self.assertEqual(self.seen, [])
 
     async def call(self, method='tools/list', params=None, **kwargs):
         return await self.client.post('/mcp', json={'jsonrpc': '2.0', 'id': 1,

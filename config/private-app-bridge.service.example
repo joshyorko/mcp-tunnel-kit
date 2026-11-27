@@ -1,0 +1,27 @@
+# Operator template only. Never install unchanged; use one unit per app.
+[Unit]
+Description=Authenticated private read-only MCP bridge
+After=network-online.target mcp-private-app-forward.service
+Requires=mcp-private-app-forward.service
+ConditionPathExists=/approved/private/app-a/config.json
+ConditionPathExists=/approved/private/app-a/inbound-token
+ConditionPathExists=/approved/private/app-a/outbound-token
+
+[Service]
+Type=simple
+User=bridge-operator
+ExecStart=/approved/pinned-runtime/python /approved/repo/scripts/private_app_bridge.py --config /approved/private/app-a/config.json
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_INET AF_UNIX
+StandardOutput=null
+StandardError=null
+
+[Install]
+WantedBy=multi-user.target
