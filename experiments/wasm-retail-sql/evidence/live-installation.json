@@ -1,0 +1,389 @@
+{
+  "scope": "Live app-only installation through existing Executor MCP; VM image identity not verified",
+  "sourceCommit": "3fc88130b89de2a5bc051c0e96b44d08f7368b5c",
+  "pullRequest": "https://github.com/joshyorko/mcp-tunnel-kit/pull/78",
+  "app": {
+    "id": "app_f772eaa4-5e04-4e93-9c1c-29ed99d14683",
+    "slug": "wasm-retail-sql"
+  },
+  "deployment": "dpl_ed637bcf-a49b-473f-8f7b-c329e8787525",
+  "build": "bld_5f9470b3-6bae-4248-847e-93976475b609",
+  "sourceReadback": {
+    "deployment": "dpl_ed637bcf-a49b-473f-8f7b-c329e8787525",
+    "build": "bld_5f9470b3-6bae-4248-847e-93976475b609",
+    "fileCount": 7,
+    "exactSourceMatch": true
+  },
+  "framework": "0.0.1-beta.65",
+  "repeatMatches": true,
+  "tools": [
+    {
+      "path": "tools[\"wasm-retail-sql\"].margin",
+      "description": "Read-only SQLite WASM margin by category over 50,000 deterministic synthetic retail orders. Returns compact chart-ready JSON, exact SQL and WASM provenance; cents are integers.",
+      "input": "{}"
+    },
+    {
+      "path": "tools[\"wasm-retail-sql\"].inventory",
+      "description": "Read-only SQLite WASM inventory exposure: 90-day synthetic sales versus fixed inventory snapshot. Returns 10 SKUs with lowest days cover, chart-ready JSON and provenance; not an inventory forecast.",
+      "input": "{}"
+    },
+    {
+      "path": "tools[\"wasm-retail-sql\"].outliers",
+      "description": "Read-only SQLite WASM report of 10 lowest-margin synthetic orders, including injected return/discount anomalies. Returns chart-ready JSON and provenance.",
+      "input": "{}"
+    }
+  ],
+  "signatures": [
+    {
+      "path": "tools[\"wasm-retail-sql\"].margin",
+      "description": "Read-only SQLite WASM margin by category over 50,000 deterministic synthetic retail orders. Returns compact chart-ready JSON, exact SQL and WASM provenance; cents are integers.",
+      "signature": "(): Promise<{\n  report: string,\n  chart: {\n    kind: string,\n    title: string,\n    x: string,\n    y: string,\n    [key: string]: unknown,\n  },\n  columns: Array<string>,\n  rows: Array<{\n      [key: string]: unknown,\n    }>,\n  provenance: {\n    engine: string,\n    package: string,\n    framework: string,\n    wasmSha256: string,\n    wasmHashKind: string,\n    wasmInstance: boolean,\n    sqliteVersion: string,\n    memoryBytes: number,\n    datasetVersion: number,\n    seed: number,\n    orderRows: number,\n    inventoryRows: number,\n    queryOnly: boolean,\n    sql: string,\n    [key: string]: unknown,\n  },\n  [key: string]: unknown,\n}>"
+    },
+    {
+      "path": "tools[\"wasm-retail-sql\"].inventory",
+      "description": "Read-only SQLite WASM inventory exposure: 90-day synthetic sales versus fixed inventory snapshot. Returns 10 SKUs with lowest days cover, chart-ready JSON and provenance; not an inventory forecast.",
+      "signature": "(): Promise<{\n  report: string,\n  chart: {\n    kind: string,\n    title: string,\n    x: string,\n    y: string,\n    [key: string]: unknown,\n  },\n  columns: Array<string>,\n  rows: Array<{\n      [key: string]: unknown,\n    }>,\n  provenance: {\n    engine: string,\n    package: string,\n    framework: string,\n    wasmSha256: string,\n    wasmHashKind: string,\n    wasmInstance: boolean,\n    sqliteVersion: string,\n    memoryBytes: number,\n    datasetVersion: number,\n    seed: number,\n    orderRows: number,\n    inventoryRows: number,\n    queryOnly: boolean,\n    sql: string,\n    [key: string]: unknown,\n  },\n  [key: string]: unknown,\n}>"
+    },
+    {
+      "path": "tools[\"wasm-retail-sql\"].outliers",
+      "description": "Read-only SQLite WASM report of 10 lowest-margin synthetic orders, including injected return/discount anomalies. Returns chart-ready JSON and provenance.",
+      "signature": "(): Promise<{\n  report: string,\n  chart: {\n    kind: string,\n    title: string,\n    x: string,\n    y: string,\n    [key: string]: unknown,\n  },\n  columns: Array<string>,\n  rows: Array<{\n      [key: string]: unknown,\n    }>,\n  provenance: {\n    engine: string,\n    package: string,\n    framework: string,\n    wasmSha256: string,\n    wasmHashKind: string,\n    wasmInstance: boolean,\n    sqliteVersion: string,\n    memoryBytes: number,\n    datasetVersion: number,\n    seed: number,\n    orderRows: number,\n    inventoryRows: number,\n    queryOnly: boolean,\n    sql: string,\n    [key: string]: unknown,\n  },\n  [key: string]: unknown,\n}>"
+    }
+  ],
+  "results": {
+    "margin": {
+      "report": "margin",
+      "chart": {
+        "kind": "bar",
+        "title": "Margin by category",
+        "x": "category",
+        "y": "margin_cents"
+      },
+      "columns": [
+        "category",
+        "orders",
+        "units",
+        "revenue_cents",
+        "cost_cents",
+        "margin_cents",
+        "margin_pct"
+      ],
+      "rows": [
+        {
+          "category": "Office",
+          "orders": 9999,
+          "units": 24998,
+          "revenue_cents": 85047539,
+          "cost_cents": 65329643,
+          "margin_cents": 19717896,
+          "margin_pct": 23.18
+        },
+        {
+          "category": "Garden",
+          "orders": 9999,
+          "units": 24998,
+          "revenue_cents": 82610015,
+          "cost_cents": 62904122,
+          "margin_cents": 19705893,
+          "margin_pct": 23.85
+        },
+        {
+          "category": "Sports",
+          "orders": 10000,
+          "units": 24999,
+          "revenue_cents": 81546701,
+          "cost_cents": 61869837,
+          "margin_cents": 19676864,
+          "margin_pct": 24.13
+        },
+        {
+          "category": "Toys",
+          "orders": 10001,
+          "units": 25001,
+          "revenue_cents": 83989228,
+          "cost_cents": 64313285,
+          "margin_cents": 19675943,
+          "margin_pct": 23.43
+        },
+        {
+          "category": "Home",
+          "orders": 10001,
+          "units": 25004,
+          "revenue_cents": 86039486,
+          "cost_cents": 66376883,
+          "margin_cents": 19662603,
+          "margin_pct": 22.85
+        }
+      ],
+      "provenance": {
+        "engine": "sqlite-wasm",
+        "package": "sql.js@1.13.0",
+        "framework": "0.0.1-beta.65",
+        "wasmSha256": "0734155c83e493983d1f2ff5b09a4fab6e35a32e9449c7e4e545756439f62d73",
+        "wasmHashKind": "expected-package-artifact",
+        "wasmInstance": true,
+        "sqliteVersion": "3.49.1",
+        "memoryBytes": 22151168,
+        "datasetVersion": 1,
+        "seed": 20261112,
+        "orderRows": 50000,
+        "inventoryRows": 100,
+        "queryOnly": true,
+        "sql": "SELECT i.category, COUNT(*) AS orders, SUM(o.units) AS units,\n      SUM(o.revenue_cents) AS revenue_cents, SUM(o.cost_cents) AS cost_cents,\n      SUM(o.revenue_cents-o.cost_cents) AS margin_cents,\n      ROUND(100.0*SUM(o.revenue_cents-o.cost_cents)/SUM(o.revenue_cents),2) AS margin_pct\n      FROM orders o JOIN inventory i ON i.sku=o.sku\n      GROUP BY i.category ORDER BY margin_cents DESC, i.category LIMIT 5"
+      }
+    },
+    "inventory": {
+      "report": "inventory",
+      "chart": {
+        "kind": "bar",
+        "title": "Inventory exposure: 90-day sales versus snapshot stock",
+        "x": "sku",
+        "y": "units_sold"
+      },
+      "columns": [
+        "sku",
+        "category",
+        "on_hand",
+        "units_sold",
+        "days_cover",
+        "margin_cents"
+      ],
+      "rows": [
+        {
+          "sku": 73,
+          "category": "Office",
+          "on_hand": 51,
+          "units_sold": 1251,
+          "days_cover": 3.67,
+          "margin_cents": 1000706
+        },
+        {
+          "sku": 61,
+          "category": "Home",
+          "on_hand": 57,
+          "units_sold": 1249,
+          "days_cover": 4.11,
+          "margin_cents": 976071
+        },
+        {
+          "sku": 49,
+          "category": "Sports",
+          "on_hand": 63,
+          "units_sold": 1253,
+          "days_cover": 4.53,
+          "margin_cents": 975554
+        },
+        {
+          "sku": 37,
+          "category": "Garden",
+          "on_hand": 69,
+          "units_sold": 1251,
+          "days_cover": 4.96,
+          "margin_cents": 1001563
+        },
+        {
+          "sku": 25,
+          "category": "Toys",
+          "on_hand": 75,
+          "units_sold": 1248,
+          "days_cover": 5.41,
+          "margin_cents": 987439
+        },
+        {
+          "sku": 98,
+          "category": "Office",
+          "on_hand": 76,
+          "units_sold": 1252,
+          "days_cover": 5.46,
+          "margin_cents": 999092
+        },
+        {
+          "sku": 13,
+          "category": "Office",
+          "on_hand": 81,
+          "units_sold": 1248,
+          "days_cover": 5.84,
+          "margin_cents": 993631
+        },
+        {
+          "sku": 86,
+          "category": "Home",
+          "on_hand": 82,
+          "units_sold": 1251,
+          "days_cover": 5.9,
+          "margin_cents": 993968
+        },
+        {
+          "sku": 1,
+          "category": "Home",
+          "on_hand": 87,
+          "units_sold": 1254,
+          "days_cover": 6.24,
+          "margin_cents": 976369
+        },
+        {
+          "sku": 74,
+          "category": "Sports",
+          "on_hand": 88,
+          "units_sold": 1249,
+          "days_cover": 6.34,
+          "margin_cents": 965009
+        }
+      ],
+      "provenance": {
+        "engine": "sqlite-wasm",
+        "package": "sql.js@1.13.0",
+        "framework": "0.0.1-beta.65",
+        "wasmSha256": "0734155c83e493983d1f2ff5b09a4fab6e35a32e9449c7e4e545756439f62d73",
+        "wasmHashKind": "expected-package-artifact",
+        "wasmInstance": true,
+        "sqliteVersion": "3.49.1",
+        "memoryBytes": 22151168,
+        "datasetVersion": 1,
+        "seed": 20261112,
+        "orderRows": 50000,
+        "inventoryRows": 100,
+        "queryOnly": true,
+        "sql": "SELECT i.sku, i.category, i.on_hand, SUM(o.units) AS units_sold,\n      ROUND(90.0*i.on_hand/SUM(o.units),2) AS days_cover,\n      SUM(o.revenue_cents-o.cost_cents) AS margin_cents\n      FROM orders o JOIN inventory i ON i.sku=o.sku\n      GROUP BY i.sku HAVING SUM(o.units)>i.on_hand\n      ORDER BY days_cover, i.sku LIMIT 10"
+      }
+    },
+    "outliers": {
+      "report": "outliers",
+      "chart": {
+        "kind": "bar",
+        "title": "Lowest-margin synthetic orders",
+        "x": "id",
+        "y": "margin_cents"
+      },
+      "columns": [
+        "id",
+        "day",
+        "sku",
+        "category",
+        "units",
+        "revenue_cents",
+        "cost_cents",
+        "margin_cents"
+      ],
+      "rows": [
+        {
+          "id": 6979,
+          "day": 48,
+          "sku": 22,
+          "category": "Garden",
+          "units": 1,
+          "revenue_cents": -27305,
+          "cost_cents": 2434,
+          "margin_cents": -29739
+        },
+        {
+          "id": 45862,
+          "day": 51,
+          "sku": 68,
+          "category": "Office",
+          "units": 1,
+          "revenue_cents": -27149,
+          "cost_cents": 2196,
+          "margin_cents": -29345
+        },
+        {
+          "id": 34895,
+          "day": 64,
+          "sku": 58,
+          "category": "Office",
+          "units": 1,
+          "revenue_cents": -28080,
+          "cost_cents": 1226,
+          "margin_cents": -29306
+        },
+        {
+          "id": 49850,
+          "day": 79,
+          "sku": 16,
+          "category": "Home",
+          "units": 1,
+          "revenue_cents": -27431,
+          "cost_cents": 1852,
+          "margin_cents": -29283
+        },
+        {
+          "id": 38883,
+          "day": 2,
+          "sku": 6,
+          "category": "Home",
+          "units": 1,
+          "revenue_cents": -28362,
+          "cost_cents": 882,
+          "margin_cents": -29244
+        },
+        {
+          "id": 19940,
+          "day": 49,
+          "sku": 53,
+          "category": "Office",
+          "units": 1,
+          "revenue_cents": -28497,
+          "cost_cents": 741,
+          "margin_cents": -29238
+        },
+        {
+          "id": 997,
+          "day": 6,
+          "sku": 100,
+          "category": "Toys",
+          "units": 1,
+          "revenue_cents": -28632,
+          "cost_cents": 600,
+          "margin_cents": -29232
+        },
+        {
+          "id": 23928,
+          "day": 77,
+          "sku": 1,
+          "category": "Home",
+          "units": 1,
+          "revenue_cents": -28779,
+          "cost_cents": 397,
+          "margin_cents": -29176
+        },
+        {
+          "id": 4985,
+          "day": 34,
+          "sku": 48,
+          "category": "Office",
+          "units": 1,
+          "revenue_cents": -24214,
+          "cost_cents": 4956,
+          "margin_cents": -29170
+        },
+        {
+          "id": 41874,
+          "day": 23,
+          "sku": 67,
+          "category": "Garden",
+          "units": 2,
+          "revenue_cents": -24798,
+          "cost_cents": 4198,
+          "margin_cents": -28996
+        }
+      ],
+      "provenance": {
+        "engine": "sqlite-wasm",
+        "package": "sql.js@1.13.0",
+        "framework": "0.0.1-beta.65",
+        "wasmSha256": "0734155c83e493983d1f2ff5b09a4fab6e35a32e9449c7e4e545756439f62d73",
+        "wasmHashKind": "expected-package-artifact",
+        "wasmInstance": true,
+        "sqliteVersion": "3.49.1",
+        "memoryBytes": 22151168,
+        "datasetVersion": 1,
+        "seed": 20261112,
+        "orderRows": 50000,
+        "inventoryRows": 100,
+        "queryOnly": true,
+        "sql": "SELECT o.id, o.day, o.sku, i.category, o.units, o.revenue_cents,\n      o.cost_cents, o.revenue_cents-o.cost_cents AS margin_cents\n      FROM orders o JOIN inventory i ON i.sku=o.sku\n      WHERE o.revenue_cents<o.cost_cents\n      ORDER BY margin_cents, o.id LIMIT 10"
+      }
+    },
+    "repeatMatches": true
+  }
+}

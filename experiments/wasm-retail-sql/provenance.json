@@ -1,0 +1,11 @@
+{
+  "framework": "0.0.1-beta.65",
+  "wasm": {
+    "package": "sql.js",
+    "version": "1.13.0",
+    "path": "dist/sql-wasm.wasm",
+    "sha256": "0734155c83e493983d1f2ff5b09a4fab6e35a32e9449c7e4e545756439f62d73",
+    "npmIntegrity": "sha512-RJbVP1HRDlUUXahJ7VMTcu9Rm1Nzw+EBpoPr94vnbD4LwR715F3CcxE2G2k45PewcaZ57pjetYa+LoSJLAASgA=="
+  },
+  "dataset": { "version": 1, "seed": 20261112, "orders": 50000, "inventory": 100 }
+}
