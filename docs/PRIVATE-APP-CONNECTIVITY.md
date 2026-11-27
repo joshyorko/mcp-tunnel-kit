@@ -24,7 +24,10 @@ and unprivileged port. Middleware verifies the actual local socket, actual TCP
 peer inside that /24 and exact single Host header. Browser Origin and forwarded
 identity headers are rejected. Config and credential files require absolute
 paths, operator ownership, regular mode-0600 files, no symlinks or hardlinks.
-Credentials load at startup; rotation requires a controlled restart.
+The inbound credential loads at startup; its rotation requires a controlled
+restart. The outbound credential file is reread and checked immediately before
+each upstream request, so atomic issuer renewals need no listener restart.
+Missing or unsafe replacements fail closed without using a cached token.
 
 The config JSON requires `subnet`, `gateway`, `port`, `endpoint`, `read_tools`,
 `inbound_token_file`, and `upstream_token_file`. Supply real values only through
@@ -64,6 +67,26 @@ Operational endpoints, private deployment identities, issuer values and live
 service evidence belong in the owners' private handoff, not this public runbook.
 This candidate proves neither live routing nor installed consumer acceptance.
 
+Use `config/private-app-bridge.example.json` and
+`config/private-app-bridge.service.example` only as operator templates. Each app
+needs a distinct protected credential pair, reviewed read allowlist, listener
+port, provider identity and Executor account selection. Missing protected files
+must keep its unit stopped. Do not substitute placeholder tokens or give one
+app the other app's account. Store Executor-side credentials only through its
+secure account connection flow, with a provider restricted to the exact bridge
+host and port. Never put tokens into app source or tool arguments.
+
+Prepare exact consumer admissions as a separately reviewable deployment delta:
+the existing private bridge interface, consumer source, gateway destination and
+only that authenticated listener's TCP port. Preserve the default deny policy
+and every existing rule. Add only that listener's exact HTTP origin to Executor's
+origin allowlist; verify the required restart with the deployment owner first.
+Never admit raw upstream forwarding ports. Before installing admissions, qualify
+the listener with synthetic credentials and a synthetic upstream: no auth/wrong
+app auth rejects, wrong Host/Origin/peer rejects, discovery filters to the exact
+read set, a safe synthetic read succeeds and denied calls never reach upstream.
+This credential-free preparation is not live app readiness or registration.
+
 Existing Tailscale connectivity can provide the encrypted transport without
 reviving a coding service. Peer visibility or SSH reachability alone does not
 expose an app bound to remote loopback. Where an approved SSH endpoint already
@@ -85,7 +108,7 @@ Run with the repository-pinned `aiohttp==3.14.4`:
 python -m unittest discover -s tests -p test_private_app_bridge.py -v
 ```
 
-Thirteen tests cover initialization, notifications, allowed reads, filtered
+Tests cover initialization, notifications, allowed reads, filtered
 discovery, unauthorized/write rejection before upstream access, separate auth,
 cookie/header isolation, redirect/error/SSE refusal, size/time limits, private
 file loading, foreground socket binding and real TCP negative peer/local-bind/
@@ -93,3 +116,5 @@ Host/forwarded-header checks. Duplicate Host is sent on the wire because HTTP
 clients can normalize it. Address policy alone is substituted for loopback tests;
 production policy independently rejects loopback, public/wildcard/non-gateway
 binds, broad subnets and privileged ports. Live gateway binding is not claimed.
+Atomic outbound-token replacement and missing/unsafe replacement refusal are
+also verified without real credentials or an issuer.

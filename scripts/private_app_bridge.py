@@ -60,7 +60,8 @@ def private_endpoint(endpoint):
     return url
 
 
-def create_app(endpoint, inbound_token, upstream_token, read_tools, *, subnet, gateway, port):
+def create_app(endpoint, inbound_token, upstream_token, read_tools, *, subnet, gateway, port,
+               upstream_token_file=None):
     """Create one app; tokens are operator supplied, never read from requests.
 
     Use a distinct instance and credential pair for each upstream app. The owner
@@ -128,7 +129,13 @@ def create_app(endpoint, inbound_token, upstream_token, read_tools, *, subnet, g
                 raise ValueError()
             if method == 'tools/call' and params.get('name') not in tools:
                 return web.json_response({'error': 'Tool outside read scope'}, status=403)
-            headers = {'Authorization': 'Bearer ' + upstream_token,
+            # Atomic issuer replacement is consumed without retaining a stale token.
+            token = (private_file(upstream_token_file).strip()
+                     if upstream_token_file is not None else upstream_token)
+            if (len(token) < 32 or not token.isascii() or any(c.isspace() for c in token)
+                    or hmac.compare_digest(token, inbound_token)):
+                raise ValueError()
+            headers = {'Authorization': 'Bearer ' + token,
                        'Accept': 'application/json, text/event-stream'}
             protocol = request.headers.get('MCP-Protocol-Version')
             if protocol:
@@ -156,7 +163,7 @@ def create_app(endpoint, inbound_token, upstream_token, read_tools, *, subnet, g
                         raise ValueError()
                     result['result']['tools'] = [t for t in catalog if t.get('name') in tools]
                 return web.json_response(result, headers={'Cache-Control': 'no-store'})
-        except (ValueError, TypeError, ClientError, TimeoutError):
+        except (ValueError, TypeError, OSError, ClientError, TimeoutError):
             return web.json_response({'error': 'Private MCP request failed; details omitted'}, status=502)
 
     app.cleanup_ctx.append(lifecycle)
@@ -176,7 +183,8 @@ def main():
         network, gateway, port = listener_policy(config['subnet'], config['gateway'], config['port'])
         app = create_app(config['endpoint'], private_file(config['inbound_token_file']).strip(),
                          private_file(config['upstream_token_file']).strip(), config['read_tools'],
-                         subnet=str(network), gateway=gateway, port=port)
+                         subnet=str(network), gateway=gateway, port=port,
+                         upstream_token_file=config['upstream_token_file'])
         listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         listener.bind((gateway, port))
         listener.listen(128)
