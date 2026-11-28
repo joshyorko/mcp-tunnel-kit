@@ -1,0 +1,138 @@
+{
+  "date": "2026-11-27",
+  "executor_version": "2.0.0-beta.79",
+  "executor_index_digest": "sha256:a985a591b8e29997a23b37136bcafa12b36ce3ebee5a012778e7e727864d19eb",
+  "platform": "linux/amd64",
+  "client_image": "python@sha256:c5ba3deef00c7758561a0f03c26f44f10589263d40e732b8748e0d1f38f6dd89",
+  "app_sdk": "0.0.1-beta.148",
+  "isolation": {
+    "state": "fresh tmpfs; synthetic users, accounts, apps and grants only",
+    "production_mounts": false,
+    "published_ports": false,
+    "listener": "container loopback only",
+    "client": "ephemeral container sharing only fixture network namespace",
+    "dependency_downloads": "dedicated temporary Docker bridge; no existing network changed"
+  },
+  "passed": {
+    "official_pkce_registration_consent_and_token_exchange": true,
+    "exact_account_target_read": true,
+    "exact_fixture_catalog": [
+      "who",
+      "touch"
+    ],
+    "excluded_tool_denied": true,
+    "changed_link_to_ungranted_account_denied": true,
+    "second_invited_member_consent_status": 403,
+    "second_member_authorization_code_issued": false,
+    "browser_mutation_pause": true,
+    "anonymous_browser_review_denied": true,
+    "owner_approval_and_same_program_resume": true,
+    "declared_excluded_event_refusal_code": -32012,
+    "event_protocol": "2026-07-28",
+    "executor_management_reads_with_selected_account_target": [
+      "context.get",
+      "organization.inventory"
+    ]
+  },
+  "limits": [
+    "Does not prove production catalog or deployment compatibility",
+    "Generic executor.app_event remains advertised; actual excluded subscription was denied",
+    "Direct use of the MCP OAuth token on the management HTTP API returned 401; management reads succeeded through the Executor app's existing synthetic service account",
+    "Malformed event requests and initial test-client decoding failures are not counted as authorization proof",
+    "Natural access-token expiry was not completed; it is not inferred from revocation",
+    "Only listed synthetic management operations are qualified, not every management mutation",
+    "Dot discovery/consent, protected refresh ownership, reconnect and revocation UX remain unverified; no real connection was created"
+  ],
+  "production_changes": false,
+  "real_credentials_or_restored_state_used": false,
+  "lifecycle_qualification": {
+    "date": "2026-11-27",
+    "refresh": {
+      "same_resource_succeeds": true,
+      "access_token_rotated": true,
+      "refresh_token_rotated": true,
+      "invalid_refresh_status": 400,
+      "invalid_and_missing_access_status": 401
+    },
+    "connection_revocation": {
+      "access_status": 401,
+      "refresh_status": 400,
+      "refresh_error": "invalid_grant"
+    },
+    "natural_expiry": {
+      "reported_lifetime_seconds": 3600,
+      "runtime_verified": false,
+      "wait_stopped": "Stopped at verified client OAuth metadata route blocker; no clock, signed-token or database manipulation"
+    },
+    "minimum_management_operations": [
+      "appManagement.create",
+      "appManagement.source",
+      "appManagement.commit with expected revision",
+      "appManagement.deploy immutable commit",
+      "source revision/files readback"
+    ],
+    "management_identity_retained": true,
+    "unlisted_publish_denied": true,
+    "native_client": {
+      "version": "0.0.15+a390c168ff1b2d14e73a95991c186c6aba3ff5a0",
+      "control_plane": "loopback synthetic fixture only",
+      "oauth_lifecycle_owner": "synthetic caller, not tunnel-client",
+      "refreshed_bearer_forwarded": true,
+      "invalid_and_revoked_bearer_denied": true,
+      "token_values_absent_from_logs": true,
+      "actual_schema_filter": true,
+      "exact_outer_tools": [
+        "execute",
+        "resume",
+        "skills"
+      ],
+      "hidden_tool_rejected": true
+    },
+    "oauth_transport_blocker": {
+      "/.well-known/oauth-protected-resource/mcp": {
+        "upstream": 200,
+        "schema_proxy": 404
+      },
+      "/.well-known/oauth-authorization-server": {
+        "upstream": 200,
+        "schema_proxy": 404
+      }
+    },
+    "real_dot_validation": false
+  },
+  "discovery_candidate": {
+    "status": "uncommitted, off by default; public discovery only",
+    "routes": {
+      "/.well-known/oauth-protected-resource/mcp": [
+        "GET"
+      ],
+      "/.well-known/oauth-authorization-server": [
+        "GET"
+      ]
+    },
+    "policy": "Explicit exact issuer/resource/Host; browser-mode resource; fixed official endpoint paths; no metadata rewriting",
+    "runtime": {
+      "fresh_pinned_upstream": true,
+      "public_resource_and_issuer_identity": true,
+      "metadata_through_candidate": 200,
+      "native_client_version": "0.0.15+a390c168ff1b2d14e73a95991c186c6aba3ff5a0",
+      "native_fake_control_plane_ready": 200,
+      "synthetic_issuer_origin_explicitly_allowed_in_test_client": true,
+      "users_or_app_credentials_or_consent": false
+    },
+    "tests": {
+      "new_discovery_controls": 6,
+      "existing_transport_session_controls": 9,
+      "existing_three_tool_controls": 5,
+      "all_passed": true
+    },
+    "review": "Two independent working-diff findings corrected: require three-tool filter and isolate invalid configuration controls; no final-head review or merge claimed",
+    "candidate_sha256": {
+      "scripts/executor_schema_proxy.py": "32b0b3d1c2232e9ed7e81a0e2f8dd6bbc95c001cf1759a4578acdf5b0d488dcb",
+      "tests/test_executor_oauth_discovery.py": "a3e013649256409744daf2467ae7c0147521f4d7298487b5b39c22899a7d4d3a"
+    },
+    "production_activation": false,
+    "oauth_authorization_token_and_registration_routes_forwarded": false,
+    "real_dot_discovery_consent_or_lifecycle_verified": false
+  }
+}
