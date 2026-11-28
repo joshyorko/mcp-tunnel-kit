@@ -4612,6 +4612,19 @@ def main():
         s=os.fstat(fd)
         if s.st_uid!=os.getuid() or s.st_mode&0o777!=0o600:raise ValueError('Unsafe deployment lock')
         fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB);print('LOCKED',flush=True);sys.stdin.read();return
+    elif action=='executor-inventory':
+        owner, groups, tunnels = inspect()
+        result = {
+            'owner': owner,
+            'tunnel_count': len(tunnels),
+            'services': {
+                name: None if row is None else {
+                    'state': row['State']['Status'],
+                    'health': row['State'].get('Health', {}).get('Status'),
+                }
+                for name, row in groups[owner].items()
+            },
+        }
     elif action=='snapshot':result=snapshot()
     elif action=='status':result=status()
     elif action=='native-drift':result=native_drift(data)

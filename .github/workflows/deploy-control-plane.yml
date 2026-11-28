@@ -6,7 +6,7 @@ on:
         description: Controlled operation (adopt is one-time Compose to Kamal handoff)
         type: choice
         default: preflight
-        options: [onboard-native, remove-native, rename-native, devsy-bridge-path-check, devsy-bridge-path-apply, devsy-scope-rebind-check, devsy-scope-rebind, preflight, status, native-reconcile, devsy-check, devsy-apply, devsy-rollback, devsy-tap-reconcile-check, devsy-tap-reconcile, devsy-tap-rollback-check, devsy-tap-rollback, adopt, cas, deploy, rollback]
+        options: [executor-preflight, onboard-native, remove-native, rename-native, devsy-bridge-path-check, devsy-bridge-path-apply, devsy-scope-rebind-check, devsy-scope-rebind, preflight, status, native-reconcile, devsy-check, devsy-apply, devsy-rollback, devsy-tap-reconcile-check, devsy-tap-reconcile, devsy-tap-rollback-check, devsy-tap-rollback, adopt, cas, deploy, rollback]
         required: true
       native_name:
         description: Existing logical target to remove or rename
