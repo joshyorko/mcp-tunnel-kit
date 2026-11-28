@@ -79,7 +79,10 @@ def validate_manifest(manifest):
             if name in {"cas", "schema_proxy"}
             else {"repository", "digest"}
         )
-        if not _keys(image, fields) or image.get("repository") != repository:
+        allowed = {repository}
+        if name == "executor":
+            allowed.add("ghcr.io/usefulsoftwareco/executor-selfhost:2.0.0-beta.79")
+        if not _keys(image, fields) or image.get("repository") not in allowed:
             _invalid()
         digest = image.get("digest")
         if not isinstance(digest, str) or not re.fullmatch(
@@ -92,7 +95,7 @@ def validate_manifest(manifest):
                 r"[a-f0-9]{40}", revision
             ):
                 _invalid()
-        references[name] = repository + "@" + digest
+        references[name] = image["repository"] + "@" + digest
     return references
 
 

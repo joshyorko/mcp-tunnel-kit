@@ -3348,7 +3348,9 @@ def images(manifest, pull=True, pull_env=None):
     repos={'cas':'ghcr.io/joshyorko/codex-action-server','schema_proxy':'ghcr.io/joshyorko/codex-action-server','executor':'ghcr.io/usefulsoftwareco/executor-selfhost:2.0.0-beta.12','tunnel':'ghcr.io/openai/tunnel-client:v0.0.15'}
     if set(manifest['images'])!=set(repos): raise ValueError('Image set mismatch')
     for name,want in manifest['images'].items():
-        if want['repository']!=repos[name] or not re.fullmatch(r'sha256:[0-9a-f]{64}',want['digest']): raise ValueError('Unapproved image reference')
+        allowed={repos[name]}
+        if name=='executor': allowed.add('ghcr.io/usefulsoftwareco/executor-selfhost:2.0.0-beta.79')
+        if want['repository'] not in allowed or not re.fullmatch(r'sha256:[0-9a-f]{64}',want['digest']): raise ValueError('Unapproved image reference')
     result={}
     pull_env=(pull_env or anonymous_docker_environment()) if pull else None
     for name,want in manifest['images'].items():

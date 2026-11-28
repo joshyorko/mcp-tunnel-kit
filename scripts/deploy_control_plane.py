@@ -1907,6 +1907,10 @@ def execute(args):
                 raise ValueError('Merged CAS qualification promotion evidence is unavailable') from None
             manifest=defaults
             promotion_evidence=_verified_cas_candidate(current['manifest'],manifest,promotion_evidence)
+        elif args.operation=='deploy':
+            manifest={**current['manifest'], 'images':{
+                **current['manifest']['images'], 'executor':defaults['images']['executor'],
+            }}
         else:
             manifest=current['manifest']
         publication=prove_images(manifest,current)

@@ -6,8 +6,8 @@
       "revision": "e5ad00ac5d955b5c07e9747e9ba80e689aca1afd"
     },
     "executor": {
-      "digest": "sha256:89a2b829150d01bc26305f844159ca8064ea8a4ace047490d09b6a3c8bdcf600",
-      "repository": "ghcr.io/usefulsoftwareco/executor-selfhost:2.0.0-beta.12"
+      "digest": "sha256:a985a591b8e29997a23b37136bcafa12b36ce3ebee5a012778e7e727864d19eb",
+      "repository": "ghcr.io/usefulsoftwareco/executor-selfhost:2.0.0-beta.79"
     },
     "schema_proxy": {
       "digest": "sha256:90381e8a04cc9b7bae77cd32b2c8b86fe8be7298877d724107523fc70da65f7f",
